@@ -10,6 +10,7 @@
   "sampling": {
     "default_limit": 10,
     "max_text_length": 300,
+    "deep_analysis": true,
     "exceptions": [
       {
         "table": "patients",

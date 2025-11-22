@@ -10,7 +10,7 @@ if len(sys.argv) < 2:
 input_file = sys.argv[1]
 output_file = input_file.replace('.csv', '.html')
 
-# 1. Read Log File
+# 1. Load Log File
 run_dir = os.path.dirname(os.path.dirname(os.path.abspath(input_file)))
 log_file_path = os.path.join(run_dir, "process.log")
 log_content = "Log file not found."
@@ -18,124 +18,118 @@ if os.path.exists(log_file_path):
     try:
         with open(log_file_path, 'r', encoding='utf-8', errors='replace') as f:
             log_content = f.read()
-    except Exception as e:
-        log_content = f"Error reading log: {e}"
-# Escape HTML for Log
+    except Exception as e: log_content = str(e)
 log_content = log_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# 2. Read CSV Data into Python List of Dicts
-data_rows = []
+# 2. Process CSV Data
+detail_rows = []
+table_stats = {} 
+
 try:
     with open(input_file, 'r', encoding='utf-8', errors='replace') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            # Pre-process logic (Color, Icons) here to keep JS light
+            t_name = row.get('Table', '')
             
-            # Numeric formatting
             try:
                 total = int(row.get('Total_Rows', 0))
                 nulls = int(row.get('Null_Count', 0))
                 null_pct = (nulls / total * 100) if total > 0 else 0
-            except:
-                total, nulls, null_pct = 0, 0, 0
+            except: total, nulls, null_pct = 0, 0, 0
 
-            # Data Type Badge Logic
-            dtype = row.get('DataType', '').lower()
+            if t_name not in table_stats:
+                table_stats[t_name] = {'rows': total, 'cols': 0, 'empty_cols': 0}
+            table_stats[t_name]['cols'] += 1
+            if null_pct == 100:
+                table_stats[t_name]['empty_cols'] += 1
+
             badge_class = "bg-secondary"
+            dtype = row.get('DataType', '').lower()
             if 'char' in dtype: badge_class = "bg-primary"
             elif 'int' in dtype or 'number' in dtype: badge_class = "bg-success"
-            elif 'date' in dtype or 'time' in dtype: badge_class = "bg-info text-dark"
-            dtype_html = f'<span class="badge {badge_class} badge-type">{row.get("DataType", "")}</span>'
-
-            # Key Logic
-            pk_val = row.get('PK', '')
-            fk_val = row.get('FK', '')
-            pk_icon = '<span class="key-icon" title="Primary Key">🔑</span>' if pk_val == 'YES' else ''
-            fk_icon = ''
-            if fk_val and fk_val != '':
-                fk_icon = f'<span class="key-icon" title="FK: {fk_val}">🔗</span><div class="fk-detail">{fk_val}</div>'
-            key_html = f'<div class="text-center">{pk_icon}{fk_icon}</div>'
-
-            # Column Highlight
-            col_name = row.get('Column', '')
-            col_class = ""
-            if pk_val == 'YES': col_class = "pk-col"
-            elif fk_val != '': col_class = "fk-col"
-            col_html = f'<span class="{col_class}">{col_name}</span>'
-
-            # Progress Bar HTML
+            elif 'date' in dtype: badge_class = "bg-info text-dark"
+            
+            pk_icon = '🔑' if row.get('PK') == 'YES' else ''
+            fk_icon = f'🔗 <span class="fk-detail">{row.get("FK","")}</span>' if row.get('FK') else ''
+            
             bar_color = "bg-success"
             if null_pct > 50: bar_color = "bg-warning text-dark"
             if null_pct == 100: bar_color = "bg-danger"
-            progress_html = f"""
-            <div class="progress" style="position:relative">
-                <div class="progress-bar {bar_color}" style="width:{null_pct}%"></div>
-                <span style="position:absolute;width:100%;text-align:center;color:black;font-size:10px;line-height:16px">
-                    {nulls:,} ({null_pct:.0f}%)
-                </span>
-            </div>
-            """
-
-            # Prepare row for JSON (Order matters for DataTables array or use Object)
-            # We will use Object for clarity
-            data_rows.append({
-                "table": row.get('Table', ''),
-                "column": col_html,
-                "type": dtype_html,
-                "key": key_html,
-                "default": f'<span class="default-col">{row.get("Default", "")}</span>',
-                "comment": f'<span class="comment-col">{row.get("Comment", "")}</span>',
-                "rows": f'{total:,}', # Format number string
-                "nulls": progress_html,
-                "maxlen": row.get('Max_Length', ''),
+            
+            detail_rows.append({
+                "table": t_name,
+                "column": f'<span class="{"pk-col" if row.get("PK")=="YES" else ""}">{row.get("Column","")}</span>',
+                "type": f'<span class="badge {badge_class} badge-type">{row.get("DataType","")}</span>',
+                "key": f'{pk_icon} {fk_icon}',
+                "default": f'<span class="default-col">{row.get("Default","")}</span>',
+                "rows": f'{total:,}',
+                "nulls": f'<div class="progress"><div class="progress-bar {bar_color}" style="width:{null_pct}%"></div><span style="position:absolute;width:100%;text-align:center;font-size:10px;color:black">{nulls:,} ({null_pct:.0f}%)</span></div>',
                 "distinct": row.get('Distinct_Values', ''),
-                "sample": f'<div class="sample-data">{row.get("Sample_Values", "")}</div>',
-                "is_warning": (null_pct == 100) # Helper for row styling
+                "min": f'<span class="val-hl">{row.get("Min_Val","")}</span>',
+                "max": f'<span class="val-hl">{row.get("Max_Val","")}</span>',
+                "top5": f'<div class="sample-data" style="max-height:60px">{row.get("Top_5_Values","").replace("|", "<br>")}</div>',
+                "sample": f'<div class="sample-data">{row.get("Sample_Values","")}</div>',
+                "is_warning": (null_pct == 100)
             })
 
+    overview_rows = []
+    for t, stats in table_stats.items():
+        quality = 100 - (stats['empty_cols'] / stats['cols'] * 100) if stats['cols'] > 0 else 0
+        q_color = "text-success"
+        if quality < 80: q_color = "text-warning"
+        if quality < 50: q_color = "text-danger"
+        
+        overview_rows.append({
+            "table": f'<b>{t}</b>',
+            "rows": f'{stats["rows"]:,}',
+            "cols": stats['cols'],
+            "empty": stats['empty_cols'],
+            "quality": f'<b class="{q_color}">{quality:.1f}%</b>'
+        })
+
 except Exception as e:
-    print(f"❌ Error processing CSV: {e}")
+    print(f"Error: {e}")
     sys.exit(1)
 
-# 3. Convert Python List to JSON String
-json_data = json.dumps(data_rows)
+json_detail = json.dumps(detail_rows)
+json_overview = json.dumps(overview_rows)
 
-# 4. Generate HTML using Template
 html_content = f"""
 <!DOCTYPE html>
 <html lang="th">
 <head>
     <meta charset="UTF-8">
     <title>HIS Migration Report</title>
+    
+    <!-- Bootstrap 5 -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/5.3.0/css/bootstrap.min.css">
+    <!-- DataTables Core -->
     <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
+    <!-- DataTables Buttons (For Column Visibility) -->
+    <link rel="stylesheet" href="https://cdn.datatables.net/buttons/2.4.1/css/buttons.bootstrap5.min.css">
+    
     <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600&display=swap" rel="stylesheet">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+    
     <style>
         body {{ font-family: 'Sarabun', sans-serif; background-color: #f8f9fa; padding: 20px; font-size: 14px; }}
         .container-fluid {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.05); }}
         h2 {{ color: #0d6efd; font-weight: 600; margin-bottom: 20px; }}
-        .badge-type {{ font-size: 0.75em; padding: 4px 6px; }}
-        .progress {{ height: 16px; background-color: #e9ecef; }}
-        
-        th {{ resize: horizontal; overflow: auto; min-width: 50px; position: relative; background-color: #f8f9fa !important; }}
-        
-        /* Content Styles */
-        .sample-data {{ font-family: 'Courier New', monospace; font-size: 0.85em; color: #444; white-space: pre-wrap; word-break: break-word; min-width: 300px; max-height: 100px; overflow-y: auto; }}
-        .comment-col {{ font-style: italic; color: #6c757d; font-size: 0.85em; display:block; min-width: 150px; }}
-        .key-icon {{ font-size: 1.2em; margin-right: 2px; cursor: help; }}
-        .pk-col {{ color: #d63384; font-weight: bold; }}
-        .fk-col {{ color: #0d6efd; font-weight: bold; }}
-        .fk-detail {{ font-size: 0.75em; color: #0d6efd; font-family: monospace; white-space: nowrap; }}
-        .default-col {{ font-family: monospace; color: #198754; font-size: 0.85em; word-break: break-all; }}
-        
-        /* Row Styles */
-        tr.warning-row td {{ background-color: #fff5f5 !important; }}
-        table.dataTable tbody td {{ vertical-align: top; }}
-        
-        /* Log Tab */
-        .log-container {{ background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; height: 600px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 13px; }}
         .nav-tabs .nav-link.active {{ font-weight: bold; color: #0d6efd; border-top: 3px solid #0d6efd; }}
+        
+        th {{ background-color: #f8f9fa !important; resize: horizontal; overflow: auto; min-width: 50px; }}
+        .progress {{ height: 16px; background-color: #e9ecef; position: relative; }}
+        .badge-type {{ font-size: 0.75em; }}
+        .sample-data {{ font-family: 'Courier New', monospace; font-size: 0.8em; color: #444; white-space: pre-wrap; min-width: 200px; max-height: 100px; overflow-y: auto; }}
+        .val-hl {{ font-family: monospace; color: #d63384; font-weight: bold; }}
+        .fk-detail {{ font-size: 0.75em; color: #0d6efd; font-family: monospace; }}
+        .log-container {{ background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 5px; height: 600px; overflow-y: auto; font-family: monospace; }}
+        tr.warning-row td {{ background-color: #fff5f5 !important; }}
+        
+        /* Button Customization */
+        div.dt-buttons {{ margin-bottom: 10px; }}
+        button.dt-button.buttons-colvis {{ background-color: #f8f9fa; border: 1px solid #ccc; color: #333; border-radius: 4px; font-size: 0.9em; }}
+        button.dt-button.buttons-colvis:hover {{ background-color: #e2e6ea; }}
+        div.dt-button-collection {{ width: 300px; }}
     </style>
 </head>
 <body>
@@ -146,88 +140,91 @@ html_content = f"""
     </div>
 
     <ul class="nav nav-tabs" id="myTab" role="tablist">
-        <li class="nav-item" role="presentation">
-            <button class="nav-link active" id="report-tab" data-bs-toggle="tab" data-bs-target="#report" type="button">📊 Data Report</button>
-        </li>
-        <li class="nav-item" role="presentation">
-            <button class="nav-link" id="log-tab" data-bs-toggle="tab" data-bs-target="#log" type="button">📝 Process Log</button>
-        </li>
+        <li class="nav-item"><button class="nav-link active" id="overview-tab" data-bs-toggle="tab" data-bs-target="#overview">📋 Overview</button></li>
+        <li class="nav-item"><button class="nav-link" id="detail-tab" data-bs-toggle="tab" data-bs-target="#detail">🔍 Column Detail</button></li>
+        <li class="nav-item"><button class="nav-link" id="log-tab" data-bs-toggle="tab" data-bs-target="#log">📝 Process Log</button></li>
     </ul>
 
-    <div class="tab-content pt-3" id="myTabContent">
-        <!-- Report Tab -->
-        <div class="tab-pane fade show active" id="report" role="tabpanel">
-            <table id="hisTable" class="table table-hover table-bordered" style="width:100%">
+    <div class="tab-content pt-3">
+        <!-- Overview Tab -->
+        <div class="tab-pane fade show active" id="overview">
+            <table id="overviewTable" class="table table-hover table-bordered" style="width:100%">
+                <thead class="table-light"><tr><th>Table Name</th><th>Total Rows</th><th>Columns</th><th>Empty Cols</th><th>Data Quality</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+
+        <!-- Detail Tab -->
+        <div class="tab-pane fade" id="detail">
+            <table id="detailTable" class="table table-hover table-bordered" style="width:100%">
                 <thead class="table-light">
                     <tr>
-                        <th>Table</th>
-                        <th>Column</th>
-                        <th>Type</th>
-                        <th style="width:60px">Key</th>
-                        <th>Default</th>
-                        <th>Comment</th>
-                        <th>Rows</th>
-                        <th>Nulls</th>
-                        <th>Max Len</th>
-                        <th>Distinct</th>
-                        <th>Sample Data</th>
+                        <th>Table</th><th>Column</th><th>Type</th><th>Key</th><th>Default</th>
+                        <th>Rows</th><th>Nulls</th><th>Dist.</th><th>Min</th><th>Max</th>
+                        <th>Top 5 Freq</th><th>Sample</th>
                     </tr>
                 </thead>
-                <tbody>
-                <!-- Data will be injected by JavaScript -->
-                </tbody>
+                <tbody></tbody>
             </table>
         </div>
 
         <!-- Log Tab -->
-        <div class="tab-pane fade" id="log" role="tabpanel">
-            <div class="log-container">
-                <pre>{log_content}</pre>
-            </div>
+        <div class="tab-pane fade" id="log">
+            <div class="log-container"><pre>{log_content}</pre></div>
         </div>
     </div>
 </div>
 
+<!-- JS Libraries -->
 <script src="https://code.jquery.com/jquery-3.7.0.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/twitter-bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
 <script src="https://cdn.datatables.net/1.13.6/js/dataTables.bootstrap5.min.js"></script>
+
+<!-- DataTables Buttons -->
+<script src="https://cdn.datatables.net/buttons/2.4.1/js/dataTables.buttons.min.js"></script>
+<script src="https://cdn.datatables.net/buttons/2.4.1/js/buttons.bootstrap5.min.js"></script>
+<script src="https://cdn.datatables.net/buttons/2.4.1/js/buttons.colVis.min.js"></script>
+
 <script>
-    // Embed Data directly into JS variable (Fast & Single File)
-    const tableData = {json_data};
+    const detailData = {json_detail};
+    const overviewData = {json_overview};
 
     $(document).ready(function() {{
-        var table = $('#hisTable').DataTable({{
-            data: tableData,
+        // Overview Table
+        $('#overviewTable').DataTable({{
+            data: overviewData,
             columns: [
-                {{ data: 'table' }},
-                {{ data: 'column' }},
-                {{ data: 'type' }},
-                {{ data: 'key', className: 'text-center' }},
-                {{ data: 'default' }},
-                {{ data: 'comment' }},
-                {{ data: 'rows', className: 'text-end' }},
-                {{ data: 'nulls' }},
-                {{ data: 'maxlen', className: 'text-end' }},
-                {{ data: 'distinct', className: 'text-end' }},
-                {{ data: 'sample' }}
+                {{ data: 'table' }}, {{ data: 'rows', className: 'text-end' }}, 
+                {{ data: 'cols', className: 'text-end' }}, {{ data: 'empty', className: 'text-end' }}, 
+                {{ data: 'quality', className: 'text-end' }}
             ],
-            createdRow: function(row, data, dataIndex) {{
-                if (data.is_warning) {{
-                    $(row).addClass('warning-row');
-                }}
-            }},
-            pageLength: 25,
-            lengthMenu: [ [10, 25, 50, 100, -1], [10, 25, 50, 100, "All"] ],
-            order: [[ 0, "asc" ]],
-            language: {{ "search": "🔍 Filter:" }},
-            autoWidth: false 
+            pageLength: 15, order: [[ 1, "desc" ]]
         }});
 
-        // Enable Tooltips
-        var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'))
-        var tooltipList = tooltipTriggerList.map(function (tooltipTriggerEl) {{
-          return new bootstrap.Tooltip(tooltipTriggerEl)
-        }})
+        // Detail Table with Column Visibility
+        $('#detailTable').DataTable({{
+            data: detailData,
+            columns: [
+                {{ data: 'table' }}, {{ data: 'column' }}, {{ data: 'type' }}, {{ data: 'key' }}, {{ data: 'default' }},
+                {{ data: 'rows', className: 'text-end' }}, {{ data: 'nulls' }}, {{ data: 'distinct', className: 'text-end' }},
+                {{ data: 'min' }}, {{ data: 'max' }}, {{ data: 'top5' }}, {{ data: 'sample' }}
+            ],
+            dom: 'Bfrtip', // Add Buttons to layout
+            buttons: [
+                {{
+                    extend: 'colvis',
+                    text: '👁️ Show/Hide Columns',
+                    className: 'btn btn-sm btn-outline-primary',
+                    columns: ':not(:first-child)' // Prevent hiding Table Name
+                }},
+                'pageLength'
+            ],
+            createdRow: function(row, data) {{ if(data.is_warning) $(row).addClass('warning-row'); }},
+            pageLength: 25, 
+            lengthMenu: [[25, 50, 100, -1], [25, 50, 100, "All"]],
+            language: {{ "search": "🔍 Filter:" }}
+        }});
     }});
 </script>
 </body>

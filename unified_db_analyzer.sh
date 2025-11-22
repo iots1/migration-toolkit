@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v5.1 - Smart Skip Date Frequency)
+# HIS DATABASE MIGRATION ANALYZER (v6.0 - Data Composition Analysis)
 # Features: 
-#   1. Deep Analysis Toggle (Min/Max/Top 5) via Config
-#   2. **Smart Skip:** Automatically skips 'Top 5 Freq' for Date/Time columns (Performance Boost)
-#   3. Configurable Logic for MySQL/Postgres/MSSQL
-#   4. Enhanced Logging & Progress
+#   1. New Metrics: Empty String ("") count & Zero (0) count
+#   2. Smart Skip Date Frequency
+#   3. Deep Analysis Mode
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -47,8 +46,8 @@ log_activity() {
     echo "[$timestamp] $msg" >> "$LOG_FILE"
 }
 
-# Header CSV
-echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Null_Count,Max_Length,Distinct_Values,Min_Val,Max_Val,Top_5_Values,Sample_Values" > "$REPORT_FILE"
+# Header CSV (Added Empty_Count, Zero_Count)
+echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Null_Count,Empty_Count,Zero_Count,Max_Length,Distinct_Values,Min_Val,Max_Val,Top_5_Values,Sample_Values" > "$REPORT_FILE"
 
 # --- DEPENDENCIES ---
 check_command() {
@@ -113,17 +112,11 @@ get_sample_limit() {
     echo "$DEFAULT_LIMIT"
 }
 
-# Helper: Check if type is Date/Time
 is_date_type() {
     local type=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-    if [[ "$type" =~ "date" ]] || [[ "$type" =~ "time" ]] || [[ "$type" =~ "year" ]]; then
-        echo "true"
-    else
-        echo "false"
-    fi
+    if [[ "$type" =~ "date" ]] || [[ "$type" =~ "time" ]] || [[ "$type" =~ "year" ]]; then echo "true"; else echo "false"; fi
 }
 
-# Progress Bar
 START_TIME=$(date +%s)
 draw_progress() {
     local current=$1; local total=$2; local msg=$3
@@ -142,7 +135,7 @@ echo "   🏥 HIS Database Migration Analyzer    "
 echo "========================================="
 echo "🐚 Shell: Bash $BASH_VERSION"
 echo "🔌 Target: $DB_NAME ($DB_TYPE)"
-echo "🧠 Deep Analysis: $DEEP_ANALYSIS (Smart Skip enabled for Date/Time)"
+echo "🧠 Deep Analysis: $DEEP_ANALYSIS (Smart Skip + Empty/Zero Check)"
 echo "📂 Output: $RUN_DIR"
 echo "-----------------------------------------"
 
@@ -167,7 +160,6 @@ analyze_mysql() {
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
-        log_activity "Processing Table: $TABLE"
         
         COLUMNS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
             SELECT c.COLUMN_NAME, c.DATA_TYPE, IF(c.COLUMN_KEY='PRI', 'YES', '') as IS_PK,
@@ -176,26 +168,30 @@ analyze_mysql() {
             FROM INFORMATION_SCHEMA.COLUMNS c WHERE c.TABLE_SCHEMA = '$DB_NAME' AND c.TABLE_NAME = '$TABLE' ORDER BY c.ORDINAL_POSITION")
         
         echo "$COLUMNS" | while IFS=$'\t' read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
-            # Basic Stats
+            # Stats: Added Empty and Zero Check (Cast to CHAR to avoid errors)
             STATS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
-                SELECT COUNT(*), SUM(IF(\`$COL_NAME\` IS NULL,1,0)), MAX(LENGTH(\`$COL_NAME\`)), COUNT(DISTINCT \`$COL_NAME\`) FROM \`$TABLE\`;")
-            DISTINCT_VAL=$(echo "$STATS" | awk '{print $4}')
+                SELECT 
+                    COUNT(*), 
+                    SUM(IF(\`$COL_NAME\` IS NULL,1,0)),
+                    SUM(IF(CAST(\`$COL_NAME\` AS CHAR) = '', 1, 0)),
+                    SUM(IF(CAST(\`$COL_NAME\` AS CHAR) = '0', 1, 0)),
+                    MAX(LENGTH(\`$COL_NAME\`)), 
+                    COUNT(DISTINCT \`$COL_NAME\`) 
+                FROM \`$TABLE\`;")
+            
+            # Parse Stats (Tab separated)
+            read TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS"
             
             # Deep Analysis
-            MIN_VAL=""
-            MAX_VAL=""
-            TOP_5=""
+            MIN_VAL=""; MAX_VAL=""; TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
-                # Min/Max (Always run, useful for date range)
                 MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
                     SELECT MIN(\`$COL_NAME\`), MAX(\`$COL_NAME\`) FROM \`$TABLE\`;")
                 MIN_VAL=$(echo "$MINMAX" | cut -f1)
                 MAX_VAL=$(echo "$MINMAX" | cut -f2)
                 
-                # Smart Skip: Check if Date/Time type
                 IS_DATE=$(is_date_type "$COL_TYPE")
                 if [ "$IS_DATE" == "false" ]; then
-                    # Run Top 5 only for Non-Date types
                     TOP_5=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
                         SELECT GROUP_CONCAT(CONCAT(val, ' (', cnt, ')') SEPARATOR ' | ') 
                         FROM (SELECT \`$COL_NAME\` as val, COUNT(*) as cnt FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL GROUP BY \`$COL_NAME\` ORDER BY cnt DESC LIMIT 5) x;")
@@ -211,7 +207,6 @@ analyze_mysql() {
                 SELECT GROUP_CONCAT(LEFT(val, $MAX_TEXT_LEN) SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL LIMIT $LIMIT_N) x;")
             
             # Clean & Output
-            STATS_FMT=$(echo "$STATS" | tr '\t' ',')
             CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g' | tr -d '\n')
             CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g')
             CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g')
@@ -220,7 +215,7 @@ analyze_mysql() {
             CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
             CLEAN_FK=$(echo "$FK_REF" | sed 's/NULL//g')
 
-            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$STATS_FMT,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
+            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
         done
     done
     echo ""
@@ -234,7 +229,7 @@ analyze_postgres() {
     check_command "pg_dump" "libpq"
     export PGPASSWORD="$DB_PASS"
 
-    log_activity "Starting DDL Export (pg_dump)..."
+    log_activity "Starting DDL Export..."
     pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -s "$DB_NAME" > "$DDL_FILE" 2>/dev/null
 
     log_activity "Fetching Tables..."
@@ -249,7 +244,6 @@ analyze_postgres() {
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
-        log_activity "Processing Table: $TABLE"
 
         COLUMNS=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "
             SELECT c.column_name, c.data_type,
@@ -259,25 +253,27 @@ analyze_postgres() {
             FROM information_schema.columns c WHERE c.table_schema = 'public' AND c.table_name = '$TABLE' ORDER BY c.ordinal_position")
 
         echo "$COLUMNS" | while IFS="|" read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
-            QUERY_STATS="SELECT COUNT(*), COUNT(*) - COUNT(\"$COL_NAME\"), MAX(LENGTH(CAST(\"$COL_NAME\" AS TEXT))), COUNT(DISTINCT \"$COL_NAME\") FROM \"$TABLE\""
+            # Stats: Added Empty and Zero using FILTER
+            QUERY_STATS="SELECT 
+                COUNT(*), 
+                COUNT(*) - COUNT(\"$COL_NAME\"), 
+                COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = ''),
+                COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = '0'),
+                MAX(LENGTH(CAST(\"$COL_NAME\" AS TEXT))), 
+                COUNT(DISTINCT \"$COL_NAME\") 
+                FROM \"$TABLE\""
+            
             STATS_RESULT=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F"," -c "$QUERY_STATS")
             
-            TOTAL=$(echo $STATS_RESULT | cut -d, -f1)
-            NULLS=$(echo $STATS_RESULT | cut -d, -f2)
-            MAX_LEN=$(echo $STATS_RESULT | cut -d, -f3)
-            DISTINCT_VAL=$(echo $STATS_RESULT | cut -d, -f4)
+            IFS=',' read -r TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS_RESULT"
 
             # Deep Analysis
-            MIN_VAL=""
-            MAX_VAL=""
-            TOP_5=""
+            MIN_VAL=""; MAX_VAL=""; TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
-                # Min/Max (Always run)
                 MINMAX=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "SELECT MIN(\"$COL_NAME\"::text), MAX(\"$COL_NAME\"::text) FROM \"$TABLE\"")
                 MIN_VAL=$(echo "$MINMAX" | cut -d'|' -f1)
                 MAX_VAL=$(echo "$MINMAX" | cut -d'|' -f2)
                 
-                # Smart Skip: Check if Date/Time type
                 IS_DATE=$(is_date_type "$COL_TYPE")
                 if [ "$IS_DATE" == "false" ]; then
                     TOP_5=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "
@@ -303,7 +299,7 @@ analyze_postgres() {
             CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g')
             CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
 
-            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$NULLS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
+            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
         done
     done
     unset PGPASSWORD
@@ -311,11 +307,12 @@ analyze_postgres() {
 }
 
 # ==============================================================================
-# 3. MSSQL Logic (Same pattern applied)
+# 3. MSSQL Logic (Simplified for compatibility)
 # ==============================================================================
 analyze_mssql() {
     check_command "sqlcmd"
-    log_activity "MSSQL Analysis not fully implemented for Deep Analysis yet in this version."
+    log_activity "MSSQL Analysis for Empty/Zero not fully implemented in this version."
+    # Note: MSSQL requires complex dynamic SQL. Skipping for brevity.
 }
 
 # --- MAIN ---

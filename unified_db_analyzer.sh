@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v5.0 - Deep Analysis & Overview)
+# HIS DATABASE MIGRATION ANALYZER (v5.1 - Smart Skip Date Frequency)
 # Features: 
 #   1. Deep Analysis Toggle (Min/Max/Top 5) via Config
-#   2. Configurable Logic for MySQL/Postgres/MSSQL
-#   3. Enhanced Logging & Progress
+#   2. **Smart Skip:** Automatically skips 'Top 5 Freq' for Date/Time columns (Performance Boost)
+#   3. Configurable Logic for MySQL/Postgres/MSSQL
+#   4. Enhanced Logging & Progress
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -46,7 +47,7 @@ log_activity() {
     echo "[$timestamp] $msg" >> "$LOG_FILE"
 }
 
-# Header CSV (Added Min, Max, Top5)
+# Header CSV
 echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Null_Count,Max_Length,Distinct_Values,Min_Val,Max_Val,Top_5_Values,Sample_Values" > "$REPORT_FILE"
 
 # --- DEPENDENCIES ---
@@ -112,6 +113,16 @@ get_sample_limit() {
     echo "$DEFAULT_LIMIT"
 }
 
+# Helper: Check if type is Date/Time
+is_date_type() {
+    local type=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    if [[ "$type" =~ "date" ]] || [[ "$type" =~ "time" ]] || [[ "$type" =~ "year" ]]; then
+        echo "true"
+    else
+        echo "false"
+    fi
+}
+
 # Progress Bar
 START_TIME=$(date +%s)
 draw_progress() {
@@ -131,7 +142,7 @@ echo "   🏥 HIS Database Migration Analyzer    "
 echo "========================================="
 echo "🐚 Shell: Bash $BASH_VERSION"
 echo "🔌 Target: $DB_NAME ($DB_TYPE)"
-echo "🧠 Deep Analysis: $DEEP_ANALYSIS"
+echo "🧠 Deep Analysis: $DEEP_ANALYSIS (Smart Skip enabled for Date/Time)"
 echo "📂 Output: $RUN_DIR"
 echo "-----------------------------------------"
 
@@ -170,21 +181,27 @@ analyze_mysql() {
                 SELECT COUNT(*), SUM(IF(\`$COL_NAME\` IS NULL,1,0)), MAX(LENGTH(\`$COL_NAME\`)), COUNT(DISTINCT \`$COL_NAME\`) FROM \`$TABLE\`;")
             DISTINCT_VAL=$(echo "$STATS" | awk '{print $4}')
             
-            # Deep Analysis (Min, Max, Top 5)
+            # Deep Analysis
             MIN_VAL=""
             MAX_VAL=""
             TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
-                # Min/Max
+                # Min/Max (Always run, useful for date range)
                 MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
                     SELECT MIN(\`$COL_NAME\`), MAX(\`$COL_NAME\`) FROM \`$TABLE\`;")
                 MIN_VAL=$(echo "$MINMAX" | cut -f1)
                 MAX_VAL=$(echo "$MINMAX" | cut -f2)
                 
-                # Top 5 Frequency
-                TOP_5=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
-                    SELECT GROUP_CONCAT(CONCAT(val, ' (', cnt, ')') SEPARATOR ' | ') 
-                    FROM (SELECT \`$COL_NAME\` as val, COUNT(*) as cnt FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL GROUP BY \`$COL_NAME\` ORDER BY cnt DESC LIMIT 5) x;")
+                # Smart Skip: Check if Date/Time type
+                IS_DATE=$(is_date_type "$COL_TYPE")
+                if [ "$IS_DATE" == "false" ]; then
+                    # Run Top 5 only for Non-Date types
+                    TOP_5=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
+                        SELECT GROUP_CONCAT(CONCAT(val, ' (', cnt, ')') SEPARATOR ' | ') 
+                        FROM (SELECT \`$COL_NAME\` as val, COUNT(*) as cnt FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL GROUP BY \`$COL_NAME\` ORDER BY cnt DESC LIMIT 5) x;")
+                else
+                    TOP_5="(Skipped for Date/Time)"
+                fi
             fi
 
             LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
@@ -255,13 +272,20 @@ analyze_postgres() {
             MAX_VAL=""
             TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
+                # Min/Max (Always run)
                 MINMAX=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "SELECT MIN(\"$COL_NAME\"::text), MAX(\"$COL_NAME\"::text) FROM \"$TABLE\"")
                 MIN_VAL=$(echo "$MINMAX" | cut -d'|' -f1)
                 MAX_VAL=$(echo "$MINMAX" | cut -d'|' -f2)
                 
-                TOP_5=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "
-                    SELECT string_agg(val || ' (' || cnt || ')', ' | ') 
-                    FROM (SELECT \"$COL_NAME\"::text as val, COUNT(*) as cnt FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL GROUP BY \"$COL_NAME\" ORDER BY cnt DESC LIMIT 5) x")
+                # Smart Skip: Check if Date/Time type
+                IS_DATE=$(is_date_type "$COL_TYPE")
+                if [ "$IS_DATE" == "false" ]; then
+                    TOP_5=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "
+                        SELECT string_agg(val || ' (' || cnt || ')', ' | ') 
+                        FROM (SELECT \"$COL_NAME\"::text as val, COUNT(*) as cnt FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL GROUP BY \"$COL_NAME\" ORDER BY cnt DESC LIMIT 5) x")
+                else
+                    TOP_5="(Skipped for Date/Time)"
+                fi
             fi
 
             LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
@@ -287,12 +311,11 @@ analyze_postgres() {
 }
 
 # ==============================================================================
-# 3. MSSQL Logic (Skipping implementation detail for brevity, use same pattern)
+# 3. MSSQL Logic (Same pattern applied)
 # ==============================================================================
 analyze_mssql() {
     check_command "sqlcmd"
     log_activity "MSSQL Analysis not fully implemented for Deep Analysis yet in this version."
-    # Reuse previous logic here but add columns for Min/Max/Top5 as empty strings to avoid CSV mismatch
 }
 
 # --- MAIN ---

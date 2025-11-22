@@ -1,0 +1,26 @@
+{
+  "database": {
+    "type": "postgresql",
+    "host": "localhost",
+    "port": "5432",
+    "name": "mini_his",
+    "user": "",
+    "password": ""
+  },
+  "sampling": {
+    "default_limit": 10,
+    "max_text_length": 300,
+    "exceptions": [
+      {
+        "table": "patients",
+        "column": "note",
+        "limit": 3
+      },
+      {
+        "table": "opd_visits",
+        "column": "symptom",
+        "limit": 5
+      }
+    ]
+  }
+}

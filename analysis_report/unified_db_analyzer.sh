@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v6.8 - Fix MSSQL CSV Output Format)
+# HIS DATABASE MIGRATION ANALYZER (v6.9 - Suppress MSSQL Warnings)
 # Features:
-#   1. **Fix:** Fixed CSV output format - changed SELECT to PRINT statement
-#   2. **Fix:** Fixed @TableSizeMB and @DType variable scope issues in dynamic SQL
-#   3. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
-#   4. **New:** Auto-install support for sqlcmd (mssql-tools18)
-#   5. Table Size (MB) Calculation & Data Composition Analysis
+#   1. **Fix:** Suppressed "Null value eliminated" warnings with SET ANSI_WARNINGS OFF
+#   2. **Fix:** Fixed CSV output format - changed SELECT to PRINT statement
+#   3. **Fix:** Fixed @TableSizeMB and @DType variable scope issues in dynamic SQL
+#   4. **Fix:** Fixed quote escaping using CHAR(34) to avoid bash interpretation
+#   5. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
+#   6. **New:** Auto-install support for sqlcmd (mssql-tools18)
+#   7. Table Size (MB) Calculation & Data Composition Analysis
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -400,6 +402,7 @@ analyze_mssql() {
                 IF @DType NOT IN ('image','text','ntext','binary','geography','geometry','varbinary')
                 BEGIN
                     SET @SQL = N'
+                    SET ANSI_WARNINGS OFF;
                     DECLARE @Total BIGINT, @Nulls BIGINT, @Empties BIGINT, @Zeros BIGINT, @MaxLen INT, @Dist BIGINT;
                     DECLARE @MinVal NVARCHAR(MAX), @MaxVal NVARCHAR(MAX), @Top5 NVARCHAR(MAX), @Sample NVARCHAR(MAX);
                     DECLARE @TblSizeMB DECIMAL(10,2) = ' + CAST(@TableSizeMB AS VARCHAR) + ';

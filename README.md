@@ -48,7 +48,7 @@ pip install \-r requirements.txt
 
 รันคำสั่งเพื่อเปิดหน้า Dashboard:
 
-python3 -m streamlit run app.py
+python3 -m streamlit run app.py --server.runOnSave true
 
 _ระบบจะเปิด Browser ไปที่ http://localhost:8501 อัตโนมัติ_
 

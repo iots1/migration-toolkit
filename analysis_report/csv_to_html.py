@@ -224,7 +224,7 @@ html_content = f"""
             <div class="text-muted small mt-1">Analyzed Source: {os.path.basename(input_file)}</div>
         </div>
         <div class="text-end">
-            <span class="badge bg-primary rounded-pill p-2">v6.8 Stable</span>
+            <span class="badge bg-primary rounded-pill p-2">v7.1 Stable</span>
         </div>
     </div>
 
@@ -278,6 +278,13 @@ html_content = f"""
                         </ul>
                         <hr>
                         <strong>Table Health Score:</strong> ค่าเฉลี่ยของคะแนนทุกคอลัมน์ในตารางนั้น
+                        <hr>
+                        <strong>🎯 Smart Sample Data (v7.1+):</strong>
+                        <ul>
+                            <li>ตัวอย่างข้อมูล (Sample) จะแสดงเฉพาะค่าที่ <code>NOT NULL</code> และ <code>NOT EMPTY</code></li>
+                            <li>ช่วยให้เห็นข้อมูลที่มีความหมายจริง ไม่แสดงค่าว่างหรือ NULL</li>
+                            <li>ใช้กับทุก Database: MySQL, PostgreSQL, MSSQL</li>
+                        </ul>
                     </div>
                 </div>
                 <div class="col-md-6">

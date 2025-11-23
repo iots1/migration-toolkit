@@ -367,16 +367,81 @@ analyze_postgres() {
 # ==============================================================================
 analyze_mssql() {
     check_command "sqlcmd" "mssql-tools18"
-    
-    if command -v mssql-scripter &> /dev/null; then
-        log_activity "Starting DDL Export..."
-        mssql-scripter -S "$DB_HOST,$DB_PORT" -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" --schema-and-data schema --file-path "$DDL_FILE" > /dev/null
-    else
-        log_activity "mssql-scripter not found. Skipping DDL."
-    fi
 
     # Default schema to 'dbo' if not specified
     [ -z "$DB_SCHEMA" ] && DB_SCHEMA="dbo"
+
+    log_activity "Starting DDL Export using sqlcmd..."
+
+    # Generate DDL using sqlcmd with T-SQL query
+    sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "
+SET NOCOUNT ON;
+SET QUOTED_IDENTIFIER ON;
+
+PRINT '-- ============================================================';
+PRINT '-- MSSQL Schema Export for Database: $DB_NAME';
+PRINT '-- Schema: $DB_SCHEMA';
+PRINT '-- Generated: ' + CONVERT(VARCHAR, GETDATE(), 120);
+PRINT '-- ============================================================';
+PRINT '';
+
+DECLARE @SchemaName NVARCHAR(128) = '$DB_SCHEMA';
+DECLARE @TableName NVARCHAR(255);
+DECLARE @ColumnDef NVARCHAR(MAX);
+
+DECLARE table_cursor CURSOR FOR
+SELECT TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = @SchemaName AND TABLE_TYPE = 'BASE TABLE'
+ORDER BY TABLE_NAME;
+
+OPEN table_cursor;
+FETCH NEXT FROM table_cursor INTO @TableName;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    PRINT '-- Table: ' + @SchemaName + '.' + @TableName;
+    PRINT 'CREATE TABLE [' + @SchemaName + '].[' + @TableName + '] (';
+
+    -- Build column definitions using FOR XML PATH
+    SELECT @ColumnDef = STUFF((
+        SELECT ',' + CHAR(13) + CHAR(10) +
+            '    [' + c.COLUMN_NAME + '] ' +
+            c.DATA_TYPE +
+            CASE
+                WHEN c.CHARACTER_MAXIMUM_LENGTH IS NOT NULL AND c.CHARACTER_MAXIMUM_LENGTH > 0
+                    THEN '(' + CAST(c.CHARACTER_MAXIMUM_LENGTH AS VARCHAR) + ')'
+                WHEN c.CHARACTER_MAXIMUM_LENGTH = -1
+                    THEN '(MAX)'
+                WHEN c.DATA_TYPE IN ('decimal', 'numeric')
+                    THEN '(' + CAST(c.NUMERIC_PRECISION AS VARCHAR) + ',' + CAST(c.NUMERIC_SCALE AS VARCHAR) + ')'
+                ELSE ''
+            END +
+            CASE WHEN c.IS_NULLABLE = 'NO' THEN ' NOT NULL' ELSE ' NULL' END +
+            CASE WHEN c.COLUMN_DEFAULT IS NOT NULL THEN ' DEFAULT ' + c.COLUMN_DEFAULT ELSE '' END
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        WHERE c.TABLE_SCHEMA = @SchemaName AND c.TABLE_NAME = @TableName
+        ORDER BY c.ORDINAL_POSITION
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 3, '');
+
+    -- Print column definitions
+    PRINT @ColumnDef;
+    PRINT ');';
+    PRINT '';
+
+    FETCH NEXT FROM table_cursor INTO @TableName;
+END
+
+CLOSE table_cursor;
+DEALLOCATE table_cursor;
+" > "$DDL_FILE" 2>/dev/null
+
+    if [ -s "$DDL_FILE" ]; then
+        log_activity "DDL Export completed successfully"
+    else
+        log_activity "DDL Export failed or produced no output"
+    fi
 
     log_activity "Fetching Tables from schema: $DB_SCHEMA..."
 

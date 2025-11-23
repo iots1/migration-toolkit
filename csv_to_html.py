@@ -58,7 +58,6 @@ try:
             try: zeros = int(row.get('Zero_Count', 0))
             except: zeros = 0
 
-            # Data Composition Logic
             bad_data_count = nulls + empties + zeros
             valid_data_count = total - bad_data_count
             
@@ -96,9 +95,8 @@ try:
                 ref_table = fk_raw.replace('-> ', '').split('.')[0].strip().replace('"', '')
                 fk_icon = f'<a href="#" onclick="showDDL(\'{ref_table}\'); return false;" class="text-decoration-none">🔗 <span class="fk-detail">{fk_raw}</span></a>'
             
-            # --- NEW: 4-Bar Layout ---
+            # 4-Bar Stacked Layout
             def create_mini_bar(label, pct, color_class, count):
-                # Only show bar if percentage > 0 to keep it clean, or show faint background
                 opacity = "1" if count > 0 else "0.3"
                 return f'''
                 <div class="d-flex align-items-center" style="margin-bottom:2px; font-size:0.75em; opacity:{opacity}">
@@ -186,7 +184,7 @@ html_content = f"""
         .sample-data {{ font-family: 'Courier New', monospace; font-size: 0.85em; color: #444; white-space: pre-wrap; min-width: 200px; max-height: 100px; overflow-y: auto; }}
         .val-hl {{ font-family: monospace; color: #d63384; font-weight: bold; }}
         .fk-detail {{ font-size: 0.8em; color: #0d6efd; font-family: monospace; }}
-        tr.warning-row td {{ background-color: #fff9e6 !important; }} /* Softer Yellow */
+        tr.warning-row td {{ background-color: #fff9e6 !important; }} 
         
         /* Buttons */
         .dt-buttons .btn-group {{ display: flex; flex-wrap: wrap; gap: 5px; }}
@@ -252,13 +250,45 @@ html_content = f"""
         <div class="tab-pane fade" id="doc">
             <div class="row">
                 <div class="col-md-6">
-                    <h4>Data Composition Legend</h4>
+                    <h4>1. สูตรคำนวณ Data Quality (Formulas)</h4>
+                    <div class="doc-card">
+                        <strong>Column Completeness Score:</strong> คำนวณจากสัดส่วนข้อมูลที่สมบูรณ์ในแต่ละคอลัมน์
+                        <br><br>
+                        $$ Score = \\frac{{Total - (Null + Empty + Zero)}}{{Total}} \\times 100 $$
+                        <br>
+                        <ul>
+                            <li><span class="text-success">100%</span> : ข้อมูลสมบูรณ์ (ไม่มี Null, ว่าง, หรือ 0)</li>
+                            <li><span class="text-warning">< 100%</span> : มีข้อมูลที่ไม่สมบูรณ์ปนอยู่</li>
+                        </ul>
+                        <hr>
+                        <strong>Table Health Score:</strong> ค่าเฉลี่ยของคะแนนทุกคอลัมน์ในตารางนั้น
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <h4>2. การวิเคราะห์เพื่อการ Migrate (Analysis Strategy)</h4>
                     <div class="card p-3">
+                        <p>ใช้ข้อมูลจาก Report นี้เพื่อจัดกลุ่มความยากง่ายในการย้ายข้อมูล:</p>
                         <ul class="list-unstyled">
-                            <li class="mb-2"><span class="color-box bg-success"></span> <b>Valid Data:</b> ข้อมูลปกติ</li>
-                            <li class="mb-2"><span class="color-box bg-secondary"></span> <b>Null:</b> ค่า NULL</li>
-                            <li class="mb-2"><span class="color-box bg-danger"></span> <b>Empty String:</b> ค่าสตริงว่าง ("")</li>
-                            <li class="mb-2"><span class="color-box bg-warning"></span> <b>Zero:</b> ค่าเลข 0</li>
+                            <li class="mb-3">
+                                <span class="badge bg-success">🟢 Group A: Direct Move</span><br>
+                                <b>ลักษณะ:</b> Quality > 95%, Type ถูกต้อง<br>
+                                <b>Action:</b> ย้ายข้อมูลได้โดยตรง (1-1 Mapping)
+                            </li>
+                            <li class="mb-3">
+                                <span class="badge bg-warning text-dark">🟡 Group B: Transformation Needed</span><br>
+                                <b>ลักษณะ:</b> มี Empty String/Zero ในฟิลด์สำคัญ<br>
+                                <b>Action:</b> ต้องเขียน ETL Script เพื่อแปลงค่า (เช่น แปลง <code>""</code> เป็น <code>NULL</code>)
+                            </li>
+                            <li class="mb-3">
+                                <span class="badge bg-info text-dark">🔵 Group C: Mapping Required</span><br>
+                                <b>ลักษณะ:</b> Top 5 Values แสดงค่าที่ไม่เป็นมาตรฐาน (เช่น M, Male, ชาย)<br>
+                                <b>Action:</b> สร้าง Dictionary หรือ Mapping Table เพื่อปรับให้เป็นมาตรฐานเดียว
+                            </li>
+                            <li>
+                                <span class="badge bg-danger">🔴 Group D: Review / Drop</span><br>
+                                <b>ลักษณะ:</b> Quality ต่ำมาก หรือเป็น Empty Column (100% Null)<br>
+                                <b>Action:</b> พิจารณาตัดทิ้ง ไม่นำเข้าระบบใหม่
+                            </li>
                         </ul>
                     </div>
                 </div>

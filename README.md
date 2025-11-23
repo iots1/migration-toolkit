@@ -118,6 +118,46 @@ python3 -m streamlit run app.py
 
 ## 🔄 Workflow การทำงาน
 
+```mermaid
+flowchart TD
+    A[📝 เตรียม config.json] --> B{เลือก Database Type}
+    B -->|MySQL| C1[MySQL Client]
+    B -->|PostgreSQL| C2[PostgreSQL Client]
+    B -->|MSSQL| C3[MSSQL Client + SSL]
+
+    C1 --> D[🔍 unified_db_analyzer.sh]
+    C2 --> D
+    C3 --> D
+
+    D --> E{ตรวจสอบ Dependencies}
+    E -->|ไม่มี| F[🔧 Auto-Install via Homebrew]
+    E -->|มีแล้ว| G
+    F --> G[⚙️ เริ่มวิเคราะห์]
+
+    G --> H1[📊 Table Size & Row Count]
+    G --> H2[🔎 Column Profiling]
+    G --> H3[📋 DDL Export]
+
+    H2 --> I{Deep Analysis?}
+    I -->|true| J[📈 Min/Max/Top5/Composition]
+    I -->|false| K[Basic Stats Only]
+
+    J --> L[🎯 Smart Sample<br/>NOT NULL & NOT EMPTY]
+    K --> L
+
+    L --> M[💾 Export to CSV]
+    M --> N[🌐 Generate HTML Report]
+    N --> O[📂 migration_report/YYYYMMDD_HHMM/]
+
+    O --> P[🖥️ Open in Streamlit Dashboard]
+    P --> Q[🗺️ Schema Mapping & Config Generation]
+
+    style D fill:#4CAF50,color:#fff
+    style L fill:#FF9800,color:#fff
+    style O fill:#2196F3,color:#fff
+    style Q fill:#9C27B0,color:#fff
+```
+
 ### **Step 1: วิเคราะห์ข้อมูล (Analyze Database)**
 
 แก้ไข `analysis_report/config.json` แล้วรัน:
@@ -154,20 +194,44 @@ cd analysis_report
 
 ### 🚀 **Interactive DDL Explorer**
 
-- คลิกชื่อตารางเพื่อดู SQL Create Table แบบทันที\
+- คลิกชื่อตารางเพื่อดู SQL Create Table แบบทันที
 - คลิก FK เพื่อ Jump ไปตารางที่เกี่ยวข้อง
 
 ### 🧠 **Deep Analysis Mode**
 
-- Row Count\
-- Null / Distinct\
-- Min/Max\
-- Top 5 Frequency\
+- Row Count
+- Null / Distinct
+- Min/Max (รองรับทุกประเภทข้อมูล ยกเว้น bit/boolean)
+- Top 5 Frequency
 - Data Composition แยก Valid / Null / Empty / Zero
 
-### 🛡️ Auto-Environment Guard
+### 🗂️ **Schema Support (v7.0+)**
+
+- รองรับการระบุ Schema สำหรับ PostgreSQL และ MSSQL
+- ค่าเริ่มต้น: `public` (PostgreSQL), `dbo` (MSSQL)
+- กำหนดได้ใน `config.json`:
+  ```json
+  {
+    "database": {
+      "schema": "your_schema_name",
+      ...
+    }
+  }
+  ```
+
+### 🎯 **Smart Sample Data**
+
+- กรองเฉพาะข้อมูลที่ **NOT NULL** และ **NOT EMPTY**
+- แสดงตัวอย่างข้อมูลที่มีความหมาย ไม่แสดงค่าว่าง
+
+### 🛡️ **Auto-Environment Guard**
 
 สลับไปใช้ Bash เวอร์ชันใหม่บน macOS อัตโนมัติ
+
+### 🔧 **Auto-Dependency Installation**
+
+- ตรวจสอบและติดตั้ง Database Clients อัตโนมัติผ่าน Homebrew
+- รองรับ: `mysql-client`, `libpq` (PostgreSQL), `mssql-tools18`
 
 ---
 

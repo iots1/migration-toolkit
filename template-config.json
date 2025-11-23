@@ -5,7 +5,8 @@
     "port": "5432",
     "name": "mini_his",
     "user": "",
-    "password": ""
+    "password": "",
+    "tables": []
   },
   "sampling": {
     "default_limit": 10,

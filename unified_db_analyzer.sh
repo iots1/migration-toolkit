@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v6.3 - Table Size Analysis)
+# HIS DATABASE MIGRATION ANALYZER (v6.4 - Full MSSQL Support)
 # Features: 
-#   1. **New:** Table Size (MB) Calculation for Overview
-#   2. Selective Tables
-#   3. Data Composition Analysis (Empty/Zero)
+#   1. MSSQL Analysis Implemented (Size, Empty/Zero, Deep Analysis)
+#   2. Table Size (MB) Calculation
+#   3. Selective Tables
+#   4. Data Composition Analysis
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -46,7 +47,7 @@ log_activity() {
     echo "[$timestamp] $msg" >> "$LOG_FILE"
 }
 
-# Header CSV (Added Table_Size_MB)
+# Header CSV
 echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Table_Size_MB,Null_Count,Empty_Count,Zero_Count,Max_Length,Distinct_Values,Min_Val,Max_Val,Top_5_Values,Sample_Values" > "$REPORT_FILE"
 
 # --- DEPENDENCIES ---
@@ -174,7 +175,6 @@ analyze_mysql() {
             SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) 
             FROM information_schema.TABLES 
             WHERE TABLE_SCHEMA = '$DB_NAME' AND TABLE_NAME = '$TABLE';")
-        # If size is empty/null, default to 0
         [ -z "$TBL_SIZE" ] && TBL_SIZE="0"
 
         COLUMNS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
@@ -288,9 +288,146 @@ analyze_postgres() {
 }
 
 # ==============================================================================
-# 3. MSSQL Logic
+# 3. MSSQL Logic (Fully Implemented)
 # ==============================================================================
-analyze_mssql() { check_command "sqlcmd"; log_activity "MSSQL Analysis not fully implemented."; }
+analyze_mssql() {
+    check_command "sqlcmd"
+    if command -v mssql-scripter &> /dev/null; then
+        log_activity "Starting DDL Export..."
+        mssql-scripter -S "$DB_HOST,$DB_PORT" -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" --schema-and-data schema --file-path "$DDL_FILE" > /dev/null
+    else
+        log_activity "mssql-scripter not found. Skipping DDL."
+    fi
+
+    log_activity "Fetching Tables..."
+    
+    if [ -n "$SELECTED_TABLES_STR" ]; then
+        # Convert space-separated to array
+        TABLES_ARRAY=($SELECTED_TABLES_STR)
+    else
+        # Fetch all tables via sqlcmd
+        # -h-1 to hide header, -W to trim trailing spaces
+        RAW_TABLES=$(sqlcmd -S "$DB_HOST,$DB_PORT" -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.tables WHERE type='U' ORDER BY name")
+        # Parse into array (handle newlines)
+        IFS=$'\n' read -rd '' -a TABLES_ARRAY <<< "$RAW_TABLES"
+    fi
+    
+    TOTAL_TABLES=${#TABLES_ARRAY[@]}
+    CURRENT_IDX=0; START_TIME=$(date +%s)
+
+    for TABLE in "${TABLES_ARRAY[@]}"; do
+        ((CURRENT_IDX++))
+        # Trim whitespace
+        TABLE=$(echo "$TABLE" | xargs)
+        if [ -z "$TABLE" ]; then continue; fi
+        
+        draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
+        log_activity "Processing Table: $TABLE"
+
+        # Construct Dynamic T-SQL for this specific table
+        # This avoids connection overhead per column while allowing progress bar per table
+        TSQL="
+        SET NOCOUNT ON;
+        DECLARE @TName NVARCHAR(255) = '$TABLE';
+        DECLARE @CName NVARCHAR(255), @DType NVARCHAR(100), @SQL NVARCHAR(MAX);
+        DECLARE @PK NVARCHAR(10), @FK NVARCHAR(255), @Def NVARCHAR(MAX), @Comm NVARCHAR(MAX);
+        DECLARE @DefaultLimit INT = $DEFAULT_LIMIT;
+        DECLARE @MaxTextLen INT = $MAX_TEXT_LEN;
+        DECLARE @DeepAnalysis VARCHAR(5) = '$DEEP_ANALYSIS';
+        
+        -- Get Table Size (MB)
+        DECLARE @TableSizeMB DECIMAL(10,2);
+        SELECT @TableSizeMB = CAST(SUM(used_page_count) * 8.0 / 1024 AS DECIMAL(10,2))
+        FROM sys.dm_db_partition_stats
+        WHERE object_id = OBJECT_ID(@TName);
+        SET @TableSizeMB = ISNULL(@TableSizeMB, 0);
+
+        DECLARE cur CURSOR FOR 
+            SELECT c.name, ty.name,
+                CASE WHEN EXISTS(SELECT 1 FROM sys.indexes i JOIN sys.index_columns ic ON i.object_id=ic.object_id AND i.index_id=ic.index_id WHERE i.is_primary_key=1 AND ic.object_id=t.object_id AND ic.column_id=c.column_id) THEN 'YES' ELSE '' END,
+                ISNULL((SELECT TOP 1 '-> ' + OBJECT_NAME(fkc.referenced_object_id) + '.' + COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) FROM sys.foreign_key_columns fkc WHERE fkc.parent_object_id=t.object_id AND fkc.parent_column_id=c.column_id), ''),
+                ISNULL(object_definition(c.default_object_id), ''), ISNULL(CAST(ep.value AS NVARCHAR(MAX)), '')
+            FROM sys.tables t 
+            JOIN sys.columns c ON t.object_id = c.object_id 
+            JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+            LEFT JOIN sys.extended_properties ep ON ep.major_id = t.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
+            WHERE t.name = @TName
+            ORDER BY c.column_id;
+
+        OPEN cur;
+        FETCH NEXT FROM cur INTO @CName, @DType, @PK, @FK, @Def, @Comm;
+        
+        WHILE @@FETCH_STATUS = 0
+        BEGIN
+            BEGIN TRY
+                IF @DType NOT IN ('image','text','ntext','binary','geography','geometry','varbinary')
+                BEGIN
+                    SET @SQL = N'
+                    DECLARE @Total BIGINT, @Nulls BIGINT, @Empties BIGINT, @Zeros BIGINT, @MaxLen INT, @Dist BIGINT;
+                    DECLARE @MinVal NVARCHAR(MAX), @MaxVal NVARCHAR(MAX), @Top5 NVARCHAR(MAX), @Sample NVARCHAR(MAX);
+                    
+                    -- Basic Stats
+                    SELECT 
+                        @Total = COUNT(*),
+                        @Nulls = SUM(CASE WHEN [' + @CName + '] IS NULL THEN 1 ELSE 0 END),
+                        @Empties = SUM(CASE WHEN CAST([' + @CName + '] AS NVARCHAR(MAX)) = '''' THEN 1 ELSE 0 END),
+                        @Zeros = SUM(CASE WHEN CAST([' + @CName + '] AS NVARCHAR(MAX)) = ''0'' THEN 1 ELSE 0 END),
+                        @MaxLen = MAX(LEN([' + @CName + '])),
+                        @Dist = COUNT(DISTINCT [' + @CName + '])
+                    FROM [' + @TName + '];
+
+                    -- Deep Analysis
+                    IF ''' + @DeepAnalysis + ''' = ''true''
+                    BEGIN
+                        SELECT @MinVal = CAST(MIN([' + @CName + ']) AS NVARCHAR(MAX)), @MaxVal = CAST(MAX([' + @CName + ']) AS NVARCHAR(MAX)) FROM [' + @TName + '];
+                        
+                        -- Top 5 (Skip Date types)
+                        IF ''' + @DType + ''' NOT LIKE ''%date%'' AND ''' + @DType + ''' NOT LIKE ''%time%''
+                        BEGIN
+                             SELECT @Top5 = STUFF((SELECT '' | '' + CAST(val AS NVARCHAR(MAX)) + '' ('' + CAST(cnt AS NVARCHAR(MAX)) + '')''
+                             FROM (SELECT TOP 5 CAST([' + @CName + '] AS NVARCHAR(MAX)) as val, COUNT(*) as cnt 
+                                   FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL GROUP BY [' + @CName + '] ORDER BY cnt DESC) x
+                             FOR XML PATH('''')), 1, 3, '''');
+                        END
+                        ELSE SET @Top5 = ''(Skipped for Date/Time)'';
+                    END
+
+                    -- Sample Data (Dynamic Limit)
+                    DECLARE @Limit INT = ' + CAST(@DefaultLimit AS VARCHAR) + ';
+                    -- Check exceptions logic here is tricky in pure SQL, falling back to default or Distinct=1
+                    IF @Dist = 1 SET @Limit = 1;
+                    
+                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), ''\"'', ''\"\"'')
+                    FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
+
+                    -- Final Output
+                    SELECT ''' + @TName + ''',''' + @CName + ''',''' + @DType + ''',''' + @PK + ''',''' + @FK + ''',''' + REPLACE(@Def,'''','''''') + ''',''' + REPLACE(@Comm,'''','''''') + ''',' +
+                           N'CAST(@Total AS VARCHAR) + '','' + CAST(@TableSizeMB AS VARCHAR) + '','' + CAST(@Nulls AS VARCHAR) + '','' + CAST(@Empties AS VARCHAR) + '','' + CAST(@Zeros AS VARCHAR) + '','' +
+                           CASE WHEN @DType LIKE ''%char%'' THEN CAST(ISNULL(@MaxLen,0) AS VARCHAR) ELSE ''0'' END + '','' + CAST(@Dist AS VARCHAR) + '','' +
+                           N''\"'' + ISNULL(REPLACE(@MinVal,''\"'',''\"\"''),'''') + ''\",\"'' + ISNULL(REPLACE(@MaxVal,''\"'',''\"\"''),'''') + ''\",\"'' + ISNULL(@Top5,'''') + ''\",\"'' + ISNULL(@Sample,'''') + ''\"''';
+                    
+                    EXEC(@SQL);
+                END
+                ELSE
+                BEGIN
+                    -- Skip BLOBs
+                    PRINT '$TABLE,' + @CName + ',' + @DType + ',' + @PK + ',' + @FK + ',,,0,' + CAST(@TableSizeMB AS VARCHAR) + ',0,0,0,0,0,\"\",\"\",\"\",\"Skipped BLOB\"';
+                END
+            END TRY
+            BEGIN CATCH
+                PRINT '$TABLE,' + @CName + ',' + @DType + ',ERROR,,,,0,' + CAST(@TableSizeMB AS VARCHAR) + ',0,0,0,0,0,\"\",\"\",\"\",\"Error: ' + REPLACE(ERROR_MESSAGE(), ',', ';') + '\"';
+            END CATCH
+            FETCH NEXT FROM cur INTO @CName, @DType, @PK, @FK, @Def, @Comm;
+        END
+        CLOSE cur; DEALLOCATE cur;
+        "
+        
+        # Run SQLCMD and append to CSV
+        # -h-1: No headers, -W: Remove whitespace, -s ",": Comma separator (handled in T-SQL print mostly)
+        sqlcmd -S "$DB_HOST,$DB_PORT" -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "$TSQL" >> "$REPORT_FILE"
+    done
+    echo ""
+}
 
 # --- MAIN ---
 case $DB_CHOICE in 1) analyze_mysql ;; 2) analyze_postgres ;; 3) analyze_mssql ;; *) log_activity "Invalid"; exit 1 ;; esac

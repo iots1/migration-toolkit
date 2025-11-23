@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v6.6 - Fix MSSQL SSL Error)
-# Features: 
-#   1. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
-#   2. **New:** Auto-install support for sqlcmd (mssql-tools18)
-#   3. Table Size (MB) Calculation & Data Composition Analysis
+# HIS DATABASE MIGRATION ANALYZER (v6.8 - Fix MSSQL CSV Output Format)
+# Features:
+#   1. **Fix:** Fixed CSV output format - changed SELECT to PRINT statement
+#   2. **Fix:** Fixed @TableSizeMB and @DType variable scope issues in dynamic SQL
+#   3. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
+#   4. **New:** Auto-install support for sqlcmd (mssql-tools18)
+#   5. Table Size (MB) Calculation & Data Composition Analysis
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -400,8 +402,9 @@ analyze_mssql() {
                     SET @SQL = N'
                     DECLARE @Total BIGINT, @Nulls BIGINT, @Empties BIGINT, @Zeros BIGINT, @MaxLen INT, @Dist BIGINT;
                     DECLARE @MinVal NVARCHAR(MAX), @MaxVal NVARCHAR(MAX), @Top5 NVARCHAR(MAX), @Sample NVARCHAR(MAX);
-                    
-                    SELECT 
+                    DECLARE @TblSizeMB DECIMAL(10,2) = ' + CAST(@TableSizeMB AS VARCHAR) + ';
+
+                    SELECT
                         @Total = COUNT(*),
                         @Nulls = SUM(CASE WHEN [' + @CName + '] IS NULL THEN 1 ELSE 0 END),
                         @Empties = SUM(CASE WHEN CAST([' + @CName + '] AS NVARCHAR(MAX)) = '''' THEN 1 ELSE 0 END),
@@ -422,14 +425,14 @@ analyze_mssql() {
 
                     DECLARE @Limit INT = ' + CAST(@DefaultLimit AS VARCHAR) + ';
                     IF @Dist = 1 SET @Limit = 1;
-                    
-                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), ''\"'', ''\"\"'') FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
 
-                    SELECT ''' + @TName + ''',''' + @CName + ''',''' + @DType + ''',''' + @PK + ''',''' + @FK + ''',''' + REPLACE(@Def,'''','''''') + ''',''' + REPLACE(@Comm,'''','''''') + ''',' +
-                           N'CAST(@Total AS VARCHAR) + '','' + CAST(@TableSizeMB AS VARCHAR) + '','' + CAST(@Nulls AS VARCHAR) + '','' + CAST(@Empties AS VARCHAR) + '','' + CAST(@Zeros AS VARCHAR) + '','' +
-                           CASE WHEN @DType LIKE ''%char%'' THEN CAST(ISNULL(@MaxLen,0) AS VARCHAR) ELSE ''0'' END + '','' + CAST(@Dist AS VARCHAR) + '','' +
-                           N''\"'' + ISNULL(REPLACE(@MinVal,''\"'',''\"\"''),'''') + ''\",\"'' + ISNULL(REPLACE(@MaxVal,''\"'',''\"\"''),'''') + ''\",\"'' + ISNULL(@Top5,'''') + ''\",\"'' + ISNULL(@Sample,'''') + ''\"''';
-                    
+                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), CHAR(34), CHAR(34) + CHAR(34)) FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
+
+                    PRINT ''' + @TName + ','' + ''' + @CName + ','' + ''' + @DType + ','' + ''' + @PK + ','' + CHAR(34) + REPLACE(REPLACE(''' + REPLACE(@FK,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)), ''NULL'', '''') + CHAR(34) + '','' + CHAR(34) + REPLACE(''' + REPLACE(@Def,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)) + CHAR(34) + '','' + CHAR(34) + REPLACE(''' + REPLACE(@Comm,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)) + CHAR(34) + '','' +
+                          CAST(@Total AS VARCHAR) + '','' + CAST(@TblSizeMB AS VARCHAR) + '','' + CAST(@Nulls AS VARCHAR) + '','' + CAST(@Empties AS VARCHAR) + '','' + CAST(@Zeros AS VARCHAR) + '','' +
+                          ' + CASE WHEN @DType LIKE '%char%' THEN 'CAST(ISNULL(@MaxLen,0) AS VARCHAR)' ELSE '''0''' END + ' + '','' + CAST(@Dist AS VARCHAR) + '','' + CHAR(34) + ISNULL(REPLACE(@MinVal, CHAR(34), CHAR(34) + CHAR(34)), '''') + CHAR(34) + '','' + CHAR(34) + ISNULL(REPLACE(@MaxVal, CHAR(34), CHAR(34) + CHAR(34)), '''') + CHAR(34) + '','' + CHAR(34) + ISNULL(REPLACE(@Top5, CHAR(34), CHAR(34) + CHAR(34)), '''') + CHAR(34) + '','' + CHAR(34) + ISNULL(REPLACE(@Sample, CHAR(34), CHAR(34) + CHAR(34)), '''') + CHAR(34);
+                    ';
+
                     EXEC(@SQL);
                 END
                 ELSE

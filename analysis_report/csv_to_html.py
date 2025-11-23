@@ -16,6 +16,13 @@ base_dir = os.path.dirname(os.path.dirname(os.path.abspath(input_file)))
 log_file_path = os.path.join(base_dir, "process.log")
 ddl_file_path = os.path.join(base_dir, "ddl_schema", "schema.sql")
 
+# --- Helper Function for Safe String ---
+def safe_str(val):
+    """Safely convert to string, handling None"""
+    if val is None:
+        return ""
+    return str(val).strip()
+
 # --- Load Log ---
 log_content = "Log file not found."
 if os.path.exists(log_file_path):
@@ -45,7 +52,12 @@ try:
     with open(input_file, 'r', encoding='utf-8', errors='replace') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            t_name = row.get('Table', '')
+            # FIX: Use safe_str to prevent NoneType error
+            t_name = safe_str(row.get('Table', ''))
+            
+            # Skip invalid rows (e.g. from sqlcmd output messages or empty lines)
+            if not t_name or "changed database context" in t_name.lower():
+                continue
             
             try: total = int(row.get('Total_Rows', 0))
             except: total = 0
@@ -58,6 +70,7 @@ try:
             try: zeros = int(row.get('Zero_Count', 0))
             except: zeros = 0
 
+            # Data Composition Logic
             bad_data_count = nulls + empties + zeros
             valid_data_count = total - bad_data_count
             
@@ -66,6 +79,7 @@ try:
             zero_pct = (zeros / total * 100) if total > 0 else 0
             valid_pct = (valid_data_count / total * 100) if total > 0 else 0
             
+            # Completeness Score
             completeness_score = valid_pct
 
             if t_name not in table_stats:
@@ -83,13 +97,15 @@ try:
                 table_stats[t_name]['empty_cols'] += 1
 
             badge_class = "bg-secondary"
-            dtype = row.get('DataType', '').lower()
+            # FIX: Ensure dtype is a string before .lower()
+            dtype = safe_str(row.get('DataType', '')).lower()
+            
             if 'char' in dtype: badge_class = "bg-primary"
             elif 'int' in dtype or 'number' in dtype: badge_class = "bg-success"
             elif 'date' in dtype: badge_class = "bg-info text-dark"
             
             pk_icon = '🔑' if row.get('PK') == 'YES' else ''
-            fk_raw = row.get("FK","")
+            fk_raw = safe_str(row.get("FK",""))
             fk_icon = ''
             if fk_raw:
                 ref_table = fk_raw.replace('-> ', '').split('.')[0].strip().replace('"', '')
@@ -119,17 +135,17 @@ try:
 
             detail_rows.append({
                 "table": t_name,
-                "column": f'<span class="{"pk-col" if row.get("PK")=="YES" else ""}">{row.get("Column","")}</span>',
-                "type": f'<span class="badge {badge_class} badge-type">{row.get("DataType","")}</span>',
+                "column": f'<span class="{"pk-col" if row.get("PK")=="YES" else ""}">{safe_str(row.get("Column",""))}</span>',
+                "type": f'<span class="badge {badge_class} badge-type">{safe_str(row.get("DataType",""))}</span>',
                 "key": f'{pk_icon} {fk_icon}',
-                "default": f'<span class="default-col">{row.get("Default","")}</span>',
+                "default": f'<span class="default-col">{safe_str(row.get("Default",""))}</span>',
                 "rows": f'{total:,}',
                 "composition": composition_html,
-                "distinct": row.get('Distinct_Values', ''),
-                "min": f'<span class="val-hl">{row.get("Min_Val","")}</span>',
-                "max": f'<span class="val-hl">{row.get("Max_Val","")}</span>',
-                "top5": f'<div class="sample-data" style="max-height:60px">{row.get("Top_5_Values","").replace("|", "<br>")}</div>',
-                "sample": f'<div class="sample-data">{row.get("Sample_Values","")}</div>',
+                "distinct": safe_str(row.get('Distinct_Values', '')),
+                "min": f'<span class="val-hl">{safe_str(row.get("Min_Val",""))}</span>',
+                "max": f'<span class="val-hl">{safe_str(row.get("Max_Val",""))}</span>',
+                "top5": f'<div class="sample-data" style="max-height:60px">{safe_str(row.get("Top_5_Values","")).replace("|", "<br>")}</div>',
+                "sample": f'<div class="sample-data">{safe_str(row.get("Sample_Values",""))}</div>',
                 "is_warning": (valid_pct < 100)
             })
 
@@ -197,7 +213,7 @@ html_content = f"""
         pre.sql-code {{ background-color: #282c34; color: #abb2bf; padding: 15px; border-radius: 6px; font-size: 13px; max-height: 500px; overflow: auto; }}
         .log-container {{ background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; height: 600px; overflow-y: auto; font-family: monospace; }}
         .doc-card {{ border-left: 4px solid #0d6efd; padding: 15px; background: #f8f9fa; margin-bottom: 15px; }}
-        .color-box {{ width: 15px; height: 15px; display: inline-block; vertical-align: middle; margin-right: 5px; border-radius: 3px; }}
+        .strategy-card {{ background: #fff; border: 1px solid #eee; padding: 15px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.02); }}
     </style>
 </head>
 <body>
@@ -208,7 +224,7 @@ html_content = f"""
             <div class="text-muted small mt-1">Analyzed Source: {os.path.basename(input_file)}</div>
         </div>
         <div class="text-end">
-            <span class="badge bg-primary rounded-pill p-2">v6.6 Multi-Bar Progress</span>
+            <span class="badge bg-primary rounded-pill p-2">v6.8 Stable</span>
         </div>
     </div>
 
@@ -223,7 +239,7 @@ html_content = f"""
         <!-- Overview -->
         <div class="tab-pane fade show active" id="overview">
             <div class="alert alert-info py-2 mb-3 small">
-                <i class="bi bi-info-circle"></i> <b>Data Quality:</b> Based on Completeness Score (100% - %BadData).
+                <i class="bi bi-info-circle"></i> <b>Data Quality Score:</b> Calculated based on the completeness of data across all columns (penalizing Nulls, Empty Strings, and Zeros).
             </div>
             <table id="overviewTable" class="table table-hover table-bordered w-100">
                 <thead class="table-light"><tr><th>Table Name</th><th>Total Rows</th><th>Size (MB)</th><th>Columns</th><th>Empty Cols</th><th>Data Quality</th></tr></thead>

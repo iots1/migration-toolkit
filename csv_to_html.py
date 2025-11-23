@@ -11,12 +11,12 @@ if len(sys.argv) < 2:
 input_file = sys.argv[1]
 output_file = input_file.replace('.csv', '.html')
 
-# Path Setup
+# --- Path Setup ---
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(input_file)))
 log_file_path = os.path.join(base_dir, "process.log")
 ddl_file_path = os.path.join(base_dir, "ddl_schema", "schema.sql")
 
-# Load Log
+# --- Load Log ---
 log_content = "Log file not found."
 if os.path.exists(log_file_path):
     try:
@@ -25,7 +25,7 @@ if os.path.exists(log_file_path):
     except Exception as e: log_content = str(e)
 log_content = log_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# Load DDL
+# --- Load DDL ---
 ddl_map = {}
 if os.path.exists(ddl_file_path):
     try:
@@ -37,7 +37,7 @@ if os.path.exists(ddl_file_path):
                 ddl_map[match.group(1)] = match.group(0)
     except Exception as e: print(f"Warning parsing DDL: {e}")
 
-# Process CSV
+# --- Process CSV ---
 detail_rows = []
 table_stats = {} 
 
@@ -49,7 +49,7 @@ try:
             
             try: total = int(row.get('Total_Rows', 0))
             except: total = 0
-            try: size = float(row.get('Table_Size_MB', 0)) # New Column
+            try: size = float(row.get('Table_Size_MB', 0))
             except: size = 0.0
             try: nulls = int(row.get('Null_Count', 0))
             except: nulls = 0
@@ -58,12 +58,28 @@ try:
             try: zeros = int(row.get('Zero_Count', 0))
             except: zeros = 0
 
+            # Data Composition Logic
+            bad_data_count = nulls + empties + zeros
+            valid_data_count = total - bad_data_count
+            
             null_pct = (nulls / total * 100) if total > 0 else 0
             empty_pct = (empties / total * 100) if total > 0 else 0
+            zero_pct = (zeros / total * 100) if total > 0 else 0
+            valid_pct = (valid_data_count / total * 100) if total > 0 else 0
+            
+            completeness_score = valid_pct
 
             if t_name not in table_stats:
-                table_stats[t_name] = {'rows': total, 'cols': 0, 'empty_cols': 0, 'size': size}
+                table_stats[t_name] = {
+                    'rows': total, 
+                    'cols': 0, 
+                    'empty_cols': 0, 
+                    'size': size,
+                    'sum_completeness': 0
+                }
+            
             table_stats[t_name]['cols'] += 1
+            table_stats[t_name]['sum_completeness'] += completeness_score
             if null_pct == 100:
                 table_stats[t_name]['empty_cols'] += 1
 
@@ -80,14 +96,28 @@ try:
                 ref_table = fk_raw.replace('-> ', '').split('.')[0].strip().replace('"', '')
                 fk_icon = f'<a href="#" onclick="showDDL(\'{ref_table}\'); return false;" class="text-decoration-none">🔗 <span class="fk-detail">{fk_raw}</span></a>'
             
-            bar_color = "bg-success"
-            if null_pct > 50: bar_color = "bg-warning text-dark"
-            if null_pct == 100: bar_color = "bg-danger"
-            null_html = f'<div class="progress"><div class="progress-bar {bar_color}" style="width:{null_pct}%"></div><span style="position:absolute;width:100%;text-align:center;font-size:10px;color:black">{nulls:,} ({null_pct:.0f}%)</span></div>'
+            # --- NEW: 4-Bar Layout ---
+            def create_mini_bar(label, pct, color_class, count):
+                # Only show bar if percentage > 0 to keep it clean, or show faint background
+                opacity = "1" if count > 0 else "0.3"
+                return f'''
+                <div class="d-flex align-items-center" style="margin-bottom:2px; font-size:0.75em; opacity:{opacity}">
+                    <div style="width:45px; color:#666;">{label}</div>
+                    <div class="progress flex-grow-1" style="height:5px; background-color:#e9ecef; margin:0 6px;">
+                        <div class="progress-bar {color_class}" role="progressbar" style="width: {pct}%"></div>
+                    </div>
+                    <div style="width:40px; text-align:right; font-family:monospace; color:#444;">{count:,}</div>
+                </div>
+                '''
 
-            empty_style = "color:red;font-weight:bold;" if empties > 0 else "color:#ccc;"
-            zero_style = "color:orange;font-weight:bold;" if zeros > 0 else "color:#ccc;"
-            composition_html = f'<div style="font-size:0.85em"><span style="{empty_style}" title="Empty Strings">"" : {empties:,}</span><br><span style="{zero_style}" title="Zeros">0 : {zeros:,}</span></div>'
+            composition_html = f'''
+            <div style="min-width:200px; padding:2px 0;">
+                {create_mini_bar("Valid", valid_pct, "bg-success", valid_data_count)}
+                {create_mini_bar("Nulls", null_pct, "bg-secondary", nulls)}
+                {create_mini_bar("Empty", empty_pct, "bg-danger", empties)}
+                {create_mini_bar("Zero", zero_pct, "bg-warning text-dark", zeros)}
+            </div>
+            '''
 
             detail_rows.append({
                 "table": t_name,
@@ -96,28 +126,28 @@ try:
                 "key": f'{pk_icon} {fk_icon}',
                 "default": f'<span class="default-col">{row.get("Default","")}</span>',
                 "rows": f'{total:,}',
-                "nulls": null_html,
                 "composition": composition_html,
                 "distinct": row.get('Distinct_Values', ''),
                 "min": f'<span class="val-hl">{row.get("Min_Val","")}</span>',
                 "max": f'<span class="val-hl">{row.get("Max_Val","")}</span>',
                 "top5": f'<div class="sample-data" style="max-height:60px">{row.get("Top_5_Values","").replace("|", "<br>")}</div>',
                 "sample": f'<div class="sample-data">{row.get("Sample_Values","")}</div>',
-                "is_warning": (null_pct == 100 or empty_pct > 50)
+                "is_warning": (valid_pct < 100)
             })
 
     overview_rows = []
     for t, stats in table_stats.items():
-        quality = 100 - (stats['empty_cols'] / stats['cols'] * 100) if stats['cols'] > 0 else 0
+        quality = stats['sum_completeness'] / stats['cols'] if stats['cols'] > 0 else 0
         q_color = "text-success"
-        if quality < 80: q_color = "text-warning"
-        if quality < 50: q_color = "text-danger"
+        if quality < 95: q_color = "text-warning"
+        if quality < 80: q_color = "text-danger"
+        
         tbl_link = f'<a href="#" onclick="showDDL(\'{t}\'); return false;" class="fw-bold text-primary">{t}</a>'
         
         overview_rows.append({
             "table": tbl_link,
             "rows": f'{stats["rows"]:,}',
-            "size": f'{stats["size"]:,.2f} MB', # New Column
+            "size": f'{stats["size"]:,.2f} MB',
             "cols": stats['cols'],
             "empty": stats['empty_cols'],
             "quality": f'<b class="{q_color}">{quality:.1f}%</b>'
@@ -140,6 +170,7 @@ html_content = f"""
     <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/dataTables.bootstrap5.min.css">
     <link rel="stylesheet" href="https://cdn.datatables.net/buttons/2.4.1/css/buttons.bootstrap5.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
     
     <style>
         :root {{ --bs-primary-rgb: 13, 110, 253; }}
@@ -149,13 +180,15 @@ html_content = f"""
         .nav-tabs .nav-link.active {{ font-weight: bold; color: #0d6efd; border-top: 3px solid #0d6efd; background-color: #fff; }}
         
         th {{ background-color: #f1f4f9 !important; resize: horizontal; overflow: auto; min-width: 50px; vertical-align: middle !important; }}
-        .progress {{ height: 18px; background-color: #e9ecef; position: relative; border-radius: 4px; }}
+        .progress {{ border-radius: 2px; box-shadow: inset 0 1px 2px rgba(0,0,0,.1); }}
+        
         .badge-type {{ font-size: 0.75em; padding: 5px 8px; border-radius: 6px; }}
         .sample-data {{ font-family: 'Courier New', monospace; font-size: 0.85em; color: #444; white-space: pre-wrap; min-width: 200px; max-height: 100px; overflow-y: auto; }}
         .val-hl {{ font-family: monospace; color: #d63384; font-weight: bold; }}
         .fk-detail {{ font-size: 0.8em; color: #0d6efd; font-family: monospace; }}
-        tr.warning-row td {{ background-color: #fff5f5 !important; }}
+        tr.warning-row td {{ background-color: #fff9e6 !important; }} /* Softer Yellow */
         
+        /* Buttons */
         .dt-buttons .btn-group {{ display: flex; flex-wrap: wrap; gap: 5px; }}
         .dt-button {{ border-radius: 6px !important; padding: 5px 12px !important; font-size: 0.9rem !important; transition: all 0.2s ease-in-out !important; background-image: none !important; }}
         .buttons-colvis {{ background-color: transparent !important; border: 1px solid #0d6efd !important; color: #0d6efd !important; }}
@@ -165,6 +198,8 @@ html_content = f"""
 
         pre.sql-code {{ background-color: #282c34; color: #abb2bf; padding: 15px; border-radius: 6px; font-size: 13px; max-height: 500px; overflow: auto; }}
         .log-container {{ background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; height: 600px; overflow-y: auto; font-family: monospace; }}
+        .doc-card {{ border-left: 4px solid #0d6efd; padding: 15px; background: #f8f9fa; margin-bottom: 15px; }}
+        .color-box {{ width: 15px; height: 15px; display: inline-block; vertical-align: middle; margin-right: 5px; border-radius: 3px; }}
     </style>
 </head>
 <body>
@@ -175,32 +210,37 @@ html_content = f"""
             <div class="text-muted small mt-1">Analyzed Source: {os.path.basename(input_file)}</div>
         </div>
         <div class="text-end">
-            <span class="badge bg-primary rounded-pill p-2">v6.3 Table Size</span>
+            <span class="badge bg-primary rounded-pill p-2">v6.6 Multi-Bar Progress</span>
         </div>
     </div>
 
     <ul class="nav nav-tabs" id="myTab" role="tablist">
         <li class="nav-item"><button class="nav-link active" id="overview-tab" data-bs-toggle="tab" data-bs-target="#overview">📋 Overview</button></li>
         <li class="nav-item"><button class="nav-link" id="detail-tab" data-bs-toggle="tab" data-bs-target="#detail">🔍 Column Detail</button></li>
+        <li class="nav-item"><button class="nav-link" id="doc-tab" data-bs-toggle="tab" data-bs-target="#doc">📖 Formulas & Docs</button></li>
         <li class="nav-item"><button class="nav-link" id="log-tab" data-bs-toggle="tab" data-bs-target="#log">📝 Process Log</button></li>
     </ul>
 
     <div class="tab-content pt-4">
+        <!-- Overview -->
         <div class="tab-pane fade show active" id="overview">
+            <div class="alert alert-info py-2 mb-3 small">
+                <i class="bi bi-info-circle"></i> <b>Data Quality:</b> Based on Completeness Score (100% - %BadData).
+            </div>
             <table id="overviewTable" class="table table-hover table-bordered w-100">
-                <thead class="table-light">
-                    <tr><th>Table Name</th><th>Total Rows</th><th>Size (MB)</th><th>Columns</th><th>Empty Cols</th><th>Data Quality</th></tr>
-                </thead>
+                <thead class="table-light"><tr><th>Table Name</th><th>Total Rows</th><th>Size (MB)</th><th>Columns</th><th>Empty Cols</th><th>Data Quality</th></tr></thead>
                 <tbody></tbody>
             </table>
         </div>
 
+        <!-- Detail -->
         <div class="tab-pane fade" id="detail">
             <table id="detailTable" class="table table-hover table-bordered w-100">
                 <thead class="table-light">
                     <tr>
                         <th>Table</th><th>Column</th><th>Type</th><th>Key / Ref</th><th>Default</th>
-                        <th>Rows</th><th>Nulls</th><th>Empty / Zero</th>
+                        <th>Rows</th>
+                        <th style="min-width: 200px;">Data Composition</th>
                         <th>Dist.</th><th>Min</th><th>Max</th><th>Top 5 Freq</th><th>Sample</th>
                     </tr>
                 </thead>
@@ -208,12 +248,31 @@ html_content = f"""
             </table>
         </div>
 
+        <!-- Docs -->
+        <div class="tab-pane fade" id="doc">
+            <div class="row">
+                <div class="col-md-6">
+                    <h4>Data Composition Legend</h4>
+                    <div class="card p-3">
+                        <ul class="list-unstyled">
+                            <li class="mb-2"><span class="color-box bg-success"></span> <b>Valid Data:</b> ข้อมูลปกติ</li>
+                            <li class="mb-2"><span class="color-box bg-secondary"></span> <b>Null:</b> ค่า NULL</li>
+                            <li class="mb-2"><span class="color-box bg-danger"></span> <b>Empty String:</b> ค่าสตริงว่าง ("")</li>
+                            <li class="mb-2"><span class="color-box bg-warning"></span> <b>Zero:</b> ค่าเลข 0</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log -->
         <div class="tab-pane fade" id="log">
             <div class="log-container"><pre>{log_content}</pre></div>
         </div>
     </div>
 </div>
 
+<!-- Modal -->
 <div class="modal fade" id="ddlModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
     <div class="modal-content">
@@ -234,6 +293,8 @@ html_content = f"""
 <script src="https://cdn.datatables.net/buttons/2.4.1/js/dataTables.buttons.min.js"></script>
 <script src="https://cdn.datatables.net/buttons/2.4.1/js/buttons.bootstrap5.min.js"></script>
 <script src="https://cdn.datatables.net/buttons/2.4.1/js/buttons.colVis.min.js"></script>
+<script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+<script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
 
 <script>
     const detailData = {json_detail};
@@ -254,7 +315,7 @@ html_content = f"""
             data: overviewData,
             columns: [
                 {{ data: 'table' }}, {{ data: 'rows', className: 'text-end' }}, 
-                {{ data: 'size', className: 'text-end' }}, // New Column
+                {{ data: 'size', className: 'text-end' }}, 
                 {{ data: 'cols', className: 'text-end' }}, {{ data: 'empty', className: 'text-end' }}, 
                 {{ data: 'quality', className: 'text-end' }}
             ],
@@ -267,8 +328,8 @@ html_content = f"""
             data: detailData,
             columns: [
                 {{ data: 'table' }}, {{ data: 'column' }}, {{ data: 'type' }}, {{ data: 'key' }}, {{ data: 'default' }},
-                {{ data: 'rows', className: 'text-end' }}, {{ data: 'nulls' }}, 
-                {{ data: 'composition', className: 'text-end' }},
+                {{ data: 'rows', className: 'text-end' }}, 
+                {{ data: 'composition', className: 'text-start' }}, 
                 {{ data: 'distinct', className: 'text-end' }},
                 {{ data: 'min' }}, {{ data: 'max' }}, {{ data: 'top5' }}, {{ data: 'sample' }}
             ],

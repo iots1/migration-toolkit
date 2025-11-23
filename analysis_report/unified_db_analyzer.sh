@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v6.4 - Full MSSQL Support)
+# HIS DATABASE MIGRATION ANALYZER (v6.6 - Fix MSSQL SSL Error)
 # Features: 
-#   1. MSSQL Analysis Implemented (Size, Empty/Zero, Deep Analysis)
-#   2. Table Size (MB) Calculation
-#   3. Selective Tables
-#   4. Data Composition Analysis
+#   1. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
+#   2. **New:** Auto-install support for sqlcmd (mssql-tools18)
+#   3. Table Size (MB) Calculation & Data Composition Analysis
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -54,20 +53,75 @@ echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Table_Size_MB,Null_
 check_command() {
     local cmd="$1"
     local brew_pkg="$2"
+
+    # 1. Auto-detect Homebrew Keg-Only Paths
     if [ -n "$brew_pkg" ] && command -v brew &> /dev/null; then
          BREW_PREFIX=$(brew --prefix)
-         POSSIBLE_PATHS=("$BREW_PREFIX/opt/$brew_pkg/bin" "$BREW_PREFIX/Cellar/$brew_pkg/*/bin")
+         POSSIBLE_PATHS=(
+             "$BREW_PREFIX/opt/$brew_pkg/bin"
+             "$BREW_PREFIX/Cellar/$brew_pkg/*/bin"
+             "/usr/local/opt/$brew_pkg/bin" 
+         )
          for p in "${POSSIBLE_PATHS[@]}"; do
              for expanded_path in $p; do
-                 if [ -x "$expanded_path/$cmd" ]; then export PATH="$expanded_path:$PATH"; break 2; fi
+                 if [ -x "$expanded_path/$cmd" ]; then
+                     export PATH="$expanded_path:$PATH"
+                     break 2
+                 fi
              done
          done
     fi
+
+    # 2. If still not found, prompt to install
     if ! command -v "$cmd" &> /dev/null; then
-        log_activity "Error: Command '$cmd' not found."
-        echo "❌ Error: ไม่พบคำสั่ง '$cmd'"; exit 1
+        echo "❌ Error: ไม่พบคำสั่ง '$cmd'"
+        if command -v brew &> /dev/null && [ -n "$brew_pkg" ]; then
+            echo "🍺 ตรวจพบ Homebrew..."
+            read -p "❓ ต้องการติดตั้ง '$brew_pkg' เดี๋ยวนี้หรือไม่? (y/N): " install_choice
+            if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+                echo "📦 Installing $brew_pkg ..."
+                
+                if [ "$cmd" == "sqlcmd" ]; then
+                    echo "   -> Tapping microsoft/mssql-release..."
+                    brew tap microsoft/mssql-release
+                    brew update
+                fi
+
+                brew install "$brew_pkg"
+                
+                BREW_PREFIX=$(brew --prefix)
+                POSSIBLE_PATHS=(
+                    "$BREW_PREFIX/opt/$brew_pkg/bin"
+                    "$BREW_PREFIX/Cellar/$brew_pkg/*/bin"
+                )
+                for p in "${POSSIBLE_PATHS[@]}"; do
+                    for expanded_path in $p; do
+                        if [ -x "$expanded_path/$cmd" ]; then
+                            echo "🔗 Linking binary from $expanded_path"
+                            export PATH="$expanded_path:$PATH"
+                            break 2
+                        fi
+                    done
+                done
+
+                if command -v "$cmd" &> /dev/null; then 
+                    echo "✅ ติดตั้งสำเร็จ! ดำเนินการต่อ..."
+                    return 0
+                else 
+                    echo "❌ ติดตั้งเสร็จสิ้นแต่ยังเรียกใช้คำสั่งไม่ได้ (ลอง restart terminal)"
+                    exit 1
+                fi
+            else
+                echo "❌ ยกเลิกการติดตั้ง"
+                exit 1
+            fi
+        else
+            echo "❌ กรุณาติดตั้ง '$brew_pkg' หรือ '$cmd' ด้วยตนเอง"
+            exit 1
+        fi
     fi
 }
+
 check_command "jq" "jq"
 
 # --- LOAD CONFIG ---
@@ -81,7 +135,6 @@ DB_NAME=$(jq -r '.database.name' "$CONFIG_FILE")
 DB_USER=$(jq -r '.database.user' "$CONFIG_FILE")
 DB_PASS=$(jq -r '.database.password' "$CONFIG_FILE")
 
-# Selective Tables
 SELECTED_TABLES_STR=$(jq -r '.database.tables[]?' "$CONFIG_FILE" | tr '\n' ' ')
 
 case "$DB_TYPE" in
@@ -170,7 +223,6 @@ analyze_mysql() {
         CHECK_EXIST=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SHOW TABLES LIKE '$TABLE'")
         if [ -z "$CHECK_EXIST" ]; then continue; fi
         
-        # --- GET TABLE SIZE (MB) ---
         TBL_SIZE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
             SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) 
             FROM information_schema.TABLES 
@@ -192,7 +244,6 @@ analyze_mysql() {
             if [ "$DEEP_ANALYSIS" == "true" ]; then
                 MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT MIN(\`$COL_NAME\`), MAX(\`$COL_NAME\`) FROM \`$TABLE\`;")
                 MIN_VAL=$(echo "$MINMAX" | cut -f1); MAX_VAL=$(echo "$MINMAX" | cut -f2)
-                
                 IS_DATE=$(is_date_type "$COL_TYPE")
                 if [ "$IS_DATE" == "false" ]; then
                     TOP_5=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(CONCAT(val, ' (', cnt, ')') SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val, COUNT(*) as cnt FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL GROUP BY \`$COL_NAME\` ORDER BY cnt DESC LIMIT 5) x;")
@@ -205,8 +256,7 @@ analyze_mysql() {
             [ -z "$LIMIT_N" ] && LIMIT_N=$DEFAULT_LIMIT
             SAMPLE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(LEFT(val, $MAX_TEXT_LEN) SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL LIMIT $LIMIT_N) x;")
             
-            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g' | tr -d '\n'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g')
-            CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n'); CLEAN_FK=$(echo "$FK_REF" | sed 's/NULL//g')
+            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g' | tr -d '\n'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g'); CLEAN_FK=$(echo "$FK_REF" | sed 's/NULL//g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
 
             echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$TBL_SIZE,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
         done
@@ -244,7 +294,6 @@ analyze_postgres() {
         CHECK_EXIST=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT to_regclass('public.$TABLE')")
         if [ -z "$CHECK_EXIST" ] || [ "$CHECK_EXIST" == "" ]; then continue; fi
 
-        # --- GET TABLE SIZE (MB) ---
         TBL_SIZE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT ROUND(pg_total_relation_size('\"$TABLE\"') / 1024.0 / 1024.0, 2)")
         [ -z "$TBL_SIZE" ] && TBL_SIZE="0"
 
@@ -277,8 +326,7 @@ analyze_postgres() {
             QUERY_SAMPLE="SELECT (SELECT string_agg(SUBSTR(\"$COL_NAME\"::text, 1, $MAX_TEXT_LEN), ' | ') FROM (SELECT \"$COL_NAME\" FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL LIMIT $LIMIT_N) t)"
             SAMPLE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "$QUERY_SAMPLE")
             
-            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g' | tr -d '\n')
-            CLEAN_FK=$(echo "$FK_REF" | sed 's/"/""/g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
+            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g' | tr -d '\n'); CLEAN_FK=$(echo "$FK_REF" | sed 's/"/""/g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
 
             echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$TBL_SIZE,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
         done
@@ -288,10 +336,11 @@ analyze_postgres() {
 }
 
 # ==============================================================================
-# 3. MSSQL Logic (Fully Implemented)
+# 3. MSSQL Logic (Updated with -C flag)
 # ==============================================================================
 analyze_mssql() {
-    check_command "sqlcmd"
+    check_command "sqlcmd" "mssql-tools18"
+    
     if command -v mssql-scripter &> /dev/null; then
         log_activity "Starting DDL Export..."
         mssql-scripter -S "$DB_HOST,$DB_PORT" -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" --schema-and-data schema --file-path "$DDL_FILE" > /dev/null
@@ -302,13 +351,10 @@ analyze_mssql() {
     log_activity "Fetching Tables..."
     
     if [ -n "$SELECTED_TABLES_STR" ]; then
-        # Convert space-separated to array
         TABLES_ARRAY=($SELECTED_TABLES_STR)
     else
-        # Fetch all tables via sqlcmd
-        # -h-1 to hide header, -W to trim trailing spaces
-        RAW_TABLES=$(sqlcmd -S "$DB_HOST,$DB_PORT" -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.tables WHERE type='U' ORDER BY name")
-        # Parse into array (handle newlines)
+        # Added -C flag
+        RAW_TABLES=$(sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.tables WHERE type='U' ORDER BY name")
         IFS=$'\n' read -rd '' -a TABLES_ARRAY <<< "$RAW_TABLES"
     fi
     
@@ -317,15 +363,12 @@ analyze_mssql() {
 
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
-        # Trim whitespace
         TABLE=$(echo "$TABLE" | xargs)
         if [ -z "$TABLE" ]; then continue; fi
         
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
         log_activity "Processing Table: $TABLE"
 
-        # Construct Dynamic T-SQL for this specific table
-        # This avoids connection overhead per column while allowing progress bar per table
         TSQL="
         SET NOCOUNT ON;
         DECLARE @TName NVARCHAR(255) = '$TABLE';
@@ -335,11 +378,8 @@ analyze_mssql() {
         DECLARE @MaxTextLen INT = $MAX_TEXT_LEN;
         DECLARE @DeepAnalysis VARCHAR(5) = '$DEEP_ANALYSIS';
         
-        -- Get Table Size (MB)
         DECLARE @TableSizeMB DECIMAL(10,2);
-        SELECT @TableSizeMB = CAST(SUM(used_page_count) * 8.0 / 1024 AS DECIMAL(10,2))
-        FROM sys.dm_db_partition_stats
-        WHERE object_id = OBJECT_ID(@TName);
+        SELECT @TableSizeMB = CAST(SUM(used_page_count) * 8.0 / 1024 AS DECIMAL(10,2)) FROM sys.dm_db_partition_stats WHERE object_id = OBJECT_ID(@TName);
         SET @TableSizeMB = ISNULL(@TableSizeMB, 0);
 
         DECLARE cur CURSOR FOR 
@@ -347,16 +387,11 @@ analyze_mssql() {
                 CASE WHEN EXISTS(SELECT 1 FROM sys.indexes i JOIN sys.index_columns ic ON i.object_id=ic.object_id AND i.index_id=ic.index_id WHERE i.is_primary_key=1 AND ic.object_id=t.object_id AND ic.column_id=c.column_id) THEN 'YES' ELSE '' END,
                 ISNULL((SELECT TOP 1 '-> ' + OBJECT_NAME(fkc.referenced_object_id) + '.' + COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) FROM sys.foreign_key_columns fkc WHERE fkc.parent_object_id=t.object_id AND fkc.parent_column_id=c.column_id), ''),
                 ISNULL(object_definition(c.default_object_id), ''), ISNULL(CAST(ep.value AS NVARCHAR(MAX)), '')
-            FROM sys.tables t 
-            JOIN sys.columns c ON t.object_id = c.object_id 
-            JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+            FROM sys.tables t JOIN sys.columns c ON t.object_id = c.object_id JOIN sys.types ty ON c.user_type_id = ty.user_type_id
             LEFT JOIN sys.extended_properties ep ON ep.major_id = t.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
-            WHERE t.name = @TName
-            ORDER BY c.column_id;
+            WHERE t.name = @TName ORDER BY c.column_id;
 
-        OPEN cur;
-        FETCH NEXT FROM cur INTO @CName, @DType, @PK, @FK, @Def, @Comm;
-        
+        OPEN cur; FETCH NEXT FROM cur INTO @CName, @DType, @PK, @FK, @Def, @Comm;
         WHILE @@FETCH_STATUS = 0
         BEGIN
             BEGIN TRY
@@ -366,7 +401,6 @@ analyze_mssql() {
                     DECLARE @Total BIGINT, @Nulls BIGINT, @Empties BIGINT, @Zeros BIGINT, @MaxLen INT, @Dist BIGINT;
                     DECLARE @MinVal NVARCHAR(MAX), @MaxVal NVARCHAR(MAX), @Top5 NVARCHAR(MAX), @Sample NVARCHAR(MAX);
                     
-                    -- Basic Stats
                     SELECT 
                         @Total = COUNT(*),
                         @Nulls = SUM(CASE WHEN [' + @CName + '] IS NULL THEN 1 ELSE 0 END),
@@ -376,31 +410,21 @@ analyze_mssql() {
                         @Dist = COUNT(DISTINCT [' + @CName + '])
                     FROM [' + @TName + '];
 
-                    -- Deep Analysis
                     IF ''' + @DeepAnalysis + ''' = ''true''
                     BEGIN
                         SELECT @MinVal = CAST(MIN([' + @CName + ']) AS NVARCHAR(MAX)), @MaxVal = CAST(MAX([' + @CName + ']) AS NVARCHAR(MAX)) FROM [' + @TName + '];
-                        
-                        -- Top 5 (Skip Date types)
                         IF ''' + @DType + ''' NOT LIKE ''%date%'' AND ''' + @DType + ''' NOT LIKE ''%time%''
                         BEGIN
-                             SELECT @Top5 = STUFF((SELECT '' | '' + CAST(val AS NVARCHAR(MAX)) + '' ('' + CAST(cnt AS NVARCHAR(MAX)) + '')''
-                             FROM (SELECT TOP 5 CAST([' + @CName + '] AS NVARCHAR(MAX)) as val, COUNT(*) as cnt 
-                                   FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL GROUP BY [' + @CName + '] ORDER BY cnt DESC) x
-                             FOR XML PATH('''')), 1, 3, '''');
+                             SELECT @Top5 = STUFF((SELECT '' | '' + CAST(val AS NVARCHAR(MAX)) + '' ('' + CAST(cnt AS NVARCHAR(MAX)) + '')'' FROM (SELECT TOP 5 CAST([' + @CName + '] AS NVARCHAR(MAX)) as val, COUNT(*) as cnt FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL GROUP BY [' + @CName + '] ORDER BY cnt DESC) x FOR XML PATH('''')), 1, 3, '''');
                         END
                         ELSE SET @Top5 = ''(Skipped for Date/Time)'';
                     END
 
-                    -- Sample Data (Dynamic Limit)
                     DECLARE @Limit INT = ' + CAST(@DefaultLimit AS VARCHAR) + ';
-                    -- Check exceptions logic here is tricky in pure SQL, falling back to default or Distinct=1
                     IF @Dist = 1 SET @Limit = 1;
                     
-                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), ''\"'', ''\"\"'')
-                    FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
+                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), ''\"'', ''\"\"'') FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
 
-                    -- Final Output
                     SELECT ''' + @TName + ''',''' + @CName + ''',''' + @DType + ''',''' + @PK + ''',''' + @FK + ''',''' + REPLACE(@Def,'''','''''') + ''',''' + REPLACE(@Comm,'''','''''') + ''',' +
                            N'CAST(@Total AS VARCHAR) + '','' + CAST(@TableSizeMB AS VARCHAR) + '','' + CAST(@Nulls AS VARCHAR) + '','' + CAST(@Empties AS VARCHAR) + '','' + CAST(@Zeros AS VARCHAR) + '','' +
                            CASE WHEN @DType LIKE ''%char%'' THEN CAST(ISNULL(@MaxLen,0) AS VARCHAR) ELSE ''0'' END + '','' + CAST(@Dist AS VARCHAR) + '','' +
@@ -410,7 +434,6 @@ analyze_mssql() {
                 END
                 ELSE
                 BEGIN
-                    -- Skip BLOBs
                     PRINT '$TABLE,' + @CName + ',' + @DType + ',' + @PK + ',' + @FK + ',,,0,' + CAST(@TableSizeMB AS VARCHAR) + ',0,0,0,0,0,\"\",\"\",\"\",\"Skipped BLOB\"';
                 END
             END TRY
@@ -421,10 +444,8 @@ analyze_mssql() {
         END
         CLOSE cur; DEALLOCATE cur;
         "
-        
-        # Run SQLCMD and append to CSV
-        # -h-1: No headers, -W: Remove whitespace, -s ",": Comma separator (handled in T-SQL print mostly)
-        sqlcmd -S "$DB_HOST,$DB_PORT" -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "$TSQL" >> "$REPORT_FILE"
+        # Added -C flag
+        sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "$TSQL" >> "$REPORT_FILE"
     done
     echo ""
 }

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v6.1 - Fix Logging)
+# HIS DATABASE MIGRATION ANALYZER (v6.2 - Selective Table Analysis)
 # Features: 
-#   1. New Metrics: Empty String ("") count & Zero (0) count
-#   2. Smart Skip Date Frequency
-#   3. Deep Analysis Mode
-#   4. Fixed: Restore missing process logs
+#   1. Selective Tables: Define specific tables in config.json to analyze
+#   2. New Metrics: Empty String & Zero count
+#   3. Smart Skip Date Frequency
+#   4. Deep Analysis Mode
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -47,7 +47,7 @@ log_activity() {
     echo "[$timestamp] $msg" >> "$LOG_FILE"
 }
 
-# Header CSV (Added Empty_Count, Zero_Count)
+# Header CSV
 echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Null_Count,Empty_Count,Zero_Count,Max_Length,Distinct_Values,Min_Val,Max_Val,Top_5_Values,Sample_Values" > "$REPORT_FILE"
 
 # --- DEPENDENCIES ---
@@ -81,6 +81,10 @@ DB_NAME=$(jq -r '.database.name' "$CONFIG_FILE")
 DB_USER=$(jq -r '.database.user' "$CONFIG_FILE")
 DB_PASS=$(jq -r '.database.password' "$CONFIG_FILE")
 
+# Load Selective Tables (Array to String)
+# jq output: "table1 table2" or empty
+SELECTED_TABLES_STR=$(jq -r '.database.tables[]?' "$CONFIG_FILE" | tr '\n' ' ')
+
 case "$DB_TYPE" in
     "mysql") DB_CHOICE=1 ;;
     "postgresql"|"postgres") DB_CHOICE=2 ;;
@@ -96,6 +100,11 @@ EXCEPTIONS_STRING=$(jq -r '.sampling.exceptions[] | "\(.table).\(.column)=\(.lim
 EXCEPTIONS_COUNT=$(jq '.sampling.exceptions | length' "$CONFIG_FILE")
 
 log_activity "Target: $DB_NAME ($DB_TYPE) @ $DB_HOST:$DB_PORT"
+if [ -n "$SELECTED_TABLES_STR" ]; then
+    log_activity "Config: Analyzing SPECIFIC tables only."
+else
+    log_activity "Config: Analyzing ALL tables."
+fi
 log_activity "Config: Deep Analysis=$DEEP_ANALYSIS, Default Limit=$DEFAULT_LIMIT"
 
 # Helper function
@@ -136,7 +145,12 @@ echo "   🏥 HIS Database Migration Analyzer    "
 echo "========================================="
 echo "🐚 Shell: Bash $BASH_VERSION"
 echo "🔌 Target: $DB_NAME ($DB_TYPE)"
-echo "🧠 Deep Analysis: $DEEP_ANALYSIS (Smart Skip + Empty/Zero Check)"
+echo "🧠 Deep Analysis: $DEEP_ANALYSIS"
+if [ -n "$SELECTED_TABLES_STR" ]; then
+    echo "🎯 Scope: Selected tables only"
+else
+    echo "🎯 Scope: All tables"
+fi
 echo "📂 Output: $RUN_DIR"
 echo "-----------------------------------------"
 
@@ -148,12 +162,23 @@ analyze_mysql() {
     check_command "mysqldump" "mysql-client"
 
     log_activity "Starting DDL Export..."
+    # Note: Exporting FULL Schema is usually safer for references, 
+    # but if you want only selected tables in DDL, modify here. Keeping full for context.
     mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" --no-data --routines --triggers "$DB_NAME" > "$DDL_FILE" 2>/dev/null
 
     log_activity "Fetching Tables..."
-    RAW_TABLES=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SHOW TABLES")
-    TABLES_ARRAY=($RAW_TABLES)
+    
+    # --- SELECTIVE TABLE LOGIC ---
+    if [ -n "$SELECTED_TABLES_STR" ]; then
+        TABLES_ARRAY=($SELECTED_TABLES_STR)
+    else
+        RAW_TABLES=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SHOW TABLES")
+        TABLES_ARRAY=($RAW_TABLES)
+    fi
+    # -----------------------------
+    
     TOTAL_TABLES=${#TABLES_ARRAY[@]}
+    log_activity "Tables to process: $TOTAL_TABLES"
     
     CURRENT_IDX=0
     START_TIME=$(date +%s)
@@ -161,7 +186,14 @@ analyze_mysql() {
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
-        log_activity "Processing Table: $TABLE"  # <--- Restore Log Here
+        log_activity "Processing Table: $TABLE"
+        
+        # Check if table exists (for manual input safety)
+        CHECK_EXIST=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SHOW TABLES LIKE '$TABLE'")
+        if [ -z "$CHECK_EXIST" ]; then
+            log_activity "Warning: Table '$TABLE' not found. Skipping."
+            continue
+        fi
         
         COLUMNS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
             SELECT c.COLUMN_NAME, c.DATA_TYPE, IF(c.COLUMN_KEY='PRI', 'YES', '') as IS_PK,
@@ -170,7 +202,6 @@ analyze_mysql() {
             FROM INFORMATION_SCHEMA.COLUMNS c WHERE c.TABLE_SCHEMA = '$DB_NAME' AND c.TABLE_NAME = '$TABLE' ORDER BY c.ORDINAL_POSITION")
         
         echo "$COLUMNS" | while IFS=$'\t' read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
-            # Stats: Added Empty and Zero Check (Cast to CHAR to avoid errors)
             STATS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
                 SELECT 
                     COUNT(*), 
@@ -181,10 +212,8 @@ analyze_mysql() {
                     COUNT(DISTINCT \`$COL_NAME\`) 
                 FROM \`$TABLE\`;")
             
-            # Parse Stats (Tab separated)
             read TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS"
             
-            # Deep Analysis
             MIN_VAL=""; MAX_VAL=""; TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
                 MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
@@ -208,7 +237,6 @@ analyze_mysql() {
             SAMPLE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
                 SELECT GROUP_CONCAT(LEFT(val, $MAX_TEXT_LEN) SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL LIMIT $LIMIT_N) x;")
             
-            # Clean & Output
             CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g' | tr -d '\n')
             CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g')
             CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g')
@@ -235,10 +263,19 @@ analyze_postgres() {
     pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -s "$DB_NAME" > "$DDL_FILE" 2>/dev/null
 
     log_activity "Fetching Tables..."
-    RAW_TABLES=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "
-        SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
-    TABLES_ARRAY=($RAW_TABLES)
+    
+    # --- SELECTIVE TABLE LOGIC ---
+    if [ -n "$SELECTED_TABLES_STR" ]; then
+        TABLES_ARRAY=($SELECTED_TABLES_STR)
+    else
+        RAW_TABLES=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "
+            SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
+        TABLES_ARRAY=($RAW_TABLES)
+    fi
+    # -----------------------------
+
     TOTAL_TABLES=${#TABLES_ARRAY[@]}
+    log_activity "Tables to process: $TOTAL_TABLES"
     
     CURRENT_IDX=0
     START_TIME=$(date +%s)
@@ -246,7 +283,14 @@ analyze_postgres() {
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
-        log_activity "Processing Table: $TABLE" # <--- Restore Log Here
+        log_activity "Processing Table: $TABLE"
+        
+        # Safety check for manual input in PG
+        CHECK_EXIST=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT to_regclass('public.$TABLE')")
+        if [ -z "$CHECK_EXIST" ] || [ "$CHECK_EXIST" == "" ]; then
+             log_activity "Warning: Table '$TABLE' not found or not visible. Skipping."
+             continue
+        fi
 
         COLUMNS=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "
             SELECT c.column_name, c.data_type,
@@ -256,7 +300,6 @@ analyze_postgres() {
             FROM information_schema.columns c WHERE c.table_schema = 'public' AND c.table_name = '$TABLE' ORDER BY c.ordinal_position")
 
         echo "$COLUMNS" | while IFS="|" read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
-            # Stats: Added Empty and Zero using FILTER
             QUERY_STATS="SELECT 
                 COUNT(*), 
                 COUNT(*) - COUNT(\"$COL_NAME\"), 
@@ -270,7 +313,6 @@ analyze_postgres() {
             
             IFS=',' read -r TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS_RESULT"
 
-            # Deep Analysis
             MIN_VAL=""; MAX_VAL=""; TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
                 MINMAX=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "SELECT MIN(\"$COL_NAME\"::text), MAX(\"$COL_NAME\"::text) FROM \"$TABLE\"")
@@ -293,7 +335,6 @@ analyze_postgres() {
             QUERY_SAMPLE="SELECT (SELECT string_agg(SUBSTR(\"$COL_NAME\"::text, 1, $MAX_TEXT_LEN), ' | ') FROM (SELECT \"$COL_NAME\" FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL LIMIT $LIMIT_N) t)"
             SAMPLE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "$QUERY_SAMPLE")
             
-            # Clean
             CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g')
             CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g')
             CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g' | tr -d '\n')
@@ -310,12 +351,11 @@ analyze_postgres() {
 }
 
 # ==============================================================================
-# 3. MSSQL Logic (Simplified for compatibility)
+# 3. MSSQL Logic
 # ==============================================================================
 analyze_mssql() {
     check_command "sqlcmd"
-    log_activity "MSSQL Analysis for Empty/Zero not fully implemented in this version."
-    # Note: MSSQL requires complex dynamic SQL. Skipping for brevity.
+    log_activity "MSSQL Analysis not fully implemented for Empty/Zero in this version."
 }
 
 # --- MAIN ---

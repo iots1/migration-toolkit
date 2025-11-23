@@ -31,11 +31,12 @@ if os.path.exists(ddl_file_path):
     try:
         with open(ddl_file_path, 'r', encoding='utf-8', errors='replace') as f:
             sql_content = f.read()
+            # Simple Regex to capture CREATE TABLE statements
             regex = r'CREATE TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[a-zA-Z0-9_]+\.)?[`"]?([a-zA-Z0-9_]+)[`"]?\s*\((?:[^;]|\n)*?\);'
             matches = re.finditer(regex, sql_content, re.IGNORECASE | re.DOTALL)
             for match in matches:
                 ddl_map[match.group(1)] = match.group(0)
-    except Exception as e: print(f"Warning: {e}")
+    except Exception as e: print(f"Warning parsing DDL: {e}")
 
 # Process CSV
 detail_rows = []
@@ -78,23 +79,16 @@ try:
             fk_icon = ''
             if fk_raw:
                 ref_table = fk_raw.replace('-> ', '').split('.')[0].strip().replace('"', '')
-                fk_icon = f'<a href="#" onclick="showDDL(\'{ref_table}\'); return false;">🔗 <span class="fk-detail">{fk_raw}</span></a>'
+                fk_icon = f'<a href="#" onclick="showDDL(\'{ref_table}\'); return false;" class="text-decoration-none">🔗 <span class="fk-detail">{fk_raw}</span></a>'
             
-            # Progress Bar for Nulls
             bar_color = "bg-success"
             if null_pct > 50: bar_color = "bg-warning text-dark"
             if null_pct == 100: bar_color = "bg-danger"
             null_html = f'<div class="progress"><div class="progress-bar {bar_color}" style="width:{null_pct}%"></div><span style="position:absolute;width:100%;text-align:center;font-size:10px;color:black">{nulls:,} ({null_pct:.0f}%)</span></div>'
 
-            # Empty/Zero format
             empty_style = "color:red;font-weight:bold;" if empties > 0 else "color:#ccc;"
             zero_style = "color:orange;font-weight:bold;" if zeros > 0 else "color:#ccc;"
-            composition_html = f'''
-            <div style="font-size:0.85em">
-                <span style="{empty_style}" title="Empty Strings">"" : {empties:,}</span><br>
-                <span style="{zero_style}" title="Zeros">0 : {zeros:,}</span>
-            </div>
-            '''
+            composition_html = f'<div style="font-size:0.85em"><span style="{empty_style}" title="Empty Strings">"" : {empties:,}</span><br><span style="{zero_style}" title="Zeros">0 : {zeros:,}</span></div>'
 
             detail_rows.append({
                 "table": t_name,
@@ -162,11 +156,43 @@ html_content = f"""
         .fk-detail {{ font-size: 0.8em; color: #0d6efd; font-family: monospace; }}
         tr.warning-row td {{ background-color: #fff5f5 !important; }}
         
+        /* --- Button Styling --- */
         .dt-buttons .btn-group {{ display: flex; flex-wrap: wrap; gap: 5px; }}
-        .dt-button {{ background-color: transparent !important; border: 1px solid #6c757d !important; color: #6c757d !important; border-radius: 6px !important; padding: 5px 12px !important; font-size: 0.9rem !important; transition: all 0.2s ease-in-out !important; background-image: none !important; }}
-        .dt-button:hover, .dt-button.active {{ background-color: #6c757d !important; color: white !important; box-shadow: 0 2px 5px rgba(0,0,0,0.2) !important; }}
-        .buttons-colvis {{ border-color: #0d6efd !important; color: #0d6efd !important; }}
-        .buttons-colvis:hover {{ background-color: #0d6efd !important; }}
+        
+        /* Common Button Properties */
+        .dt-button {{ 
+            border-radius: 6px !important; 
+            padding: 5px 12px !important;
+            font-size: 0.9rem !important;
+            transition: all 0.2s ease-in-out !important;
+            background-image: none !important;
+        }}
+
+        /* Primary Buttons (Show/Hide) */
+        .buttons-colvis {{ 
+            background-color: transparent !important;
+            border: 1px solid #0d6efd !important; 
+            color: #0d6efd !important; 
+        }}
+        .buttons-colvis:hover {{ 
+            background-color: #0d6efd !important; 
+            color: white !important; 
+        }}
+
+        /* Secondary Buttons (Page Length) - Customized */
+        .btn-outline-secondary {{
+            background-color: #fff !important;
+            color: #333 !important;
+            border: 1px solid #6c757d !important;
+        }}
+        .btn-outline-secondary:hover, 
+        .btn-outline-secondary:active,
+        .btn-outline-secondary.active {{
+            background-color: #0d6efd !important; /* Blue Background on Hover */
+            color: #fff !important;                /* White Text on Hover */
+            border-color: #0d6efd !important;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2) !important;
+        }}
 
         pre.sql-code {{ background-color: #282c34; color: #abb2bf; padding: 15px; border-radius: 6px; font-size: 13px; max-height: 500px; overflow: auto; }}
         .log-container {{ background-color: #1e1e1e; color: #d4d4d4; padding: 15px; border-radius: 6px; height: 600px; overflow-y: auto; font-family: monospace; }}
@@ -180,7 +206,7 @@ html_content = f"""
             <div class="text-muted small mt-1">Analyzed Source: {os.path.basename(input_file)}</div>
         </div>
         <div class="text-end">
-            <span class="badge bg-primary rounded-pill p-2">v6.0 Data Composition</span>
+            <span class="badge bg-primary rounded-pill p-2">v6.1 + UI Refresh</span>
         </div>
     </div>
 
@@ -191,6 +217,7 @@ html_content = f"""
     </ul>
 
     <div class="tab-content pt-4">
+        <!-- Overview Tab -->
         <div class="tab-pane fade show active" id="overview">
             <table id="overviewTable" class="table table-hover table-bordered w-100">
                 <thead class="table-light"><tr><th>Table Name (Click for Schema)</th><th>Total Rows</th><th>Columns</th><th>Empty Cols</th><th>Data Quality</th></tr></thead>
@@ -198,13 +225,14 @@ html_content = f"""
             </table>
         </div>
 
+        <!-- Detail Tab -->
         <div class="tab-pane fade" id="detail">
             <table id="detailTable" class="table table-hover table-bordered w-100">
                 <thead class="table-light">
                     <tr>
                         <th>Table</th><th>Column</th><th>Type</th><th>Key / Ref</th><th>Default</th>
                         <th>Rows</th><th>Nulls</th>
-                        <th>Empty / Zero</th> <!-- New Column -->
+                        <th>Empty / Zero</th>
                         <th>Dist.</th><th>Min</th><th>Max</th>
                         <th>Top 5 Freq</th><th>Sample</th>
                     </tr>
@@ -213,12 +241,14 @@ html_content = f"""
             </table>
         </div>
 
+        <!-- Log Tab -->
         <div class="tab-pane fade" id="log">
             <div class="log-container"><pre>{log_content}</pre></div>
         </div>
     </div>
 </div>
 
+<!-- DDL Modal -->
 <div class="modal fade" id="ddlModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered">
     <div class="modal-content">
@@ -247,7 +277,7 @@ html_content = f"""
     let ddlModal;
 
     function showDDL(tableName) {{
-        const content = ddlData[tableName] || "-- DDL not found for " + tableName;
+        const content = ddlData[tableName] || "-- DDL not found for " + tableName + "\\n-- Note: Ensure schema.sql was generated successfully.";
         document.getElementById('ddlModalTitle').innerText = 'Schema: ' + tableName;
         document.getElementById('ddlModalBody').innerText = content;
         if(!ddlModal) ddlModal = new bootstrap.Modal(document.getElementById('ddlModal'));
@@ -255,6 +285,7 @@ html_content = f"""
     }}
 
     $(document).ready(function() {{
+        // Overview
         $('#overviewTable').DataTable({{
             data: overviewData,
             columns: [
@@ -264,21 +295,29 @@ html_content = f"""
             ],
             pageLength: 15, order: [[ 1, "desc" ]],
             dom: '<"d-flex justify-content-between mb-3"Bf>rtip',
-            buttons: [ {{ extend: 'pageLength', className: 'btn btn-outline-secondary' }} ]
+            buttons: [ 
+                {{ extend: 'pageLength', className: 'btn btn-outline-secondary' }} 
+            ]
         }});
 
+        // Detail
         $('#detailTable').DataTable({{
             data: detailData,
             columns: [
                 {{ data: 'table' }}, {{ data: 'column' }}, {{ data: 'type' }}, {{ data: 'key' }}, {{ data: 'default' }},
                 {{ data: 'rows', className: 'text-end' }}, {{ data: 'nulls' }}, 
-                {{ data: 'composition', className: 'text-end' }}, // New Column Data
+                {{ data: 'composition', className: 'text-end' }},
                 {{ data: 'distinct', className: 'text-end' }},
                 {{ data: 'min' }}, {{ data: 'max' }}, {{ data: 'top5' }}, {{ data: 'sample' }}
             ],
             dom: '<"d-flex flex-wrap gap-2 justify-content-between align-items-center mb-3"Bf>rtip',
             buttons: [
-                {{ extend: 'colvis', text: '👁️ Columns', className: 'btn btn-outline-primary', columns: ':not(:first-child)' }},
+                {{
+                    extend: 'colvis',
+                    text: '👁️ Columns',
+                    className: 'btn buttons-colvis',
+                    columns: ':not(:first-child)'
+                }},
                 {{ extend: 'pageLength', className: 'btn btn-outline-secondary' }}
             ],
             createdRow: function(row, data) {{ if(data.is_warning) $(row).addClass('warning-row'); }},

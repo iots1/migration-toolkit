@@ -47,8 +47,21 @@ def get_report_folders():
 @st.cache_data
 def load_data_profile(report_folder):
     csv_path = os.path.join(report_folder, "data_profile", "data_profile.csv")
-    if os.path.exists(csv_path): 
-        return pd.read_csv(csv_path)
+    if os.path.exists(csv_path):
+        try:
+            # Try reading with standard settings first
+            return pd.read_csv(csv_path, encoding='utf-8')
+        except pd.errors.ParserError:
+            # If parsing fails, use more lenient settings
+            st.warning("⚠️ CSV parsing issue detected. Using fallback parser. Some rows may be skipped.")
+            return pd.read_csv(
+                csv_path,
+                on_bad_lines='skip',
+                encoding='utf-8',
+                engine='python',
+                quoting=1,
+                escapechar='\\'
+            )
     return None
 
 def to_camel_case(snake_str):

@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v6.9 - Suppress MSSQL Warnings)
+# HIS DATABASE MIGRATION ANALYZER (v7.0 - Schema Support & Bit Type Fix)
 # Features:
-#   1. **Fix:** Suppressed "Null value eliminated" warnings with SET ANSI_WARNINGS OFF
-#   2. **Fix:** Fixed CSV output format - changed SELECT to PRINT statement
-#   3. **Fix:** Fixed @TableSizeMB and @DType variable scope issues in dynamic SQL
-#   4. **Fix:** Fixed quote escaping using CHAR(34) to avoid bash interpretation
-#   5. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
-#   6. **New:** Auto-install support for sqlcmd (mssql-tools18)
-#   7. Table Size (MB) Calculation & Data Composition Analysis
+#   1. **New:** Schema support for PostgreSQL and MSSQL (configurable via config.json)
+#   2. **Fix:** Skip MIN/MAX operations for bit/boolean datatypes to avoid errors
+#   3. **Fix:** Suppressed "Null value eliminated" warnings with SET ANSI_WARNINGS OFF
+#   4. **Fix:** Fixed CSV output format - changed SELECT to PRINT statement
+#   5. **Fix:** Fixed @TableSizeMB and @DType variable scope issues in dynamic SQL
+#   6. **Fix:** Fixed quote escaping using CHAR(34) to avoid bash interpretation
+#   7. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
+#   8. **New:** Auto-install support for sqlcmd (mssql-tools18)
+#   9. Table Size (MB) Calculation & Data Composition Analysis
 # ==============================================================================
 
 # --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
@@ -138,6 +140,7 @@ DB_PORT=$(jq -r '.database.port' "$CONFIG_FILE")
 DB_NAME=$(jq -r '.database.name' "$CONFIG_FILE")
 DB_USER=$(jq -r '.database.user' "$CONFIG_FILE")
 DB_PASS=$(jq -r '.database.password' "$CONFIG_FILE")
+DB_SCHEMA=$(jq -r '.database.schema // ""' "$CONFIG_FILE")
 
 SELECTED_TABLES_STR=$(jq -r '.database.tables[]?' "$CONFIG_FILE" | tr '\n' ' ')
 
@@ -173,6 +176,11 @@ get_sample_limit() {
 is_date_type() {
     local type=$(echo "$1" | tr '[:upper:]' '[:lower:]')
     if [[ "$type" =~ "date" ]] || [[ "$type" =~ "time" ]] || [[ "$type" =~ "year" ]]; then echo "true"; else echo "false"; fi
+}
+
+is_bit_type() {
+    local type=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    if [[ "$type" == "bit" ]] || [[ "$type" == "boolean" ]] || [[ "$type" == "bool" ]]; then echo "true"; else echo "false"; fi
 }
 
 START_TIME=$(date +%s)
@@ -246,13 +254,18 @@ analyze_mysql() {
             
             MIN_VAL=""; MAX_VAL=""; TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
-                MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT MIN(\`$COL_NAME\`), MAX(\`$COL_NAME\`) FROM \`$TABLE\`;")
-                MIN_VAL=$(echo "$MINMAX" | cut -f1); MAX_VAL=$(echo "$MINMAX" | cut -f2)
+                IS_BIT=$(is_bit_type "$COL_TYPE")
+                if [ "$IS_BIT" == "false" ]; then
+                    MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT MIN(\`$COL_NAME\`), MAX(\`$COL_NAME\`) FROM \`$TABLE\`;")
+                    MIN_VAL=$(echo "$MINMAX" | cut -f1); MAX_VAL=$(echo "$MINMAX" | cut -f2)
+                else
+                    MIN_VAL="(Skipped for bit)"; MAX_VAL="(Skipped for bit)"
+                fi
                 IS_DATE=$(is_date_type "$COL_TYPE")
-                if [ "$IS_DATE" == "false" ]; then
+                if [ "$IS_DATE" == "false" ] && [ "$IS_BIT" == "false" ]; then
                     TOP_5=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(CONCAT(val, ' (', cnt, ')') SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val, COUNT(*) as cnt FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL GROUP BY \`$COL_NAME\` ORDER BY cnt DESC LIMIT 5) x;")
                 else
-                    TOP_5="(Skipped for Date/Time)"
+                    TOP_5="(Skipped for Date/Time/Bit)"
                 fi
             fi
 
@@ -276,58 +289,66 @@ analyze_postgres() {
     check_command "pg_dump" "libpq"
     export PGPASSWORD="$DB_PASS"
 
+    # Default schema to 'public' if not specified
+    [ -z "$DB_SCHEMA" ] && DB_SCHEMA="public"
+
     log_activity "Starting DDL Export..."
     pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -s "$DB_NAME" > "$DDL_FILE" 2>/dev/null
 
-    log_activity "Fetching Tables..."
+    log_activity "Fetching Tables from schema: $DB_SCHEMA..."
     if [ -n "$SELECTED_TABLES_STR" ]; then
         TABLES_ARRAY=($SELECTED_TABLES_STR)
     else
-        RAW_TABLES=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'")
+        RAW_TABLES=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT table_name FROM information_schema.tables WHERE table_schema = '$DB_SCHEMA' AND table_type = 'BASE TABLE'")
         TABLES_ARRAY=($RAW_TABLES)
     fi
     TOTAL_TABLES=${#TABLES_ARRAY[@]}
-    
+
     CURRENT_IDX=0; START_TIME=$(date +%s)
 
     for TABLE in "${TABLES_ARRAY[@]}"; do
         ((CURRENT_IDX++))
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
         log_activity "Processing Table: $TABLE"
-        
-        CHECK_EXIST=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT to_regclass('public.$TABLE')")
+
+        CHECK_EXIST=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT to_regclass('$DB_SCHEMA.$TABLE')")
         if [ -z "$CHECK_EXIST" ] || [ "$CHECK_EXIST" == "" ]; then continue; fi
 
-        TBL_SIZE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT ROUND(pg_total_relation_size('\"$TABLE\"') / 1024.0 / 1024.0, 2)")
+        TBL_SIZE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT ROUND(pg_total_relation_size('\"$DB_SCHEMA\".\"$TABLE\"') / 1024.0 / 1024.0, 2)")
         [ -z "$TBL_SIZE" ] && TBL_SIZE="0"
 
         COLUMNS=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "
             SELECT c.column_name, c.data_type,
-                (SELECT 'YES' FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name=tc.constraint_name WHERE kcu.table_name=c.table_name AND kcu.column_name=c.column_name AND tc.constraint_type='PRIMARY KEY' LIMIT 1),
-                (SELECT '-> ' || ccu.table_name || '.' || ccu.column_name FROM information_schema.key_column_usage AS kcu JOIN information_schema.referential_constraints AS rc ON kcu.constraint_name = rc.constraint_name JOIN information_schema.constraint_column_usage AS ccu ON rc.unique_constraint_name = ccu.constraint_name WHERE kcu.table_name = c.table_name AND kcu.column_name = c.column_name LIMIT 1),
+                (SELECT 'YES' FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name=tc.constraint_name WHERE kcu.table_schema=c.table_schema AND kcu.table_name=c.table_name AND kcu.column_name=c.column_name AND tc.constraint_type='PRIMARY KEY' LIMIT 1),
+                (SELECT '-> ' || ccu.table_name || '.' || ccu.column_name FROM information_schema.key_column_usage AS kcu JOIN information_schema.referential_constraints AS rc ON kcu.constraint_name = rc.constraint_name JOIN information_schema.constraint_column_usage AS ccu ON rc.unique_constraint_name = ccu.constraint_name WHERE kcu.table_schema = c.table_schema AND kcu.table_name = c.table_name AND kcu.column_name = c.column_name LIMIT 1),
                 COALESCE(c.column_default, ''), pg_catalog.col_description(format('%I.%I', c.table_schema, c.table_name)::regclass::oid, c.ordinal_position)
-            FROM information_schema.columns c WHERE c.table_schema = 'public' AND c.table_name = '$TABLE' ORDER BY c.ordinal_position")
+            FROM information_schema.columns c WHERE c.table_schema = '$DB_SCHEMA' AND c.table_name = '$TABLE' ORDER BY c.ordinal_position")
 
         echo "$COLUMNS" | while IFS="|" read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
-            QUERY_STATS="SELECT COUNT(*), COUNT(*) - COUNT(\"$COL_NAME\"), COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = ''), COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = '0'), MAX(LENGTH(CAST(\"$COL_NAME\" AS TEXT))), COUNT(DISTINCT \"$COL_NAME\") FROM \"$TABLE\""
+            QUERY_STATS="SELECT COUNT(*), COUNT(*) - COUNT(\"$COL_NAME\"), COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = ''), COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = '0'), MAX(LENGTH(CAST(\"$COL_NAME\" AS TEXT))), COUNT(DISTINCT \"$COL_NAME\") FROM \"$DB_SCHEMA\".\"$TABLE\""
             STATS_RESULT=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F"," -c "$QUERY_STATS")
             IFS=',' read -r TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS_RESULT"
 
             MIN_VAL=""; MAX_VAL=""; TOP_5=""
             if [ "$DEEP_ANALYSIS" == "true" ]; then
-                MINMAX=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "SELECT MIN(\"$COL_NAME\"::text), MAX(\"$COL_NAME\"::text) FROM \"$TABLE\"")
-                MIN_VAL=$(echo "$MINMAX" | cut -d'|' -f1); MAX_VAL=$(echo "$MINMAX" | cut -d'|' -f2)
-                IS_DATE=$(is_date_type "$COL_TYPE")
-                if [ "$IS_DATE" == "false" ]; then
-                    TOP_5=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT string_agg(val || ' (' || cnt || ')', ' | ') FROM (SELECT \"$COL_NAME\"::text as val, COUNT(*) as cnt FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL GROUP BY \"$COL_NAME\" ORDER BY cnt DESC LIMIT 5) x")
+                IS_BIT=$(is_bit_type "$COL_TYPE")
+                if [ "$IS_BIT" == "false" ]; then
+                    MINMAX=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "SELECT MIN(\"$COL_NAME\"::text), MAX(\"$COL_NAME\"::text) FROM \"$DB_SCHEMA\".\"$TABLE\"")
+                    MIN_VAL=$(echo "$MINMAX" | cut -d'|' -f1); MAX_VAL=$(echo "$MINMAX" | cut -d'|' -f2)
                 else
-                    TOP_5="(Skipped for Date/Time)"
+                    MIN_VAL="(Skipped for bit)"; MAX_VAL="(Skipped for bit)"
+                fi
+                IS_DATE=$(is_date_type "$COL_TYPE")
+                if [ "$IS_DATE" == "false" ] && [ "$IS_BIT" == "false" ]; then
+                    TOP_5=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT string_agg(val || ' (' || cnt || ')', ' | ') FROM (SELECT \"$COL_NAME\"::text as val, COUNT(*) as cnt FROM \"$DB_SCHEMA\".\"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL GROUP BY \"$COL_NAME\" ORDER BY cnt DESC LIMIT 5) x")
+                else
+                    TOP_5="(Skipped for Date/Time/Bit)"
                 fi
             fi
 
             LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
             [ -z "$LIMIT_N" ] && LIMIT_N=$DEFAULT_LIMIT
-            QUERY_SAMPLE="SELECT (SELECT string_agg(SUBSTR(\"$COL_NAME\"::text, 1, $MAX_TEXT_LEN), ' | ') FROM (SELECT \"$COL_NAME\" FROM \"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL LIMIT $LIMIT_N) t)"
+            QUERY_SAMPLE="SELECT (SELECT string_agg(SUBSTR(\"$COL_NAME\"::text, 1, $MAX_TEXT_LEN), ' | ') FROM (SELECT \"$COL_NAME\" FROM \"$DB_SCHEMA\".\"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL LIMIT $LIMIT_N) t)"
             SAMPLE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "$QUERY_SAMPLE")
             
             CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g' | tr -d '\n'); CLEAN_FK=$(echo "$FK_REF" | sed 's/"/""/g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
@@ -352,16 +373,18 @@ analyze_mssql() {
         log_activity "mssql-scripter not found. Skipping DDL."
     fi
 
-    log_activity "Fetching Tables..."
-    
+    # Default schema to 'dbo' if not specified
+    [ -z "$DB_SCHEMA" ] && DB_SCHEMA="dbo"
+
+    log_activity "Fetching Tables from schema: $DB_SCHEMA..."
+
     if [ -n "$SELECTED_TABLES_STR" ]; then
         TABLES_ARRAY=($SELECTED_TABLES_STR)
     else
-        # Added -C flag
-        RAW_TABLES=$(sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.tables WHERE type='U' ORDER BY name")
+        RAW_TABLES=$(sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.tables WHERE type='U' AND SCHEMA_NAME(schema_id) = '$DB_SCHEMA' ORDER BY name")
         IFS=$'\n' read -rd '' -a TABLES_ARRAY <<< "$RAW_TABLES"
     fi
-    
+
     TOTAL_TABLES=${#TABLES_ARRAY[@]}
     CURRENT_IDX=0; START_TIME=$(date +%s)
 
@@ -369,12 +392,13 @@ analyze_mssql() {
         ((CURRENT_IDX++))
         TABLE=$(echo "$TABLE" | xargs)
         if [ -z "$TABLE" ]; then continue; fi
-        
+
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
         log_activity "Processing Table: $TABLE"
 
         TSQL="
         SET NOCOUNT ON;
+        DECLARE @Schema NVARCHAR(128) = '$DB_SCHEMA';
         DECLARE @TName NVARCHAR(255) = '$TABLE';
         DECLARE @CName NVARCHAR(255), @DType NVARCHAR(100), @SQL NVARCHAR(MAX);
         DECLARE @PK NVARCHAR(10), @FK NVARCHAR(255), @Def NVARCHAR(MAX), @Comm NVARCHAR(MAX);
@@ -383,17 +407,18 @@ analyze_mssql() {
         DECLARE @DeepAnalysis VARCHAR(5) = '$DEEP_ANALYSIS';
         
         DECLARE @TableSizeMB DECIMAL(10,2);
-        SELECT @TableSizeMB = CAST(SUM(used_page_count) * 8.0 / 1024 AS DECIMAL(10,2)) FROM sys.dm_db_partition_stats WHERE object_id = OBJECT_ID(@TName);
+        DECLARE @FullTableName NVARCHAR(512) = @Schema + '.' + @TName;
+        SELECT @TableSizeMB = CAST(SUM(used_page_count) * 8.0 / 1024 AS DECIMAL(10,2)) FROM sys.dm_db_partition_stats WHERE object_id = OBJECT_ID(@FullTableName);
         SET @TableSizeMB = ISNULL(@TableSizeMB, 0);
 
-        DECLARE cur CURSOR FOR 
+        DECLARE cur CURSOR FOR
             SELECT c.name, ty.name,
                 CASE WHEN EXISTS(SELECT 1 FROM sys.indexes i JOIN sys.index_columns ic ON i.object_id=ic.object_id AND i.index_id=ic.index_id WHERE i.is_primary_key=1 AND ic.object_id=t.object_id AND ic.column_id=c.column_id) THEN 'YES' ELSE '' END,
                 ISNULL((SELECT TOP 1 '-> ' + OBJECT_NAME(fkc.referenced_object_id) + '.' + COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) FROM sys.foreign_key_columns fkc WHERE fkc.parent_object_id=t.object_id AND fkc.parent_column_id=c.column_id), ''),
                 ISNULL(object_definition(c.default_object_id), ''), ISNULL(CAST(ep.value AS NVARCHAR(MAX)), '')
             FROM sys.tables t JOIN sys.columns c ON t.object_id = c.object_id JOIN sys.types ty ON c.user_type_id = ty.user_type_id
             LEFT JOIN sys.extended_properties ep ON ep.major_id = t.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
-            WHERE t.name = @TName ORDER BY c.column_id;
+            WHERE t.name = @TName AND SCHEMA_NAME(t.schema_id) = @Schema ORDER BY c.column_id;
 
         OPEN cur; FETCH NEXT FROM cur INTO @CName, @DType, @PK, @FK, @Def, @Comm;
         WHILE @@FETCH_STATUS = 0
@@ -414,22 +439,31 @@ analyze_mssql() {
                         @Zeros = SUM(CASE WHEN CAST([' + @CName + '] AS NVARCHAR(MAX)) = ''0'' THEN 1 ELSE 0 END),
                         @MaxLen = MAX(LEN([' + @CName + '])),
                         @Dist = COUNT(DISTINCT [' + @CName + '])
-                    FROM [' + @TName + '];
+                    FROM ' + @FullTableName + ';
 
                     IF ''' + @DeepAnalysis + ''' = ''true''
                     BEGIN
-                        SELECT @MinVal = CAST(MIN([' + @CName + ']) AS NVARCHAR(MAX)), @MaxVal = CAST(MAX([' + @CName + ']) AS NVARCHAR(MAX)) FROM [' + @TName + '];
-                        IF ''' + @DType + ''' NOT LIKE ''%date%'' AND ''' + @DType + ''' NOT LIKE ''%time%''
+                        IF ''' + @DType + ''' NOT IN (''bit'')
                         BEGIN
-                             SELECT @Top5 = STUFF((SELECT '' | '' + CAST(val AS NVARCHAR(MAX)) + '' ('' + CAST(cnt AS NVARCHAR(MAX)) + '')'' FROM (SELECT TOP 5 CAST([' + @CName + '] AS NVARCHAR(MAX)) as val, COUNT(*) as cnt FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL GROUP BY [' + @CName + '] ORDER BY cnt DESC) x FOR XML PATH('''')), 1, 3, '''');
+                            SELECT @MinVal = CAST(MIN([' + @CName + ']) AS NVARCHAR(MAX)), @MaxVal = CAST(MAX([' + @CName + ']) AS NVARCHAR(MAX)) FROM ' + @FullTableName + ';
                         END
-                        ELSE SET @Top5 = ''(Skipped for Date/Time)'';
+                        ELSE
+                        BEGIN
+                            SET @MinVal = ''(Skipped for bit)'';
+                            SET @MaxVal = ''(Skipped for bit)'';
+                        END
+
+                        IF ''' + @DType + ''' NOT LIKE ''%date%'' AND ''' + @DType + ''' NOT LIKE ''%time%'' AND ''' + @DType + ''' NOT IN (''bit'')
+                        BEGIN
+                             SELECT @Top5 = STUFF((SELECT '' | '' + CAST(val AS NVARCHAR(MAX)) + '' ('' + CAST(cnt AS NVARCHAR(MAX)) + '')'' FROM (SELECT TOP 5 CAST([' + @CName + '] AS NVARCHAR(MAX)) as val, COUNT(*) as cnt FROM ' + @FullTableName + ' WHERE [' + @CName + '] IS NOT NULL GROUP BY [' + @CName + '] ORDER BY cnt DESC) x FOR XML PATH('''')), 1, 3, '''');
+                        END
+                        ELSE SET @Top5 = ''(Skipped for Date/Time/Bit)'';
                     END
 
                     DECLARE @Limit INT = ' + CAST(@DefaultLimit AS VARCHAR) + ';
                     IF @Dist = 1 SET @Limit = 1;
 
-                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), CHAR(34), CHAR(34) + CHAR(34)) FROM [' + @TName + '] WHERE [' + @CName + '] IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
+                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), CHAR(34), CHAR(34) + CHAR(34)) FROM ' + @FullTableName + ' WHERE [' + @CName + '] IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
 
                     PRINT ''' + @TName + ','' + ''' + @CName + ','' + ''' + @DType + ','' + ''' + @PK + ','' + CHAR(34) + REPLACE(REPLACE(''' + REPLACE(@FK,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)), ''NULL'', '''') + CHAR(34) + '','' + CHAR(34) + REPLACE(''' + REPLACE(@Def,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)) + CHAR(34) + '','' + CHAR(34) + REPLACE(''' + REPLACE(@Comm,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)) + CHAR(34) + '','' +
                           CAST(@Total AS VARCHAR) + '','' + CAST(@TblSizeMB AS VARCHAR) + '','' + CAST(@Nulls AS VARCHAR) + '','' + CAST(@Empties AS VARCHAR) + '','' + CAST(@Zeros AS VARCHAR) + '','' +

@@ -1,115 +1,194 @@
-# **🏥 HIS Database Migration Toolkit (Center)**
+# 🏥 HIS Database Migration Toolkit (Center)
 
-**ศูนย์กลางเครื่องมือ (Centralized Dashboard)** สำหรับบริหารจัดการการย้ายฐานข้อมูลโรงพยาบาล (HIS)
+ศูนย์กลางเครื่องมือ (Centralized Dashboard)
+สำหรับบริหารจัดการการย้ายฐานข้อมูลโรงพยาบาล (HIS)\
+รวบรวมเครื่องมือตั้งแต่การ **วิเคราะห์ข้อมูล (Profiling)**,
+**จำลองข้อมูล (Mockup)**, จนถึง **สร้าง Config (Schema Mapping)**
+ไว้ในที่เดียว
 
-รวบรวมเครื่องมือตั้งแต่การ **วิเคราะห์ข้อมูล (Profiling)**, **จำลองข้อมูล (Mockup)**, จนถึง **สร้าง Config (Schema Mapping)** ไว้ในที่เดียว
+---
 
-## **📂 โครงสร้างโปรเจกต์ (Project Structure)**
+## 📂 โครงสร้างโปรเจกต์ (Project Structure)
 
-my-migration-tool/  
-├── app.py \<-- 🌟 Main Application (Streamlit Dashboard)  
-├── requirements.txt \<-- Python Dependencies  
-├── README.md \<-- Documentation  
-│  
-├── analysis_report/ \<-- ⚙️ Engine วิเคราะห์ DB จริง  
-│ ├── config.json \# การตั้งค่าเชื่อมต่อ DB  
-│ ├── unified_db_analyzer.sh \# Script หลักในการวิเคราะห์  
-│ ├── csv_to_html.py \# Script สร้าง Report HTML  
-│ └── migration_report/ \# โฟลเดอร์เก็บผลลัพธ์ (CSV/HTML/SQL)  
-│  
-└── mini_his/ \<-- 🎲 Engine สร้างข้อมูลจำลอง  
- ├── gen_mini_his.py \# Python script generate data  
- └── full_his_mockup.sql \# SQL ตั้งต้น
+    my-migration-tool/
+    ├── app.py                  <-- 🌟 Main Application (Streamlit Dashboard)
+    ├── requirements.txt        <-- Python Dependencies
+    ├── README.md               <-- Documentation
+    │
+    ├── analysis_report/        <-- ⚙️ Engine วิเคราะห์ DB จริง
+    │   ├── config.json             # การตั้งค่าเชื่อมต่อ DB
+    │   ├── unified_db_analyzer.sh  # Script หลักในการวิเคราะห์
+    │   ├── csv_to_html.py          # Script สร้าง Report HTML
+    │   └── migration_report/       # โฟลเดอร์เก็บผลลัพธ์ (CSV/HTML/SQL)
+    │
+    └── mini_his/               <-- 🎲 Engine สร้างข้อมูลจำลอง
+        ├── gen_mini_his.py         # Python script generate data
+        └── full_his_mockup.sql     # SQL ตั้งต้น
 
-## **🛠 Tech Stack & Requirements**
+---
+
+## 🛠 Tech Stack & Requirements
 
 ### **Environment**
 
-- **OS:** Linux, macOS, Windows (via WSL2)
-- **Shell:** Bash 4.0+ (มีระบบ Auto-switch ให้บน macOS)
+- OS: Linux, macOS, Windows (via WSL2)\
+- Shell: Bash 4.0+ (มีระบบ Auto-switch ให้บน macOS)
 
 ### **Core Technologies**
 
-- **Frontend / UI:** [Streamlit](https://streamlit.io/) (Python)
-- **Data Processing:** Pandas
-- **Scripting:** Bash, Python 3
-- **Database Clients:** mysql-client, postgresql-client, sqlcmd (MSSQL)
-- **JSON Processor:** jq
+- Frontend / UI: Streamlit (Python)
+- Data Processing: Pandas
+- Scripting: Bash, Python 3
+- Database Clients: mysql-client, postgresql-client, sqlcmd (MSSQL)
+- JSON Processor: jq
 
-## **🚀 วิธีการติดตั้งและใช้งาน (Installation & Usage)**
+---
 
-### **1️⃣ ติดตั้ง Dependencies**
+## 🚀 วิธีการติดตั้ง (Installation) - _Recommended_
 
-เปิด Terminal ที่ Root Folder ของโปรเจกต์และรันคำสั่ง:
+แนะนำให้ติดตั้งผ่าน **Virtual Environment (venv)** เพื่อกันปัญหา Version
+ตีกันกับ Python ของระบบ (โดยเฉพาะ macOS)
 
-pip install \-r requirements.txt
+---
 
-### **2️⃣ เริ่มต้นใช้งาน (Start Dashboard)**
+### **1️⃣ สร้างและเปิดใช้งาน Environment**
 
-รันคำสั่งเพื่อเปิดหน้า Dashboard:
+```bash
+# 1. สร้าง Virtual Environment
+python3 -m venv venv
 
-python3 -m streamlit run app.py --server.runOnSave true
+# 2. เปิดใช้งาน Environment
+source venv/bin/activate
+# Windows:
+# venv\Scriptsctivate
+```
 
-_ระบบจะเปิด Browser ไปที่ http://localhost:8501 อัตโนมัติ_
+---
 
-## **🔄 Workflow การทำงาน**
+### **2️⃣ ติดตั้ง Dependencies**
+
+```bash
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+---
+
+### **3️⃣ เริ่มต้นใช้งาน (Start Dashboard)**
+
+```bash
+streamlit run app.py --server.runOnSave true
+```
+
+เปิด Browser อัตโนมัติที่:\
+👉 http://localhost:8501
+
+---
+
+## ❓ ปัญหาที่พบบ่อย (Troubleshooting)
+
+### ❌ **Error:**
+
+`TypeError: data_editor() got an unexpected keyword argument 'selection_mode'`
+
+**สาเหตุ:**\
+เครื่องใช้ _Streamlit เวอร์ชันเก่า_ แม้จะสั่ง upgrade แล้วก็ตาม โดยเฉพาะ
+macOS ที่ชอบเรียก Python ระบบ
+
+---
+
+### ✅ **วิธีแก้ไข**
+
+#### **วิธีที่ 1: ใช้ Virtual Environment (แนะนำที่สุด)**
+
+แก้ปัญหา Path ตีกัน 100%
+
+#### **วิธีที่ 2: Clean Install**
+
+```bash
+python3 -m pip uninstall streamlit -y
+python3 -m pip uninstall streamlit -y
+
+python3 -m pip install --upgrade --force-reinstall streamlit
+
+python3 -m streamlit run app.py
+```
+
+---
+
+## 🔄 Workflow การทำงาน
 
 ### **Step 1: วิเคราะห์ข้อมูล (Analyze Database)**
 
-1. เข้าไปแก้ไขไฟล์ analysis_report/config.json เพื่อระบุ Database เป้าหมาย
-2. เข้าไปที่โฟลเดอร์ analysis_report/ แล้วรัน Script วิเคราะห์:  
-   cd analysis_report  
-   ./unified_db_analyzer.sh
+แก้ไข `analysis_report/config.json` แล้วรัน:
 
-3. รอจนเสร็จ ระบบจะสร้าง Report ไว้ใน migration_report/YYYYMMDD_HHMM/
+```bash
+cd analysis_report
+./unified_db_analyzer.sh
+```
+
+ระบบจะสร้าง Report ใน `migration_report/YYYYMMDD_HHMM/`
+
+---
 
 ### **Step 2: ตรวจสอบและ Map Schema**
 
-1. กลับมาที่หน้า **Streamlit Dashboard** (app.py)
-2. เลือกเมนู **"📊 Schema Mapper"**
-3. เลือก Report ล่าสุด และเลือก Table ที่ต้องการ
-4. ระบบจะแสดงข้อมูลสถิติและให้คุณ **Map Field** ปลายทาง พร้อมเลือก **Transformer**
+บน Streamlit Dashboard:
+
+- เปิดเมนู **📊 Schema Mapper**
+- เลือก Report ล่าสุด
+- เลือก Table
+- ระบบแสดงสถิติ + ให้ Map Field + เลือก Transformer
+
+---
 
 ### **Step 3: สร้าง Config (Generate Code)**
 
-1. เมื่อ Map เสร็จแล้ว กดปุ่ม **"⚡ Generate TypeScript Config"**
-2. Copy โค้ดที่ได้ไปใช้ในโปรเจกต์ Migration หลัก (Registry Pattern)
+กดปุ่ม\
+**⚡ Generate TypeScript Config**\
+แล้วนำโค้ดไปใช้ในระบบ Migration หลัก
 
-## **🔥 Killer Features**
+---
 
-### **🚀 Interactive DDL Explorer**
+## 🔥 Killer Features
 
-- คลิกที่ **ชื่อตาราง** ใน HTML Report เพื่อดู **SQL Create Table** ได้ทันที
-- คลิกที่ **Foreign Key (FK)** เพื่อ Jump ไปดูโครงสร้างตารางปลายทาง
+### 🚀 **Interactive DDL Explorer**
 
-### **🧠 Deep Analysis Mode**
+- คลิกชื่อตารางเพื่อดู SQL Create Table แบบทันที\
+- คลิก FK เพื่อ Jump ไปตารางที่เกี่ยวข้อง
 
-- **Data Profiling:** วิเคราะห์ข้อมูลพื้นฐาน (Row Count, Nulls, Max Length, Distinct)
-- **Smart Skip:** ข้ามการหา Top 5 อัตโนมัติสำหรับคอลัมน์ Date/Time เพื่อความเร็วสูงสุด
-- **Data Composition:** แสดงกราฟแท่งซ้อน (Stacked Bar) แยกสัดส่วนข้อมูล:
-  - 🟩 **Valid:** ข้อมูลปกติ
-  - ⬛ **Null:** ค่าว่างทาง Database
-  - 🟥 **Empty:** สตริงว่าง "" (จุดเสี่ยง Migration)
-  - 🟨 **Zero:** ค่าเลข 0
+### 🧠 **Deep Analysis Mode**
 
-### **🛡️ Auto-Environment Guard**
+- Row Count\
+- Null / Distinct\
+- Min/Max\
+- Top 5 Frequency\
+- Data Composition แยก Valid / Null / Empty / Zero
 
-- Script ตรวจสอบและสลับไปใช้ **Bash เวอร์ชันใหม่** ให้อัตโนมัติเพื่อแก้ปัญหา Performance บน macOS
+### 🛡️ Auto-Environment Guard
 
-## **⚙️ การตั้งค่า Deep Analysis**
+สลับไปใช้ Bash เวอร์ชันใหม่บน macOS อัตโนมัติ
 
-ในไฟล์ analysis_report/config.json:
+---
+
+## ⚙️ การตั้งค่า Deep Analysis
+
+แก้ไขใน `analysis_report/config.json`:
 
 ```json
 "sampling": {
- "default_limit": 10,
- "deep_analysis": true, // true \= เปิดโหมดวิเคราะห์ละเอียด
- "exceptions": \[...\]
+  "default_limit": 10,
+  "deep_analysis": true,
+  "exceptions": []
 }
 ```
 
-| Feature          | Basic Mode (false)             | Deep Mode (true)                                                       |
-| :--------------- | :----------------------------- | :--------------------------------------------------------------------- |
-| **Performance**  | ⚡ เร็วมาก                     | 🐢 ช้ากว่า (ต้อง Scan ข้อมูล)                                          |
-| **Data Insight** | Row Count, Nulls, Distinct     | \+ **Min/Max Values** \+ **Top 5 Freq Values** \+ **Data Composition** |
-| **Use Case**     | ประเมินภาพรวม, ตาราง Log ใหญ่ๆ | การทำ Data Mapping, หาค่าผิดปกติ                                       |
+Feature Basic Mode Deep Mode
+
+---
+
+Performance ⚡ เร็วมาก 🐢 ช้ากว่า
+Data Insight Basic \+ Min/Max, Top 5, Composition
+Use Case ตารางใหญ่ Mapping ละเอียด
+
+---

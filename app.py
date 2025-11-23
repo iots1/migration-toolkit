@@ -46,7 +46,8 @@ def get_report_folders():
 @st.cache_data
 def load_data_profile(report_folder):
     csv_path = os.path.join(report_folder, "data_profile", "data_profile.csv")
-    if os.path.exists(csv_path): return pd.read_csv(csv_path)
+    if os.path.exists(csv_path): 
+        return pd.read_csv(csv_path)
     return None
 
 def to_camel_case(snake_str):
@@ -86,7 +87,7 @@ def init_editor_state(df, table_name):
                 "Type": dtype,
                 "Target Column": target_col,
                 "Transformers": ", ".join(transformers),
-                "Validators": ", ".join(validators),  # Now storing as comma-sep string
+                "Validators": ", ".join(validators),
                 "Required": False,
                 "Ignore": False,
                 "Sample": str(row.get('Sample_Values', ''))[:50]
@@ -135,15 +136,37 @@ export const {class_name}: TableDefinition = {{
 {mappings_str}  ]
 }};"""
 
+# --- SAFETY WRAPPER ---
+def safe_data_editor(df, **kwargs):
+    """
+    A wrapper for st.data_editor that automatically removes 
+    incompatible arguments (like selection_mode) if running on old Streamlit.
+    """
+    try:
+        # Try running with all features (including selection_mode)
+        return st.data_editor(df, **kwargs)
+    except TypeError:
+        # If it fails (likely due to old version), remove the new arguments and retry
+        unsafe_args = ['selection_mode', 'on_select']
+        clean_kwargs = {k: v for k, v in kwargs.items() if k not in unsafe_args}
+        
+        # Show a tiny warning once
+        if "ver_warn" not in st.session_state:
+            st.warning(f"⚠️ Running compatibility mode (Streamlit v{st.__version__}). Please update for full features.")
+            st.session_state["ver_warn"] = True
+            
+        return st.data_editor(df, **clean_kwargs)
+
 # --- UI LAYOUT ---
 
-st.title("🏥 HIS Migration Toolkit Center")
+st.title("🏥 HIS Migration Toolkit Center (v1.2)") # Changed title to verify update
 
 with st.sidebar:
     st.header("Navigate")
     page = st.radio("Go to", ["📊 Schema Mapper", "📁 File Explorer", "⚙️ Configuration"])
     st.divider()
     st.caption(f"📂 Root: {BASE_DIR}")
+    st.caption(f"⚡ Streamlit: {st.__version__}")
 
 if page == "📊 Schema Mapper":
     report_folders = get_report_folders()
@@ -152,11 +175,14 @@ if page == "📊 Schema Mapper":
     c1, c2 = st.columns([1, 3])
     with c1:
         if not report_folders:
-            st.error("No reports found!")
+            st.warning("⚠️ No reports found in analysis_report/migration_report folder.")
             st.stop()
+            
         selected_folder = st.selectbox("Run ID", report_folders, format_func=lambda x: os.path.basename(x))
         df_raw = load_data_profile(selected_folder)
-        if df_raw is None: st.stop()
+        if df_raw is None: 
+            st.error(f"Could not load data_profile.csv from {selected_folder}")
+            st.stop()
         
     with c2:
         tables = df_raw['Table'].unique()
@@ -171,23 +197,50 @@ if page == "📊 Schema Mapper":
         # Layout: Main Editor + Detail Panel
         col_main, col_detail = st.columns([2, 1])
         
+        # --- [FEATURE] Prepare Selection Logic ---
+        columns_list = st.session_state[f"df_{selected_table}"]['Source Column'].tolist()
+        
+        # Default index for selectbox (synced with table selection)
+        default_sb_index = 0 
+        
+        # Check editor state for selection
+        editor_key = f"editor_{selected_table}"
+        if editor_key in st.session_state:
+            selection = st.session_state[editor_key].get("selection", {})
+            selected_rows = selection.get("rows", [])
+            
+            # If a row is selected in the table, use its index for the selectbox
+            if selected_rows:
+                if selected_rows[0] < len(columns_list):
+                    default_sb_index = selected_rows[0]
+
         with col_main:
             st.subheader(f"📋 Mapping Table: {selected_table}")
+            st.caption("Tip: Click on a row to edit its pipeline on the right.")
             
-            # MAIN TABLE EDITOR
-            edited_df = st.data_editor(
-                st.session_state[f"df_{selected_table}"],
-                column_config={
+            # Prepare Config
+            editor_config = {
+                "column_config": {
                     "Source Column": st.column_config.TextColumn(disabled=True),
                     "Type": st.column_config.TextColumn(disabled=True, width="small"),
                     "Transformers": st.column_config.TextColumn(disabled=True, help="Use 'Advanced Editor' to edit"),
                     "Validators": st.column_config.TextColumn(disabled=True, help="Use 'Advanced Editor' to edit"),
+                    "Sample": st.column_config.TextColumn(disabled=True, width="medium"),
                 },
-                use_container_width=True,
-                hide_index=True,
-                num_rows="fixed",
-                key=f"editor_{selected_table}",
-                height=500
+                "use_container_width": True,
+                "hide_index": True,
+                "num_rows": "fixed",
+                "key": editor_key,
+                "height": 500,
+                # Add new features here (Wrapper will handle if they fail)
+                "selection_mode": "single-row",
+                "on_select": "rerun"
+            }
+            
+            # --- MAIN TABLE EDITOR (SAFE WRAPPER) ---
+            edited_df = safe_data_editor(
+                st.session_state[f"df_{selected_table}"],
+                **editor_config
             )
             
             # Sync manual table edits back to session state
@@ -197,31 +250,35 @@ if page == "📊 Schema Mapper":
 
         with col_detail:
             st.subheader("✏️ Advanced Editor")
-            st.info("Select field to edit Pipelines")
             
-            # 1. Select Column to Edit
-            columns_list = st.session_state[f"df_{selected_table}"]['Source Column'].tolist()
-            col_to_edit = st.selectbox("Select Field", columns_list)
+            # Select Column to Edit (Synced via index)
+            col_to_edit = st.selectbox(
+                "Select Field", 
+                columns_list, 
+                index=default_sb_index,
+                key="sb_field_selector"
+            )
             
             if col_to_edit:
-                # Get current row data
                 current_row_idx = st.session_state[f"df_{selected_table}"].index[
                     st.session_state[f"df_{selected_table}"]['Source Column'] == col_to_edit
                 ].tolist()[0]
                 
                 current_row = st.session_state[f"df_{selected_table}"].iloc[current_row_idx]
                 
+                st.info(f"Target: **{current_row['Target Column']}** | Type: `{current_row['Type']}`")
+                
                 # --- TRANSFORMERS ---
                 st.caption("🛠️ Transformers Pipeline")
                 current_trans_str = current_row.get('Transformers', '')
                 default_trans = [t.strip() for t in str(current_trans_str).split(', ') if t.strip()]
-                default_trans = [t for t in default_trans if t in TRANSFORMER_OPTIONS] # Filter valid
+                default_trans = [t for t in default_trans if t in TRANSFORMER_OPTIONS]
 
                 new_transformers = st.multiselect(
                     "Select Transformers",
                     options=TRANSFORMER_OPTIONS,
                     default=default_trans,
-                    key="ms_trans",
+                    key=f"ms_trans_{current_row_idx}", 
                     label_visibility="collapsed"
                 )
 
@@ -229,27 +286,26 @@ if page == "📊 Schema Mapper":
                 st.caption("🛡️ Validators Pipeline")
                 current_val_str = current_row.get('Validators', '')
                 default_val = [v.strip() for v in str(current_val_str).split(', ') if v.strip()]
-                default_val = [v for v in default_val if v in VALIDATOR_OPTIONS] # Filter valid
+                default_val = [v for v in default_val if v in VALIDATOR_OPTIONS]
 
                 new_validators = st.multiselect(
                     "Select Validators",
                     options=VALIDATOR_OPTIONS,
                     default=default_val,
-                    key="ms_val",
+                    key=f"ms_val_{current_row_idx}",
                     label_visibility="collapsed"
                 )
                 
                 # 3. Apply Button
                 st.markdown("<br>", unsafe_allow_html=True)
                 if st.button("Update Pipeline", type="primary", use_container_width=True):
-                    # Update DataFrame
                     trans_str = ", ".join(new_transformers)
                     val_str = ", ".join(new_validators)
                     
                     st.session_state[f"df_{selected_table}"].at[current_row_idx, 'Transformers'] = trans_str
                     st.session_state[f"df_{selected_table}"].at[current_row_idx, 'Validators'] = val_str
                     
-                    st.toast(f"Updated {col_to_edit}!", icon="✅")
+                    st.toast(f"Updated pipeline for {col_to_edit}!", icon="✅")
                     st.rerun()
 
         # Code Gen Section
@@ -264,19 +320,21 @@ if page == "📊 Schema Mapper":
     else:
         st.info("Please select a table.")
 
-# (File Explorer & Config pages remain the same...)
 elif page == "📁 File Explorer":
     st.subheader("Project Files Structure")
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("### 📂 Analysis Report")
         if os.path.exists(ANALYSIS_DIR): st.code("\n".join(os.listdir(ANALYSIS_DIR)))
+        else: st.warning("Analysis dir not found")
     with col2:
         st.markdown("### 📂 Mini HIS (Mockup)")
         mini_his_dir = os.path.join(BASE_DIR, "mini_his")
         if os.path.exists(mini_his_dir): st.code("\n".join(os.listdir(mini_his_dir)))
+        else: st.warning("Mini HIS dir not found")
 
 elif page == "⚙️ Configuration":
     st.subheader("Database Configuration")
     config = load_config()
     if config: st.json(config)
+    else: st.warning("No config.json found")

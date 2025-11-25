@@ -5,6 +5,7 @@ import json
 from config import TRANSFORMER_OPTIONS, VALIDATOR_OPTIONS
 import utils.helpers as helpers
 import database as db
+from services.db_connector import get_tables_from_datasource, get_columns_from_table
 
 def render_schema_mapper_page():
     report_folders = helpers.get_report_folders()
@@ -53,13 +54,97 @@ def render_schema_mapper_page():
         init_editor_state(df_raw[df_raw['Table'] == selected_table], selected_table)
         
         with st.expander("⚙️ Table Configuration", expanded=True):
+            # Load datasources
+            datasources_df = db.get_datasources()
+            if datasources_df.empty:
+                st.warning("⚠️ No datasources configured. Please add datasources in Settings page.")
+                datasource_names = []
+            else:
+                datasource_names = datasources_df['name'].tolist()
+
             conf_c1, conf_c2, conf_c3 = st.columns(3)
             with conf_c1:
                 module_input = st.text_input("Module", value="patient", key=f"mod_{selected_table}")
-                source_db_input = st.text_input("Source DB", value="hos_db", key=f"src_{selected_table}")
+
+                # Source DB as datasource dropdown
+                source_db_index = 0
+                if f"source_db_{selected_table}" in st.session_state and st.session_state[f"source_db_{selected_table}"] in datasource_names:
+                    source_db_index = datasource_names.index(st.session_state[f"source_db_{selected_table}"])
+
+                if datasource_names:
+                    source_db_input = st.selectbox(
+                        "Source DB",
+                        options=datasource_names,
+                        index=source_db_index,
+                        key=f"src_{selected_table}",
+                        help="Select datasource from configured list"
+                    )
+
+                    # Show available tables from source datasource
+                    source_datasource = db.get_datasource_by_name(source_db_input)
+                    if source_datasource:
+                        success, result = get_tables_from_datasource(
+                            source_datasource['db_type'],
+                            source_datasource['host'],
+                            source_datasource['port'],
+                            source_datasource['dbname'],
+                            source_datasource['username'],
+                            source_datasource['password']
+                        )
+                        if success and result:
+                            st.caption(f"📊 {len(result)} tables available")
+                else:
+                    source_db_input = st.text_input("Source DB", value="", key=f"src_{selected_table}", disabled=True)
+
             with conf_c2:
-                target_db_input = st.text_input("Target DB", value="hospital_new", key=f"tgt_{selected_table}")
-                target_table_input = st.text_input("Target Table", value=selected_table, key=f"tbl_{selected_table}")
+                # Target DB as datasource dropdown
+                target_db_index = 0
+                if f"target_db_{selected_table}" in st.session_state and st.session_state[f"target_db_{selected_table}"] in datasource_names:
+                    target_db_index = datasource_names.index(st.session_state[f"target_db_{selected_table}"])
+
+                if datasource_names:
+                    target_db_input = st.selectbox(
+                        "Target DB",
+                        options=datasource_names,
+                        index=target_db_index,
+                        key=f"tgt_{selected_table}",
+                        help="Select datasource from configured list"
+                    )
+
+                    # Load tables from target datasource
+                    target_datasource = db.get_datasource_by_name(target_db_input)
+                    if target_datasource:
+                        success, result = get_tables_from_datasource(
+                            target_datasource['db_type'],
+                            target_datasource['host'],
+                            target_datasource['port'],
+                            target_datasource['dbname'],
+                            target_datasource['username'],
+                            target_datasource['password']
+                        )
+
+                        if success and result:
+                            target_tables = result
+                            target_table_index = 0
+                            if selected_table in target_tables:
+                                target_table_index = target_tables.index(selected_table)
+
+                            target_table_input = st.selectbox(
+                                "Target Table",
+                                options=target_tables,
+                                index=target_table_index,
+                                key=f"tbl_{selected_table}",
+                                help="Select target table from database"
+                            )
+                        else:
+                            st.warning(f"⚠️ Could not load tables: {result}")
+                            target_table_input = st.text_input("Target Table", value=selected_table, key=f"tbl_{selected_table}")
+                    else:
+                        target_table_input = st.text_input("Target Table", value=selected_table, key=f"tbl_{selected_table}")
+                else:
+                    target_db_input = st.text_input("Target DB", value="", key=f"tgt_{selected_table}", disabled=True)
+                    target_table_input = st.text_input("Target Table", value="", key=f"tbl_{selected_table}", disabled=True)
+
             with conf_c3:
                 all_tables = df_raw['Table'].unique().tolist()
                 dependencies_input = st.multiselect("Dependencies", options=all_tables, key=f"dep_{selected_table}")
@@ -95,8 +180,48 @@ def render_schema_mapper_page():
             if col_to_edit:
                 row_idx = st.session_state[f"df_{selected_table}"].index[st.session_state[f"df_{selected_table}"]['Source Column'] == col_to_edit].tolist()[0]
                 row_data = st.session_state[f"df_{selected_table}"].iloc[row_idx]
-                st.info(f"Target: `{row_data['Target Column']}`")
-                
+
+                # Get target column suggestions from target table
+                target_column_suggestions = []
+                if datasource_names and target_db_input and target_table_input:
+                    target_datasource = db.get_datasource_by_name(target_db_input)
+                    if target_datasource:
+                        success, columns_result = get_columns_from_table(
+                            target_datasource['db_type'],
+                            target_datasource['host'],
+                            target_datasource['port'],
+                            target_datasource['dbname'],
+                            target_datasource['username'],
+                            target_datasource['password'],
+                            target_table_input
+                        )
+                        if success and columns_result:
+                            target_column_suggestions = [col['name'] for col in columns_result]
+
+                # Target Column input with suggestions
+                current_target = row_data.get('Target Column', '')
+                if target_column_suggestions:
+                    if current_target not in target_column_suggestions:
+                        target_column_suggestions.insert(0, current_target)
+
+                    target_col_index = 0
+                    if current_target in target_column_suggestions:
+                        target_col_index = target_column_suggestions.index(current_target)
+
+                    new_target_column = st.selectbox(
+                        "Target Column",
+                        options=target_column_suggestions,
+                        index=target_col_index,
+                        key=f"tgt_col_{row_idx}",
+                        help="Select from target table columns"
+                    )
+                else:
+                    new_target_column = st.text_input(
+                        "Target Column",
+                        value=current_target,
+                        key=f"tgt_col_{row_idx}"
+                    )
+
                 t1, t2 = st.tabs(["Pipeline", "Lookup"])
                 with t1:
                     curr_trans = row_data.get('Transformers', '')
@@ -110,6 +235,7 @@ def render_schema_mapper_page():
                     new_lookup_by = st.text_input("Lookup By", value=helpers.safe_str(row_data.get('Lookup By', '')), key=f"txt_lb_{row_idx}")
 
                 if st.button("Apply", type="primary", use_container_width=True, key=f"btn_{row_idx}"):
+                    st.session_state[f"df_{selected_table}"].at[row_idx, 'Target Column'] = new_target_column
                     st.session_state[f"df_{selected_table}"].at[row_idx, 'Transformers'] = ", ".join(new_trans)
                     st.session_state[f"df_{selected_table}"].at[row_idx, 'Validators'] = ", ".join(new_val)
                     st.session_state[f"df_{selected_table}"].at[row_idx, 'Lookup Table'] = new_lookup_table

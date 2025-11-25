@@ -1,13 +1,32 @@
 #!/usr/bin/env bash
 
 # ==============================================================================
-# HIS DATABASE MIGRATION ANALYZER (v7.5 - Final MSSQL Fix)
-# Fix: Simplified Dynamic SQL construction to prevent variable scope errors
+# HIS DATABASE MIGRATION ANALYZER (v7.1 - Smart Sample Data)
+# Features:
+#   1. **New:** Smart sample data filtering (NOT NULL AND NOT EMPTY) for all databases
+#   2. **New:** Schema support for PostgreSQL and MSSQL (configurable via config.json)
+#   3. **Fix:** Skip MIN/MAX operations for bit/boolean datatypes to avoid errors
+#   4. **Fix:** Schema defaults: empty string → 'public' (PG) or 'dbo' (MSSQL)
+#   5. **Fix:** Suppressed "Null value eliminated" warnings with SET ANSI_WARNINGS OFF
+#   6. **Fix:** Fixed CSV output format - changed SELECT to PRINT statement
+#   7. **Fix:** Fixed @TableSizeMB and @DType variable scope issues in dynamic SQL
+#   8. **Fix:** Fixed quote escaping using CHAR(34) to avoid bash interpretation
+#   9. **Fix:** Added '-C' flag to sqlcmd to trust self-signed certificates
+#  10. **New:** Auto-install support for sqlcmd (mssql-tools18)
+#  11. Table Size (MB) Calculation & Data Composition Analysis
 # ==============================================================================
 
-# ... [ส่วน Check Version, Setup, Log เหมือนเดิม] ...
-# (เพื่อความกระชับ ผมขอยกเฉพาะส่วน analyze_mssql ที่แก้ใหม่มาให้ครับ)
-# คุณสามารถ copy ทั้งก้อนนี้ไปวางทับได้เลย
+# --- [CRITICAL] AUTO-SWITCH BASH VERSION ---
+if [ -z "$BASH_VERSINFO" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    CANDIDATE_PATHS=("/opt/homebrew/bin/bash" "/usr/local/bin/bash" "/usr/bin/bash")
+    for NEW_BASH in "${CANDIDATE_PATHS[@]}"; do
+        if [ -x "$NEW_BASH" ]; then
+            VER=$("$NEW_BASH" --version | head -n 1 | grep -oE '[0-9]\.[0-9]+' | head -n 1)
+            MAJOR=${VER%%.*}
+            if [ "$MAJOR" -ge 4 ]; then exec "$NEW_BASH" "$0" "$@"; fi
+        fi
+    done
+fi
 
 # --- SETUP ---
 BASE_OUTPUT_DIR="./migration_report"
@@ -42,19 +61,75 @@ echo "Table,Column,DataType,PK,FK,Default,Comment,Total_Rows,Table_Size_MB,Null_
 check_command() {
     local cmd="$1"
     local brew_pkg="$2"
+
+    # 1. Auto-detect Homebrew Keg-Only Paths
     if [ -n "$brew_pkg" ] && command -v brew &> /dev/null; then
          BREW_PREFIX=$(brew --prefix)
-         POSSIBLE_PATHS=("$BREW_PREFIX/opt/$brew_pkg/bin" "$BREW_PREFIX/Cellar/$brew_pkg/*/bin" "/usr/local/opt/$brew_pkg/bin")
+         POSSIBLE_PATHS=(
+             "$BREW_PREFIX/opt/$brew_pkg/bin"
+             "$BREW_PREFIX/Cellar/$brew_pkg/*/bin"
+             "/usr/local/opt/$brew_pkg/bin" 
+         )
          for p in "${POSSIBLE_PATHS[@]}"; do
              for expanded_path in $p; do
-                 if [ -x "$expanded_path/$cmd" ]; then export PATH="$expanded_path:$PATH"; break 2; fi
+                 if [ -x "$expanded_path/$cmd" ]; then
+                     export PATH="$expanded_path:$PATH"
+                     break 2
+                 fi
              done
          done
     fi
+
+    # 2. If still not found, prompt to install
     if ! command -v "$cmd" &> /dev/null; then
-        echo "❌ Error: ไม่พบคำสั่ง '$cmd'"; exit 1
+        echo "❌ Error: ไม่พบคำสั่ง '$cmd'"
+        if command -v brew &> /dev/null && [ -n "$brew_pkg" ]; then
+            echo "🍺 ตรวจพบ Homebrew..."
+            read -p "❓ ต้องการติดตั้ง '$brew_pkg' เดี๋ยวนี้หรือไม่? (y/N): " install_choice
+            if [[ "$install_choice" =~ ^[Yy]$ ]]; then
+                echo "📦 Installing $brew_pkg ..."
+                
+                if [ "$cmd" == "sqlcmd" ]; then
+                    echo "   -> Tapping microsoft/mssql-release..."
+                    brew tap microsoft/mssql-release
+                    brew update
+                fi
+
+                brew install "$brew_pkg"
+                
+                BREW_PREFIX=$(brew --prefix)
+                POSSIBLE_PATHS=(
+                    "$BREW_PREFIX/opt/$brew_pkg/bin"
+                    "$BREW_PREFIX/Cellar/$brew_pkg/*/bin"
+                )
+                for p in "${POSSIBLE_PATHS[@]}"; do
+                    for expanded_path in $p; do
+                        if [ -x "$expanded_path/$cmd" ]; then
+                            echo "🔗 Linking binary from $expanded_path"
+                            export PATH="$expanded_path:$PATH"
+                            break 2
+                        fi
+                    done
+                done
+
+                if command -v "$cmd" &> /dev/null; then 
+                    echo "✅ ติดตั้งสำเร็จ! ดำเนินการต่อ..."
+                    return 0
+                else 
+                    echo "❌ ติดตั้งเสร็จสิ้นแต่ยังเรียกใช้คำสั่งไม่ได้ (ลอง restart terminal)"
+                    exit 1
+                fi
+            else
+                echo "❌ ยกเลิกการติดตั้ง"
+                exit 1
+            fi
+        else
+            echo "❌ กรุณาติดตั้ง '$brew_pkg' หรือ '$cmd' ด้วยตนเอง"
+            exit 1
+        fi
     fi
 }
+
 check_command "jq" "jq"
 
 # --- LOAD CONFIG ---
@@ -67,21 +142,26 @@ DB_PORT=$(jq -r '.database.port' "$CONFIG_FILE")
 DB_NAME=$(jq -r '.database.name' "$CONFIG_FILE")
 DB_USER=$(jq -r '.database.user' "$CONFIG_FILE")
 DB_PASS=$(jq -r '.database.password' "$CONFIG_FILE")
+DB_SCHEMA=$(jq -r '.database.schema // ""' "$CONFIG_FILE")
+
 SELECTED_TABLES_STR=$(jq -r '.database.tables[]?' "$CONFIG_FILE" | tr '\n' ' ')
 
 case "$DB_TYPE" in
     "mysql") DB_CHOICE=1 ;;
     "postgresql"|"postgres") DB_CHOICE=2 ;;
     "mssql"|"sqlserver") DB_CHOICE=3 ;;
-    *) echo "❌ Error: Unknown database type"; exit 1 ;;
+    *) echo "❌ Error: Unknown database type '$DB_TYPE'"; exit 1 ;;
 esac
 
 DEFAULT_LIMIT=$(jq -r '.sampling.default_limit // 10' "$CONFIG_FILE")
 MAX_TEXT_LEN=$(jq -r '.sampling.max_text_length // 300' "$CONFIG_FILE")
 DEEP_ANALYSIS=$(jq -r '.sampling.deep_analysis // false' "$CONFIG_FILE")
-EXCEPTIONS_STRING=$(jq -r '.sampling.exceptions[] | "\(.table).\(.column)=\(.limit)|"' "$CONFIG_FILE" | tr -d '\n')
 
-log_activity "Target: $DB_NAME ($DB_TYPE)"
+EXCEPTIONS_STRING=$(jq -r '.sampling.exceptions[] | "\(.table).\(.column)=\(.limit)|"' "$CONFIG_FILE" | tr -d '\n')
+EXCEPTIONS_COUNT=$(jq '.sampling.exceptions | length' "$CONFIG_FILE")
+
+log_activity "Target: $DB_NAME ($DB_TYPE) @ $DB_HOST:$DB_PORT"
+log_activity "Config: Deep Analysis=$DEEP_ANALYSIS, Default Limit=$DEFAULT_LIMIT"
 
 get_sample_limit() {
     local tbl="$1"; local col="$2"; local distinct_val="$3"
@@ -100,6 +180,11 @@ is_date_type() {
     if [[ "$type" =~ "date" ]] || [[ "$type" =~ "time" ]] || [[ "$type" =~ "year" ]]; then echo "true"; else echo "false"; fi
 }
 
+is_bit_type() {
+    local type=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+    if [[ "$type" == "bit" ]] || [[ "$type" == "boolean" ]] || [[ "$type" == "bool" ]]; then echo "true"; else echo "false"; fi
+}
+
 START_TIME=$(date +%s)
 draw_progress() {
     local current=$1; local total=$2; local msg=$3
@@ -113,25 +198,260 @@ draw_progress() {
     printf "\r\033[K%s %3d%% [Tbl %s/%s] (%s) -> %s" "$bar" "$percent" "$current" "$total" "$time_str" "$msg"
 }
 
-# ... (MySQL & Postgres functions remain same as v7.2) ...
+echo "========================================="
+echo "   🏥 HIS Database Migration Analyzer    "
+echo "========================================="
+echo "🐚 Shell: Bash $BASH_VERSION"
+echo "🔌 Target: $DB_NAME ($DB_TYPE)"
+echo "🧠 Deep Analysis: $DEEP_ANALYSIS"
+if [ -n "$SELECTED_TABLES_STR" ]; then echo "🎯 Scope: Selected tables only"; else echo "🎯 Scope: All tables"; fi
+echo "📂 Output: $RUN_DIR"
+echo "-----------------------------------------"
 
-# === MSSQL LOGIC (REWRITTEN) ===
-analyze_mssql() {
-    check_command "sqlcmd" "mssql-tools18"
-    
-    if command -v mssql-scripter &> /dev/null; then
-        log_activity "Starting DDL Export..."
-        mssql-scripter -S "$DB_HOST,$DB_PORT" -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" --schema-and-data schema --file-path "$DDL_FILE" > /dev/null
-    fi
+# ==============================================================================
+# 1. MySQL Logic
+# ==============================================================================
+analyze_mysql() {
+    check_command "mysql" "mysql-client"
+    check_command "mysqldump" "mysql-client"
+
+    log_activity "Starting DDL Export..."
+    mysqldump -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" --no-data --routines --triggers "$DB_NAME" > "$DDL_FILE" 2>/dev/null
 
     log_activity "Fetching Tables..."
     if [ -n "$SELECTED_TABLES_STR" ]; then
         TABLES_ARRAY=($SELECTED_TABLES_STR)
     else
-        RAW_TABLES=$(sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "SET NOCOUNT ON; SELECT s.name + '.' + t.name FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE t.type='U' ORDER BY s.name, t.name")
+        RAW_TABLES=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SHOW TABLES")
+        TABLES_ARRAY=($RAW_TABLES)
+    fi
+    TOTAL_TABLES=${#TABLES_ARRAY[@]}
+    
+    CURRENT_IDX=0; START_TIME=$(date +%s)
+
+    for TABLE in "${TABLES_ARRAY[@]}"; do
+        ((CURRENT_IDX++))
+        draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
+        log_activity "Processing Table: $TABLE"
+        
+        CHECK_EXIST=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SHOW TABLES LIKE '$TABLE'")
+        if [ -z "$CHECK_EXIST" ]; then continue; fi
+        
+        TBL_SIZE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
+            SELECT ROUND((DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024, 2) 
+            FROM information_schema.TABLES 
+            WHERE TABLE_SCHEMA = '$DB_NAME' AND TABLE_NAME = '$TABLE';")
+        [ -z "$TBL_SIZE" ] && TBL_SIZE="0"
+
+        COLUMNS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
+            SELECT c.COLUMN_NAME, c.DATA_TYPE, IF(c.COLUMN_KEY='PRI', 'YES', '') as IS_PK,
+                (SELECT CONCAT('-> ', k.REFERENCED_TABLE_NAME, '.', k.REFERENCED_COLUMN_NAME) FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE k WHERE k.TABLE_SCHEMA=c.TABLE_SCHEMA AND k.TABLE_NAME=c.TABLE_NAME AND k.COLUMN_NAME=c.COLUMN_NAME AND k.REFERENCED_TABLE_NAME IS NOT NULL LIMIT 1) as FK_REF,
+                IFNULL(c.COLUMN_DEFAULT, '') as DEF_VAL, c.COLUMN_COMMENT
+            FROM INFORMATION_SCHEMA.COLUMNS c WHERE c.TABLE_SCHEMA = '$DB_NAME' AND c.TABLE_NAME = '$TABLE' ORDER BY c.ORDINAL_POSITION")
+        
+        echo "$COLUMNS" | while IFS=$'\t' read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
+            STATS=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "
+                SELECT COUNT(*), SUM(IF(\`$COL_NAME\` IS NULL,1,0)), SUM(IF(CAST(\`$COL_NAME\` AS CHAR) = '', 1, 0)), SUM(IF(CAST(\`$COL_NAME\` AS CHAR) = '0', 1, 0)), MAX(LENGTH(\`$COL_NAME\`)), COUNT(DISTINCT \`$COL_NAME\`) FROM \`$TABLE\`;")
+            read TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS"
+            
+            MIN_VAL=""; MAX_VAL=""; TOP_5=""
+            if [ "$DEEP_ANALYSIS" == "true" ]; then
+                IS_BIT=$(is_bit_type "$COL_TYPE")
+                if [ "$IS_BIT" == "false" ]; then
+                    MINMAX=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT MIN(\`$COL_NAME\`), MAX(\`$COL_NAME\`) FROM \`$TABLE\`;")
+                    MIN_VAL=$(echo "$MINMAX" | cut -f1); MAX_VAL=$(echo "$MINMAX" | cut -f2)
+                else
+                    MIN_VAL="(Skipped for bit)"; MAX_VAL="(Skipped for bit)"
+                fi
+                IS_DATE=$(is_date_type "$COL_TYPE")
+                if [ "$IS_DATE" == "false" ] && [ "$IS_BIT" == "false" ]; then
+                    TOP_5=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(CONCAT(val, ' (', cnt, ')') SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val, COUNT(*) as cnt FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL GROUP BY \`$COL_NAME\` ORDER BY cnt DESC LIMIT 5) x;")
+                else
+                    TOP_5="(Skipped for Date/Time/Bit)"
+                fi
+            fi
+
+            LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
+            [ -z "$LIMIT_N" ] && LIMIT_N=$DEFAULT_LIMIT
+            SAMPLE=$(mysql -h "$DB_HOST" -P "$DB_PORT" -u "$DB_USER" -p"$DB_PASS" -D "$DB_NAME" -N -B -e "SELECT GROUP_CONCAT(LEFT(val, $MAX_TEXT_LEN) SEPARATOR ' | ') FROM (SELECT \`$COL_NAME\` as val FROM \`$TABLE\` WHERE \`$COL_NAME\` IS NOT NULL AND CAST(\`$COL_NAME\` AS CHAR) <> '' LIMIT $LIMIT_N) x;")
+            
+            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g' | tr -d '\n'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g'); CLEAN_FK=$(echo "$FK_REF" | sed 's/NULL//g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
+
+            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$TBL_SIZE,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
+        done
+    done
+    echo ""
+}
+
+# ==============================================================================
+# 2. PostgreSQL Logic
+# ==============================================================================
+analyze_postgres() {
+    check_command "psql" "libpq"
+    check_command "pg_dump" "libpq"
+    export PGPASSWORD="$DB_PASS"
+
+    # Default schema to 'public' if not specified
+    [ -z "$DB_SCHEMA" ] && DB_SCHEMA="public"
+
+    log_activity "Starting DDL Export..."
+    pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -s "$DB_NAME" > "$DDL_FILE" 2>/dev/null
+
+    log_activity "Fetching Tables from schema: $DB_SCHEMA..."
+    if [ -n "$SELECTED_TABLES_STR" ]; then
+        TABLES_ARRAY=($SELECTED_TABLES_STR)
+    else
+        RAW_TABLES=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT table_name FROM information_schema.tables WHERE table_schema = '$DB_SCHEMA' AND table_type = 'BASE TABLE'")
+        TABLES_ARRAY=($RAW_TABLES)
+    fi
+    TOTAL_TABLES=${#TABLES_ARRAY[@]}
+
+    CURRENT_IDX=0; START_TIME=$(date +%s)
+
+    for TABLE in "${TABLES_ARRAY[@]}"; do
+        ((CURRENT_IDX++))
+        draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
+        log_activity "Processing Table: $TABLE"
+
+        CHECK_EXIST=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT to_regclass('$DB_SCHEMA.$TABLE')")
+        if [ -z "$CHECK_EXIST" ] || [ "$CHECK_EXIST" == "" ]; then continue; fi
+
+        TBL_SIZE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT ROUND(pg_total_relation_size('\"$DB_SCHEMA\".\"$TABLE\"') / 1024.0 / 1024.0, 2)")
+        [ -z "$TBL_SIZE" ] && TBL_SIZE="0"
+
+        COLUMNS=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "
+            SELECT c.column_name, c.data_type,
+                (SELECT 'YES' FROM information_schema.key_column_usage kcu JOIN information_schema.table_constraints tc ON kcu.constraint_name=tc.constraint_name WHERE kcu.table_schema=c.table_schema AND kcu.table_name=c.table_name AND kcu.column_name=c.column_name AND tc.constraint_type='PRIMARY KEY' LIMIT 1),
+                (SELECT '-> ' || ccu.table_name || '.' || ccu.column_name FROM information_schema.key_column_usage AS kcu JOIN information_schema.referential_constraints AS rc ON kcu.constraint_name = rc.constraint_name JOIN information_schema.constraint_column_usage AS ccu ON rc.unique_constraint_name = ccu.constraint_name WHERE kcu.table_schema = c.table_schema AND kcu.table_name = c.table_name AND kcu.column_name = c.column_name LIMIT 1),
+                COALESCE(c.column_default, ''), pg_catalog.col_description(format('%I.%I', c.table_schema, c.table_name)::regclass::oid, c.ordinal_position)
+            FROM information_schema.columns c WHERE c.table_schema = '$DB_SCHEMA' AND c.table_name = '$TABLE' ORDER BY c.ordinal_position")
+
+        echo "$COLUMNS" | while IFS="|" read -r COL_NAME COL_TYPE IS_PK FK_REF DEF_VAL COMMENT; do
+            QUERY_STATS="SELECT COUNT(*), COUNT(*) - COUNT(\"$COL_NAME\"), COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = ''), COUNT(*) FILTER (WHERE CAST(\"$COL_NAME\" AS TEXT) = '0'), MAX(LENGTH(CAST(\"$COL_NAME\" AS TEXT))), COUNT(DISTINCT \"$COL_NAME\") FROM \"$DB_SCHEMA\".\"$TABLE\""
+            STATS_RESULT=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F"," -c "$QUERY_STATS")
+            IFS=',' read -r TOTAL NULLS EMPTIES ZEROS MAX_LEN DISTINCT_VAL <<< "$STATS_RESULT"
+
+            MIN_VAL=""; MAX_VAL=""; TOP_5=""
+            if [ "$DEEP_ANALYSIS" == "true" ]; then
+                IS_BIT=$(is_bit_type "$COL_TYPE")
+                if [ "$IS_BIT" == "false" ]; then
+                    MINMAX=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -F "|" -c "SELECT MIN(\"$COL_NAME\"::text), MAX(\"$COL_NAME\"::text) FROM \"$DB_SCHEMA\".\"$TABLE\"")
+                    MIN_VAL=$(echo "$MINMAX" | cut -d'|' -f1); MAX_VAL=$(echo "$MINMAX" | cut -d'|' -f2)
+                else
+                    MIN_VAL="(Skipped for bit)"; MAX_VAL="(Skipped for bit)"
+                fi
+                IS_DATE=$(is_date_type "$COL_TYPE")
+                if [ "$IS_DATE" == "false" ] && [ "$IS_BIT" == "false" ]; then
+                    TOP_5=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "SELECT string_agg(val || ' (' || cnt || ')', ' | ') FROM (SELECT \"$COL_NAME\"::text as val, COUNT(*) as cnt FROM \"$DB_SCHEMA\".\"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL GROUP BY \"$COL_NAME\" ORDER BY cnt DESC LIMIT 5) x")
+                else
+                    TOP_5="(Skipped for Date/Time/Bit)"
+                fi
+            fi
+
+            LIMIT_N=$(get_sample_limit "$TABLE" "$COL_NAME" "$DISTINCT_VAL")
+            [ -z "$LIMIT_N" ] && LIMIT_N=$DEFAULT_LIMIT
+            QUERY_SAMPLE="SELECT (SELECT string_agg(SUBSTR(\"$COL_NAME\"::text, 1, $MAX_TEXT_LEN), ' | ') FROM (SELECT \"$COL_NAME\" FROM \"$DB_SCHEMA\".\"$TABLE\" WHERE \"$COL_NAME\" IS NOT NULL AND CAST(\"$COL_NAME\" AS TEXT) <> '' LIMIT $LIMIT_N) t)"
+            SAMPLE=$(psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -t -A -c "$QUERY_SAMPLE")
+            
+            CLEAN_SAMPLE=$(echo "$SAMPLE" | sed 's/"/""/g'); CLEAN_DEF=$(echo "$DEF_VAL" | sed 's/"/""/g'); CLEAN_COMM=$(echo "$COMMENT" | sed 's/"/""/g' | tr -d '\n'); CLEAN_FK=$(echo "$FK_REF" | sed 's/"/""/g'); CLEAN_MIN=$(echo "$MIN_VAL" | sed 's/"/""/g'); CLEAN_MAX=$(echo "$MAX_VAL" | sed 's/"/""/g'); CLEAN_TOP5=$(echo "$TOP_5" | sed 's/"/""/g' | tr -d '\n')
+
+            echo "$TABLE,$COL_NAME,$COL_TYPE,$IS_PK,\"$CLEAN_FK\",\"$CLEAN_DEF\",\"$CLEAN_COMM\",$TOTAL,$TBL_SIZE,$NULLS,$EMPTIES,$ZEROS,$MAX_LEN,$DISTINCT_VAL,\"$CLEAN_MIN\",\"$CLEAN_MAX\",\"$CLEAN_TOP5\",\"$CLEAN_SAMPLE\"" >> "$REPORT_FILE"
+        done
+    done
+    unset PGPASSWORD
+    echo ""
+}
+
+# ==============================================================================
+# 3. MSSQL Logic (Updated with -C flag)
+# ==============================================================================
+analyze_mssql() {
+    check_command "sqlcmd" "mssql-tools18"
+
+    # Default schema to 'dbo' if not specified
+    [ -z "$DB_SCHEMA" ] && DB_SCHEMA="dbo"
+
+    log_activity "Starting DDL Export using sqlcmd..."
+
+    # Generate DDL using sqlcmd with T-SQL query
+    sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "
+SET NOCOUNT ON;
+SET QUOTED_IDENTIFIER ON;
+
+PRINT '-- ============================================================';
+PRINT '-- MSSQL Schema Export for Database: $DB_NAME';
+PRINT '-- Schema: $DB_SCHEMA';
+PRINT '-- Generated: ' + CONVERT(VARCHAR, GETDATE(), 120);
+PRINT '-- ============================================================';
+PRINT '';
+
+DECLARE @SchemaName NVARCHAR(128) = '$DB_SCHEMA';
+DECLARE @TableName NVARCHAR(255);
+DECLARE @ColumnDef NVARCHAR(MAX);
+
+DECLARE table_cursor CURSOR FOR
+SELECT TABLE_NAME
+FROM INFORMATION_SCHEMA.TABLES
+WHERE TABLE_SCHEMA = @SchemaName AND TABLE_TYPE = 'BASE TABLE'
+ORDER BY TABLE_NAME;
+
+OPEN table_cursor;
+FETCH NEXT FROM table_cursor INTO @TableName;
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+    PRINT '-- Table: ' + @SchemaName + '.' + @TableName;
+    PRINT 'CREATE TABLE [' + @SchemaName + '].[' + @TableName + '] (';
+
+    -- Build column definitions using FOR XML PATH
+    SELECT @ColumnDef = STUFF((
+        SELECT ',' + CHAR(13) + CHAR(10) +
+            '    [' + c.COLUMN_NAME + '] ' +
+            c.DATA_TYPE +
+            CASE
+                WHEN c.CHARACTER_MAXIMUM_LENGTH IS NOT NULL AND c.CHARACTER_MAXIMUM_LENGTH > 0
+                    THEN '(' + CAST(c.CHARACTER_MAXIMUM_LENGTH AS VARCHAR) + ')'
+                WHEN c.CHARACTER_MAXIMUM_LENGTH = -1
+                    THEN '(MAX)'
+                WHEN c.DATA_TYPE IN ('decimal', 'numeric')
+                    THEN '(' + CAST(c.NUMERIC_PRECISION AS VARCHAR) + ',' + CAST(c.NUMERIC_SCALE AS VARCHAR) + ')'
+                ELSE ''
+            END +
+            CASE WHEN c.IS_NULLABLE = 'NO' THEN ' NOT NULL' ELSE ' NULL' END +
+            CASE WHEN c.COLUMN_DEFAULT IS NOT NULL THEN ' DEFAULT ' + c.COLUMN_DEFAULT ELSE '' END
+        FROM INFORMATION_SCHEMA.COLUMNS c
+        WHERE c.TABLE_SCHEMA = @SchemaName AND c.TABLE_NAME = @TableName
+        ORDER BY c.ORDINAL_POSITION
+        FOR XML PATH(''), TYPE
+    ).value('.', 'NVARCHAR(MAX)'), 1, 3, '');
+
+    -- Print column definitions
+    PRINT @ColumnDef;
+    PRINT ');';
+    PRINT '';
+
+    FETCH NEXT FROM table_cursor INTO @TableName;
+END
+
+CLOSE table_cursor;
+DEALLOCATE table_cursor;
+" > "$DDL_FILE" 2>/dev/null
+
+    if [ -s "$DDL_FILE" ]; then
+        log_activity "DDL Export completed successfully"
+    else
+        log_activity "DDL Export failed or produced no output"
+    fi
+
+    log_activity "Fetching Tables from schema: $DB_SCHEMA..."
+
+    if [ -n "$SELECTED_TABLES_STR" ]; then
+        TABLES_ARRAY=($SELECTED_TABLES_STR)
+    else
+        RAW_TABLES=$(sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "SET NOCOUNT ON; SELECT name FROM sys.tables WHERE type='U' AND SCHEMA_NAME(schema_id) = '$DB_SCHEMA' ORDER BY name")
         IFS=$'\n' read -rd '' -a TABLES_ARRAY <<< "$RAW_TABLES"
     fi
-    
+
     TOTAL_TABLES=${#TABLES_ARRAY[@]}
     CURRENT_IDX=0; START_TIME=$(date +%s)
 
@@ -139,120 +459,106 @@ analyze_mssql() {
         ((CURRENT_IDX++))
         TABLE=$(echo "$TABLE" | xargs)
         if [ -z "$TABLE" ]; then continue; fi
-        
+
         draw_progress "$CURRENT_IDX" "$TOTAL_TABLES" "$TABLE"
         log_activity "Processing Table: $TABLE"
 
-        # T-SQL: Inject variables directly into SQL string to avoid scope issues
         TSQL="
         SET NOCOUNT ON;
-        DECLARE @SchemaName NVARCHAR(50) = PARSENAME('$TABLE', 2);
-        DECLARE @TableNameOnly NVARCHAR(255) = PARSENAME('$TABLE', 1);
-        IF @SchemaName IS NULL SET @SchemaName = 'dbo';
-        IF @TableNameOnly IS NULL SET @TableNameOnly = '$TABLE';
+        DECLARE @Schema NVARCHAR(128) = '$DB_SCHEMA';
+        DECLARE @TName NVARCHAR(255) = '$TABLE';
+        DECLARE @CName NVARCHAR(255), @DType NVARCHAR(100), @SQL NVARCHAR(MAX);
+        DECLARE @PK NVARCHAR(10), @FK NVARCHAR(255), @Def NVARCHAR(MAX), @Comm NVARCHAR(MAX);
+        DECLARE @DefaultLimit INT = $DEFAULT_LIMIT;
+        DECLARE @MaxTextLen INT = $MAX_TEXT_LEN;
+        DECLARE @DeepAnalysis VARCHAR(5) = '$DEEP_ANALYSIS';
         
-        -- 1. Get Table Size first (Outer Scope)
-        DECLARE @SizeMB DECIMAL(10,2);
-        SELECT @SizeMB = CAST(SUM(used_page_count) * 8.0 / 1024 AS DECIMAL(10,2)) 
-        FROM sys.dm_db_partition_stats WHERE object_id = OBJECT_ID(@SchemaName + '.' + @TableNameOnly);
-        SET @SizeMB = ISNULL(@SizeMB, 0);
+        DECLARE @TableSizeMB DECIMAL(10,2);
+        DECLARE @FullTableName NVARCHAR(512) = @Schema + '.' + @TName;
+        SELECT @TableSizeMB = CAST(SUM(used_page_count) * 8.0 / 1024 AS DECIMAL(10,2)) FROM sys.dm_db_partition_stats WHERE object_id = OBJECT_ID(@FullTableName);
+        SET @TableSizeMB = ISNULL(@TableSizeMB, 0);
 
-        -- 2. Cursor Loop
-        DECLARE @CName NVARCHAR(255), @DType NVARCHAR(100), @PK NVARCHAR(10), @FK NVARCHAR(255), @Def NVARCHAR(MAX), @Comm NVARCHAR(MAX);
-        DECLARE @SQL NVARCHAR(MAX);
-
-        DECLARE cur CURSOR FOR 
+        DECLARE cur CURSOR FOR
             SELECT c.name, ty.name,
                 CASE WHEN EXISTS(SELECT 1 FROM sys.indexes i JOIN sys.index_columns ic ON i.object_id=ic.object_id AND i.index_id=ic.index_id WHERE i.is_primary_key=1 AND ic.object_id=t.object_id AND ic.column_id=c.column_id) THEN 'YES' ELSE '' END,
                 ISNULL((SELECT TOP 1 '-> ' + OBJECT_NAME(fkc.referenced_object_id) + '.' + COL_NAME(fkc.referenced_object_id, fkc.referenced_column_id) FROM sys.foreign_key_columns fkc WHERE fkc.parent_object_id=t.object_id AND fkc.parent_column_id=c.column_id), ''),
                 ISNULL(object_definition(c.default_object_id), ''), ISNULL(CAST(ep.value AS NVARCHAR(MAX)), '')
-            FROM sys.tables t 
-            JOIN sys.schemas s ON t.schema_id = s.schema_id
-            JOIN sys.columns c ON t.object_id = c.object_id 
-            JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+            FROM sys.tables t JOIN sys.columns c ON t.object_id = c.object_id JOIN sys.types ty ON c.user_type_id = ty.user_type_id
             LEFT JOIN sys.extended_properties ep ON ep.major_id = t.object_id AND ep.minor_id = c.column_id AND ep.name = 'MS_Description'
-            WHERE t.name = @TableNameOnly AND s.name = @SchemaName
-            ORDER BY c.column_id;
+            WHERE t.name = @TName AND SCHEMA_NAME(t.schema_id) = @Schema ORDER BY c.column_id;
 
         OPEN cur; FETCH NEXT FROM cur INTO @CName, @DType, @PK, @FK, @Def, @Comm;
         WHILE @@FETCH_STATUS = 0
         BEGIN
             BEGIN TRY
-                -- Build Dynamic SQL by injecting @SizeMB directly
-                DECLARE @ColSafe NVARCHAR(255) = QUOTENAME(@CName);
-                DECLARE @TableSafe NVARCHAR(512) = QUOTENAME(@SchemaName) + '.' + QUOTENAME(@TableNameOnly);
-                
-                -- Skip BLOBs
-                IF @DType IN ('image','text','ntext','binary','geography','geometry','varbinary')
+                IF @DType NOT IN ('image','text','ntext','binary','geography','geometry','varbinary')
                 BEGIN
-                    PRINT '$TABLE,' + @CName + ',' + @DType + ',' + @PK + ',' + @FK + ',,,0,' + CAST(@SizeMB AS VARCHAR) + ',0,0,0,0,0,\"\",\"\",\"\",\"Skipped BLOB\"';
+                    SET @SQL = N'
+                    SET ANSI_WARNINGS OFF;
+                    DECLARE @Total BIGINT, @Nulls BIGINT, @Empties BIGINT, @Zeros BIGINT, @MaxLen INT, @Dist BIGINT;
+                    DECLARE @MinVal NVARCHAR(MAX), @MaxVal NVARCHAR(MAX), @Top5 NVARCHAR(MAX), @Sample NVARCHAR(MAX);
+                    DECLARE @TblSizeMB DECIMAL(10,2) = ' + CAST(@TableSizeMB AS VARCHAR) + ';
+
+                    SELECT
+                        @Total = COUNT(*),
+                        @Nulls = SUM(CASE WHEN [' + @CName + '] IS NULL THEN 1 ELSE 0 END),
+                        @Empties = SUM(CASE WHEN CAST([' + @CName + '] AS NVARCHAR(MAX)) = '''' THEN 1 ELSE 0 END),
+                        @Zeros = SUM(CASE WHEN CAST([' + @CName + '] AS NVARCHAR(MAX)) = ''0'' THEN 1 ELSE 0 END),
+                        @MaxLen = MAX(LEN([' + @CName + '])),
+                        @Dist = COUNT(DISTINCT [' + @CName + '])
+                    FROM ' + @FullTableName + ';
+
+                    IF ''' + @DeepAnalysis + ''' = ''true''
+                    BEGIN
+                        IF ''' + @DType + ''' NOT IN (''bit'')
+                        BEGIN
+                            SELECT @MinVal = CAST(MIN([' + @CName + ']) AS NVARCHAR(MAX)), @MaxVal = CAST(MAX([' + @CName + ']) AS NVARCHAR(MAX)) FROM ' + @FullTableName + ';
+                        END
+                        ELSE
+                        BEGIN
+                            SET @MinVal = ''(Skipped for bit)'';
+                            SET @MaxVal = ''(Skipped for bit)'';
+                        END
+
+                        IF ''' + @DType + ''' NOT LIKE ''%date%'' AND ''' + @DType + ''' NOT LIKE ''%time%'' AND ''' + @DType + ''' NOT IN (''bit'')
+                        BEGIN
+                             SELECT @Top5 = STUFF((SELECT '' | '' + CAST(val AS NVARCHAR(MAX)) + '' ('' + CAST(cnt AS NVARCHAR(MAX)) + '')'' FROM (SELECT TOP 5 CAST([' + @CName + '] AS NVARCHAR(MAX)) as val, COUNT(*) as cnt FROM ' + @FullTableName + ' WHERE [' + @CName + '] IS NOT NULL GROUP BY [' + @CName + '] ORDER BY cnt DESC) x FOR XML PATH('''')), 1, 3, '''');
+                        END
+                        ELSE SET @Top5 = ''(Skipped for Date/Time/Bit)'';
+                    END
+
+                    DECLARE @Limit INT = ' + CAST(@DefaultLimit AS VARCHAR) + ';
+                    IF @Dist = 1 SET @Limit = 1;
+
+                    SELECT @Sample = STUFF((SELECT TOP (@Limit) '' | '' + REPLACE(LEFT(CAST([' + @CName + '] AS NVARCHAR(MAX)), ' + CAST(@MaxTextLen AS VARCHAR) + '), CHAR(34), CHAR(34) + CHAR(34)) FROM ' + @FullTableName + ' WHERE [' + @CName + '] IS NOT NULL AND CAST([' + @CName + '] AS NVARCHAR(MAX)) <> '''' FOR XML PATH('''')), 1, 3, '''');
+
+                    PRINT ''' + @TName + ','' + ''' + @CName + ','' + ''' + @DType + ','' + ''' + @PK + ','' + CHAR(34) + REPLACE(REPLACE(''' + REPLACE(@FK,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)), ''NULL'', '''') + CHAR(34) + '','' + CHAR(34) + REPLACE(''' + REPLACE(@Def,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)) + CHAR(34) + '','' + CHAR(34) + REPLACE(''' + REPLACE(@Comm,'''','''''') + ''', CHAR(34), CHAR(34) + CHAR(34)) + CHAR(34) + '','' +
+                          CAST(@Total AS VARCHAR) + '','' + CAST(@TblSizeMB AS VARCHAR) + '','' + CAST(@Nulls AS VARCHAR) + '','' + CAST(@Empties AS VARCHAR) + '','' + CAST(@Zeros AS VARCHAR) + '','' +
+                          ' + CASE WHEN @DType LIKE '%char%' THEN 'CAST(ISNULL(@MaxLen,0) AS VARCHAR)' ELSE '''0''' END + ' + '','' + CAST(@Dist AS VARCHAR) + '','' + CHAR(34) + ISNULL(REPLACE(@MinVal, CHAR(34), CHAR(34) + CHAR(34)), '''') + CHAR(34) + '','' + CHAR(34) + ISNULL(REPLACE(@MaxVal, CHAR(34), CHAR(34) + CHAR(34)), '''') + CHAR(34) + '','' + CHAR(34) + ISNULL(REPLACE(@Top5, CHAR(34), CHAR(34) + CHAR(34)), '''') + CHAR(34) + '','' + CHAR(34) + ISNULL(REPLACE(@Sample, CHAR(34), CHAR(34) + CHAR(34)), '''') + CHAR(34);
+                    ';
+
+                    EXEC(@SQL);
                 END
                 ELSE
                 BEGIN
-                    SET @SQL = N'
-                        DECLARE @Tot BIGINT, @Nul BIGINT, @Emp BIGINT, @Zer BIGINT, @MaxL INT, @Dst BIGINT;
-                        DECLARE @Min NVARCHAR(MAX), @Max NVARCHAR(MAX), @Top5 NVARCHAR(MAX), @Sam NVARCHAR(MAX);
-
-                        SELECT @Tot = COUNT(*), 
-                               @Nul = SUM(CASE WHEN ' + @ColSafe + ' IS NULL THEN 1 ELSE 0 END),
-                               @Emp = SUM(CASE WHEN CAST(' + @ColSafe + ' AS NVARCHAR(MAX)) = '''' THEN 1 ELSE 0 END),
-                               @Zer = SUM(CASE WHEN CAST(' + @ColSafe + ' AS NVARCHAR(MAX)) = ''0'' THEN 1 ELSE 0 END),
-                               @Dst = COUNT(DISTINCT ' + @ColSafe + ')
-                        FROM ' + @TableSafe + ';
-                        
-                        -- Handle MaxLen (avoid error on non-string types)
-                        IF ''' + @DType + ''' LIKE ''%char%'' OR ''' + @DType + ''' LIKE ''%text%''
-                           SELECT @MaxL = MAX(LEN(' + @ColSafe + ')) FROM ' + @TableSafe + ';
-                        ELSE SET @MaxL = 0;
-
-                        IF ''$DEEP_ANALYSIS'' = ''true''
-                        BEGIN
-                             SELECT @Min = CAST(MIN(' + @ColSafe + ') AS NVARCHAR(MAX)), @Max = CAST(MAX(' + @ColSafe + ') AS NVARCHAR(MAX)) FROM ' + @TableSafe + ';
-                             
-                             IF ''' + @DType + ''' NOT LIKE ''%date%'' AND ''' + @DType + ''' NOT LIKE ''%time%''
-                                SELECT @Top5 = STUFF((SELECT '' | '' + CAST(val AS NVARCHAR(MAX)) + '' ('' + CAST(cnt AS NVARCHAR(MAX)) + '')'' FROM (SELECT TOP 5 CAST(' + @ColSafe + ' AS NVARCHAR(MAX)) as val, COUNT(*) as cnt FROM ' + @TableSafe + ' WHERE ' + @ColSafe + ' IS NOT NULL GROUP BY ' + @ColSafe + ' ORDER BY cnt DESC) x FOR XML PATH('''')), 1, 3, '''');
-                        END
-
-                        DECLARE @Lim INT = $DEFAULT_LIMIT;
-                        IF @Dst = 1 SET @Lim = 1;
-                        
-                        SELECT @Sam = STUFF((SELECT TOP (@Lim) '' | '' + REPLACE(LEFT(CAST(' + @ColSafe + ' AS NVARCHAR(MAX)), $MAX_TEXT_LEN), ''\"'', ''\"\"'') FROM ' + @TableSafe + ' WHERE ' + @ColSafe + ' IS NOT NULL FOR XML PATH('''')), 1, 3, '''');
-
-                        -- Final Output Row
-                        SELECT ''$TABLE'',''' + @CName + ''',''' + @DType + ''',''' + @PK + ''',''' + @FK + ''',''' + REPLACE(@Def,'''','''''') + ''',''' + REPLACE(@Comm,'''','''''') + ''',' + 
-                               'CAST(@Tot AS VARCHAR) + '','' + 
-                               ''' + CAST(@SizeMB AS VARCHAR) + ''' + '','' + 
-                               'CAST(@Nul AS VARCHAR) + '','' + CAST(@Emp AS VARCHAR) + '','' + CAST(@Zer AS VARCHAR) + '','' + CAST(ISNULL(@MaxL,0) AS VARCHAR) + '','' + CAST(@Dst AS VARCHAR) + '','' +
-                               ''\"'' + ISNULL(REPLACE(@Min,''\"'',''\"\"''),'''') + ''\",\"'' + ISNULL(REPLACE(@Max,''\"'',''\"\"''),'''') + ''\",\"'' + ISNULL(@Top5,'''') + ''\",\"'' + ISNULL(@Sam,'''') + ''\"''';
-                    
-                    EXEC(@SQL);
+                    PRINT '$TABLE,' + @CName + ',' + @DType + ',' + @PK + ',' + @FK + ',,,0,' + CAST(@TableSizeMB AS VARCHAR) + ',0,0,0,0,0,\"\",\"\",\"\",\"Skipped BLOB\"';
                 END
             END TRY
             BEGIN CATCH
-                -- Error Fallback Row
-                PRINT '$TABLE,' + @CName + ',' + @DType + ',ERROR,,,,0,' + CAST(@SizeMB AS VARCHAR) + ',0,0,0,0,0,\"\",\"\",\"\",\"Error: ' + REPLACE(ERROR_MESSAGE(), ',', ';') + '\"';
+                PRINT '$TABLE,' + @CName + ',' + @DType + ',ERROR,,,,0,' + CAST(@TableSizeMB AS VARCHAR) + ',0,0,0,0,0,\"\",\"\",\"\",\"Error: ' + REPLACE(ERROR_MESSAGE(), ',', ';') + '\"';
             END CATCH
             FETCH NEXT FROM cur INTO @CName, @DType, @PK, @FK, @Def, @Comm;
         END
         CLOSE cur; DEALLOCATE cur;
         "
+        # Added -C flag
         sqlcmd -S "$DB_HOST,$DB_PORT" -C -U "$DB_USER" -P "$DB_PASS" -d "$DB_NAME" -h-1 -W -Q "$TSQL" >> "$REPORT_FILE"
     done
     echo ""
 }
 
-# --- MAIN EXECUTION ---
-# Add dummy functions for MySQL/Postgres if not using them, or keep full file content
-# For brevity, assuming analyze_mysql and analyze_postgres are already defined above or file is replaced fully.
-# (Make sure to copy the FULL file provided in previous context if you need multi-db support)
-
-# ... (Existing MySQL/PG Logic) ...
-
-# Execute Choice
-if [ "$DB_CHOICE" == "1" ]; then analyze_mysql;
-elif [ "$DB_CHOICE" == "2" ]; then analyze_postgres;
-elif [ "$DB_CHOICE" == "3" ]; then analyze_mssql;
-else echo "Invalid Selection"; exit 1; fi
+# --- MAIN ---
+case $DB_CHOICE in 1) analyze_mysql ;; 2) analyze_postgres ;; 3) analyze_mssql ;; *) log_activity "Invalid"; exit 1 ;; esac
 
 echo "========================================="
 echo "✅ Analysis Complete!"
@@ -266,7 +572,10 @@ if [ -f "csv_to_html.py" ]; then
     python3 csv_to_html.py "$REPORT_FILE"
     HTML_FILE="${REPORT_FILE%.csv}.html"
     if [ -f "$HTML_FILE" ]; then
-        # Auto Open
-        if command -v open &> /dev/null; then open "$HTML_FILE"; fi
+        if command -v open &> /dev/null; then open "$HTML_FILE"
+        elif command -v xdg-open &> /dev/null; then xdg-open "$HTML_FILE"
+        elif command -v wslview &> /dev/null; then wslview "$HTML_FILE"
+        elif command -v explorer.exe &> /dev/null; then explorer.exe `wslpath -w "$HTML_FILE"`
+        fi
     fi
 fi

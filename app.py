@@ -68,11 +68,9 @@ def init_editor_state(df, table_name):
     """Initialize session state for a new table"""
     state_key = f"df_{table_name}"
     if state_key not in st.session_state:
-        # Reset selection state
         if "last_selected_row" in st.session_state:
             del st.session_state["last_selected_row"]
             
-        # Prepare initial data
         editor_data = []
         for _, row in df.iterrows():
             src_col = row.get('Column', '')
@@ -108,63 +106,63 @@ def init_editor_state(df, table_name):
             })
         st.session_state[state_key] = pd.DataFrame(editor_data)
 
-def generate_ts_config(params, mappings_df):
-    table_name = params['table_name']
-    module = params['module']
-    source_db = params['source_db']
-    target_db = params['target_db']
-    target_table = params['target_table']
-    dependencies = params['dependencies']
+def generate_json_config(params, mappings_df):
+    """Generate Config as JSON Object (Dictionary)"""
+    
+    # Base structure
+    config_data = {
+        "name": params['table_name'],
+        "module": params['module'],
+        "priority": 50,
+        "source": {
+            "database": params['source_db'],
+            "table": params['table_name']
+        },
+        "target": {
+            "database": params['target_db'],
+            "table": params['target_table']
+        },
+        "batchSize": 5000,
+        "dependencies": params['dependencies'] if params['dependencies'] else [],
+        "mappings": []
+    }
 
-    mappings_str = ""
+    # Generate Mappings Array
     for _, row in mappings_df.iterrows():
         if row['Ignore']: continue
             
-        props = []
-        props.append(f"          source: '{row['Source Column']}'")
-        props.append(f"          target: '{row['Target Column']}'")
+        mapping_item = {
+            "source": row['Source Column'],
+            "target": row['Target Column']
+        }
         
+        # Transformers
         transformers_val = row.get('Transformers')
         if transformers_val and safe_str(transformers_val):
             t_list = [t.strip() for t in str(transformers_val).split(',') if t.strip()]
             if t_list:
-                if len(t_list) == 1: props.append(f"          transformer: '{t_list[0]}'")
-                else:
-                     t_str = "', '".join(t_list)
-                     props.append(f"          transformers: ['{t_str}']")
+                # Use 'transformers' (plural) and list
+                mapping_item["transformers"] = t_list
 
+        # Validators
         validators_val = row.get('Validators')
         if validators_val and safe_str(validators_val):
             v_list = [v.strip() for v in str(validators_val).split(',') if v.strip()]
             if v_list:
-                if len(v_list) == 1: props.append(f"          validator: '{v_list[0]}'")
-                else:
-                    v_str = "', '".join(v_list)
-                    props.append(f"          validators: ['{v_str}']")
+                mapping_item["validators"] = v_list
 
+        # Lookups
         if row.get('Lookup Table') and safe_str(row.get('Lookup Table')):
-             props.append(f"          lookupTable: '{row['Lookup Table']}'")
+             mapping_item["lookupTable"] = row['Lookup Table']
         if row.get('Lookup By') and safe_str(row.get('Lookup By')):
-             props.append(f"          lookupBy: '{row['Lookup By']}'")
+             mapping_item["lookupBy"] = row['Lookup By']
 
-        if row.get('Required'): props.append(f"          required: true")
+        if row.get('Required'):
+            mapping_item["required"] = True
             
-        mappings_str += "        {\n" + ",\n".join(props) + "\n        },\n"
+        config_data["mappings"].append(mapping_item)
 
-    deps_str = str(dependencies).replace("'", "'") if dependencies else "[]"
-
-    return f"""    // {table_name}
-    this.register({{
-      name: '{table_name}',
-      module: '{module}',
-      priority: 50,
-      source: {{ database: '{source_db}', table: '{table_name}' }},
-      target: {{ database: '{target_db}', table: '{target_table}' }},
-      batchSize: 5000,
-      dependencies: {deps_str},
-      mappings: [
-{mappings_str}      ]
-    }});"""
+    return config_data
 
 # --- SAFETY WRAPPER ---
 def safe_data_editor(df, **kwargs):
@@ -193,7 +191,6 @@ if page == "📊 Schema Mapper":
         if not report_folders:
             st.warning("No reports found.")
             st.stop()
-        # Use session state for selection to persist across reruns
         if "selected_folder_idx" not in st.session_state: st.session_state.selected_folder_idx = 0
         
         def update_folder(): st.session_state.selected_folder_idx = report_folders.index(st.session_state.folder_select)
@@ -212,10 +209,7 @@ if page == "📊 Schema Mapper":
         
     with c2:
         tables = df_raw['Table'].unique()
-        # Use session state for table selection
         if "selected_table_idx" not in st.session_state: st.session_state.selected_table_idx = 0
-        
-        # Check if table still exists in new list
         if st.session_state.selected_table_idx >= len(tables): st.session_state.selected_table_idx = 0
         
         def update_table(): 
@@ -258,7 +252,6 @@ if page == "📊 Schema Mapper":
         
         col_main, col_detail = st.columns([2, 1])
         
-        # Check selection logic
         columns_list = st.session_state[f"df_{selected_table}"]['Source Column'].tolist()
         default_sb_index = 0 
         editor_key = f"editor_{selected_table}"
@@ -270,7 +263,6 @@ if page == "📊 Schema Mapper":
                 default_sb_index = selected_rows[0]
 
         with col_main:
-            # MAIN TABLE EDITOR
             edited_df = safe_data_editor(
                 st.session_state[f"df_{selected_table}"],
                 column_config={
@@ -308,7 +300,6 @@ if page == "📊 Schema Mapper":
                 
                 st.info(f"Target: `{row_data['Target Column']}`")
                 
-                # FIX: Tabs usage
                 tab1, tab2 = st.tabs(["Pipeline", "Lookup"])
                 
                 with tab1:
@@ -333,7 +324,7 @@ if page == "📊 Schema Mapper":
                     st.rerun()
 
         st.markdown("---")
-        st.subheader("💻 Generated Registry Config")
+        st.subheader("💻 Generated Registry Config (JSON)")
         
         params = {
             "table_name": selected_table,
@@ -344,9 +335,21 @@ if page == "📊 Schema Mapper":
             "dependencies": dependencies_input
         }
         
-        if st.button("⚡ Generate Config", key="btn_gen_code"):
-            ts_code = generate_ts_config(params, st.session_state[f"df_{selected_table}"])
-            st.code(ts_code, language="typescript")
+        # Logic for JSON Generation
+        json_data = generate_json_config(params, st.session_state[f"df_{selected_table}"])
+        json_str = json.dumps(json_data, indent=2, ensure_ascii=False)
+        
+        # Preview Area
+        st.json(json_data, expanded=False)
+        
+        # Download Button
+        st.download_button(
+            label="📥 Download JSON Config",
+            data=json_str,
+            file_name=f"{selected_table}.json",
+            mime="application/json",
+            type="primary"
+        )
 
     else:
         st.info("Please select a table.")

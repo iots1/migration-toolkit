@@ -11,19 +11,14 @@ if len(sys.argv) < 2:
 input_file = sys.argv[1]
 output_file = input_file.replace('.csv', '.html')
 
-# --- Path Setup ---
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(input_file)))
 log_file_path = os.path.join(base_dir, "process.log")
 ddl_file_path = os.path.join(base_dir, "ddl_schema", "schema.sql")
 
-# --- Helper Function for Safe String ---
 def safe_str(val):
-    """Safely convert to string, handling None"""
-    if val is None:
-        return ""
+    if val is None: return ""
     return str(val).strip()
 
-# --- Load Log ---
 log_content = "Log file not found."
 if os.path.exists(log_file_path):
     try:
@@ -32,35 +27,17 @@ if os.path.exists(log_file_path):
     except Exception as e: log_content = str(e)
 log_content = log_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
-# --- Load DDL ---
 ddl_map = {}
 if os.path.exists(ddl_file_path):
     try:
         with open(ddl_file_path, 'r', encoding='utf-8', errors='replace') as f:
             sql_content = f.read()
-            # FIX: Improved Regex to handle [Schema].[Table] and special chars like '
-            # Matches: CREATE TABLE [dbo].[TableName] (
-            # Group 1: TableName (inside brackets or quotes)
-            regex = r'CREATE TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\[?[\w\d_]+\]?\.\[?)?([\w\d_\'\s]+)\]?\s*\('
-            
-            # Split by "CREATE TABLE" to verify chunks manually if regex is tricky, 
-            # but let's try finditer with DOTALL first for the body.
-            # Note: To capture the whole body, we assume it ends with ); 
-            # The visual display just needs the body, but we need to map it to the name.
-            
-            # Simplified: Just map name to "View Source" placeholder or try capture
-            # Let's use a simpler block splitter for reliability
-            statements = re.split(r'(?=CREATE TABLE)', sql_content)
-            for stmt in statements:
-                match = re.search(regex, stmt, re.IGNORECASE)
-                if match:
-                    # Clean table name (remove brackets)
-                    tbl_name = match.group(1).replace('[', '').replace(']', '')
-                    ddl_map[tbl_name] = stmt.strip()
-                    
+            regex = r'CREATE TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:\[?[\w\d_]+\]?\.\[?)?([\w\d_\'\s]+)\]?\s*\((?:[^;]|\n)*?\);'
+            matches = re.finditer(regex, sql_content, re.IGNORECASE | re.DOTALL)
+            for match in matches:
+                ddl_map[match.group(1)] = match.group(0)
     except Exception as e: print(f"Warning parsing DDL: {e}")
 
-# --- Process CSV ---
 detail_rows = []
 table_stats = {} 
 
@@ -68,18 +45,16 @@ try:
     with open(input_file, 'r', encoding='utf-8', errors='replace') as f:
         reader = csv.DictReader(f)
         for row in reader:
-            # FIX: Use safe_str to prevent NoneType error
             t_name = safe_str(row.get('Table', ''))
             
-            # --- FIX: JUNK ROW FILTER ---
-            # Filter out MSSQL error messages leaking into CSV
+            # --- JUNK FILTER ---
             t_name_lower = t_name.lower()
             if not t_name or \
                t_name_lower.startswith("msg ") or \
                t_name_lower.startswith("level ") or \
                "changed database context" in t_name_lower or \
                "rows affected" in t_name_lower or \
-               t_name_lower == "table": # Header repetition
+               t_name_lower == "table":
                 continue
             
             try: total = int(float(row.get('Total_Rows', 0) or 0))
@@ -93,17 +68,14 @@ try:
             try: zeros = int(float(row.get('Zero_Count', 0) or 0))
             except: zeros = 0
 
-            # Data Composition Logic
             bad_data_count = nulls + empties + zeros
             valid_data_count = total - bad_data_count
             
-            # Avoid division by zero
             null_pct = (nulls / total * 100) if total > 0 else 0
             empty_pct = (empties / total * 100) if total > 0 else 0
             zero_pct = (zeros / total * 100) if total > 0 else 0
             valid_pct = (valid_data_count / total * 100) if total > 0 else 0
             
-            # Completeness Score (Average for Overview)
             completeness_score = valid_pct
 
             if t_name not in table_stats:
@@ -121,7 +93,6 @@ try:
                 table_stats[t_name]['empty_cols'] += 1
 
             badge_class = "bg-secondary"
-            # FIX: Ensure dtype is a string before .lower()
             dtype = safe_str(row.get('DataType', '')).lower()
             
             if 'char' in dtype: badge_class = "bg-primary"
@@ -132,11 +103,9 @@ try:
             fk_raw = safe_str(row.get("FK",""))
             fk_icon = ''
             if fk_raw:
-                # Clean up FK string
                 ref_table = fk_raw.replace('-> ', '').split('.')[0].strip().replace('"', '').replace('[', '').replace(']', '')
                 fk_icon = f'<a href="#" onclick="showDDL(\'{ref_table}\'); return false;" class="text-decoration-none">🔗 <span class="fk-detail">{fk_raw}</span></a>'
             
-            # 4-Bar Stacked Layout
             def create_mini_bar(label, pct, color_class, count):
                 opacity = "1" if count > 0 else "0.3"
                 return f'''
@@ -181,7 +150,6 @@ try:
         if quality < 95: q_color = "text-warning"
         if quality < 80: q_color = "text-danger"
         
-        # DDL Link
         tbl_link = f'<a href="#" onclick="showDDL(\'{t}\'); return false;" class="fw-bold text-primary">{t}</a>'
         
         overview_rows.append({

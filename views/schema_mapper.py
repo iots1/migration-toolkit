@@ -8,109 +8,206 @@ import database as db
 from services.db_connector import get_tables_from_datasource, get_columns_from_table
 
 def render_schema_mapper_page():
-    report_folders = helpers.get_report_folders()
-    
-    c1, c2 = st.columns([1, 3])
-    with c1:
-        if not report_folders:
-            st.warning("No reports found.")
-            return
+    st.markdown("## 🗂️ Schema Mapper")
 
-        if "selected_folder_idx" not in st.session_state: st.session_state.selected_folder_idx = 0
-        
-        def update_folder(): st.session_state.selected_folder_idx = report_folders.index(st.session_state.folder_select)
-        
-        selected_folder = st.selectbox(
-            "Run ID", 
-            report_folders, 
-            format_func=lambda x: os.path.basename(x),
-            key="folder_select",
-            index=st.session_state.selected_folder_idx,
-            on_change=update_folder
+    # Load datasources early for use throughout
+    datasources_df = db.get_datasources()
+    datasource_names = [] if datasources_df.empty else datasources_df['name'].tolist()
+
+    # Initialize session state for source mode
+    if "source_mode" not in st.session_state:
+        st.session_state.source_mode = "Run ID"
+
+    # ==================== SOURCE TABLE CONFIGURATION ====================
+    with st.expander("📥 Source Table Configuration", expanded=True):
+        st.markdown("**Choose source table method:**")
+
+        source_mode = st.radio(
+            "Source Mode",
+            options=["Run ID", "Datasource"],
+            index=0 if st.session_state.source_mode == "Run ID" else 1,
+            key="source_mode_radio",
+            horizontal=True,
+            help="Run ID: Select from analyzed report folders | Datasource: Connect directly to database"
         )
-        
-        df_raw = load_data_profile(selected_folder)
-        if df_raw is None: return
-        
-    with c2:
-        tables = df_raw['Table'].unique()
-        if "selected_table_idx" not in st.session_state: st.session_state.selected_table_idx = 0
-        if st.session_state.selected_table_idx >= len(tables): st.session_state.selected_table_idx = 0
-        
-        def update_table(): 
-            try: st.session_state.selected_table_idx = list(tables).index(st.session_state.table_select)
-            except: st.session_state.selected_table_idx = 0
+        st.session_state.source_mode = source_mode
 
-        selected_table = st.selectbox(
-            "Select Table to Map", 
-            tables,
-            key="table_select",
-            index=st.session_state.selected_table_idx,
-            on_change=update_table
-        )
-
-    if selected_table:
         st.markdown("---")
-        init_editor_state(df_raw[df_raw['Table'] == selected_table], selected_table)
-        
-        with st.expander("⚙️ Table Configuration", expanded=True):
-            # Load datasources
-            datasources_df = db.get_datasources()
-            if datasources_df.empty:
+
+        selected_table = None
+        df_raw = None
+        source_db_name = None
+        source_table_name = None
+        source_db_input = None  # Will be set based on mode
+
+        if source_mode == "Run ID":
+            # Original Run ID mode
+            report_folders = helpers.get_report_folders()
+
+            if not report_folders:
+                st.warning("⚠️ No reports found. Please run data profiling first.")
+                return
+
+            col_rid, col_tbl = st.columns(2)
+
+            with col_rid:
+                if "selected_folder_idx" not in st.session_state:
+                    st.session_state.selected_folder_idx = 0
+
+                def update_folder():
+                    st.session_state.selected_folder_idx = report_folders.index(st.session_state.folder_select)
+
+                selected_folder = st.selectbox(
+                    "Run ID",
+                    report_folders,
+                    format_func=lambda x: os.path.basename(x),
+                    key="folder_select",
+                    index=st.session_state.selected_folder_idx,
+                    on_change=update_folder
+                )
+
+                df_raw = load_data_profile(selected_folder)
+                if df_raw is None:
+                    st.error("❌ Could not load data profile.")
+                    return
+
+            with col_tbl:
+                tables = df_raw['Table'].unique()
+                if "selected_table_idx" not in st.session_state:
+                    st.session_state.selected_table_idx = 0
+                if st.session_state.selected_table_idx >= len(tables):
+                    st.session_state.selected_table_idx = 0
+
+                def update_table():
+                    try:
+                        st.session_state.selected_table_idx = list(tables).index(st.session_state.table_select)
+                    except:
+                        st.session_state.selected_table_idx = 0
+
+                selected_table = st.selectbox(
+                    "Select Table to Map",
+                    tables,
+                    key="table_select",
+                    index=st.session_state.selected_table_idx,
+                    on_change=update_table
+                )
+
+            source_table_name = selected_table
+            source_db_input = "Run ID (CSV)"  # Set placeholder for config
+            st.success(f"✓ Source: Run ID → Table `{selected_table}`")
+
+        else:  # Datasource mode
+            if not datasource_names:
                 st.warning("⚠️ No datasources configured. Please add datasources in Settings page.")
-                datasource_names = []
-            else:
-                datasource_names = datasources_df['name'].tolist()
+                return
 
-            conf_c1, conf_c2, conf_c3 = st.columns(3)
-            with conf_c1:
-                module_input = st.text_input("Module", value="patient", key=f"mod_{selected_table}")
+            col_ds, col_tbl = st.columns(2)
 
-                # Source DB as datasource dropdown
-                source_db_index = 0
-                if f"source_db_{selected_table}" in st.session_state and st.session_state[f"source_db_{selected_table}"] in datasource_names:
-                    source_db_index = datasource_names.index(st.session_state[f"source_db_{selected_table}"])
+            with col_ds:
+                if "selected_source_ds_idx" not in st.session_state:
+                    st.session_state.selected_source_ds_idx = 0
 
-                if datasource_names:
-                    source_db_input = st.selectbox(
-                        "Source DB",
-                        options=datasource_names,
-                        index=source_db_index,
-                        key=f"src_{selected_table}",
-                        help="Select datasource from configured list"
+                source_db_name = st.selectbox(
+                    "Source Datasource",
+                    options=datasource_names,
+                    index=st.session_state.selected_source_ds_idx,
+                    key="source_datasource_select",
+                    help="Select datasource to connect"
+                )
+                source_db_input = source_db_name  # Use datasource name for config
+
+            with col_tbl:
+                # Load tables from selected datasource
+                source_datasource = db.get_datasource_by_name(source_db_name)
+                if source_datasource:
+                    success, result = get_tables_from_datasource(
+                        source_datasource['db_type'],
+                        source_datasource['host'],
+                        source_datasource['port'],
+                        source_datasource['dbname'],
+                        source_datasource['username'],
+                        source_datasource['password']
                     )
 
-                    # Show available tables from source datasource
-                    source_datasource = db.get_datasource_by_name(source_db_input)
-                    if source_datasource:
-                        success, result = get_tables_from_datasource(
+                    if success and result:
+                        source_tables = result
+                        if "selected_source_table_idx" not in st.session_state:
+                            st.session_state.selected_source_table_idx = 0
+
+                        source_table_name = st.selectbox(
+                            "Source Table",
+                            options=source_tables,
+                            index=st.session_state.selected_source_table_idx,
+                            key="source_table_select",
+                            help=f"{len(source_tables)} tables available"
+                        )
+
+                        # Load columns from source table
+                        success_col, columns_result = get_columns_from_table(
                             source_datasource['db_type'],
                             source_datasource['host'],
                             source_datasource['port'],
                             source_datasource['dbname'],
                             source_datasource['username'],
-                            source_datasource['password']
+                            source_datasource['password'],
+                            source_table_name
                         )
-                        if success and result:
-                            st.caption(f"📊 {len(result)} tables available")
+
+                        if success_col and columns_result:
+                            # Create df_raw from database columns
+                            df_raw = pd.DataFrame({
+                                'Table': [source_table_name] * len(columns_result),
+                                'Column': [col['name'] for col in columns_result],
+                                'DataType': [col['type'] for col in columns_result],
+                                'Sample_Values': [''] * len(columns_result)
+                            })
+                            selected_table = source_table_name
+                        else:
+                            st.error(f"❌ Could not load columns: {columns_result}")
+                            return
+                    else:
+                        st.error(f"❌ Could not load tables: {result}")
+                        return
                 else:
-                    source_db_input = st.text_input("Source DB", value="", key=f"src_{selected_table}", disabled=True)
+                    st.error("❌ Datasource not found.")
+                    return
 
-            with conf_c2:
-                # Target DB as datasource dropdown
-                target_db_index = 0
-                if f"target_db_{selected_table}" in st.session_state and st.session_state[f"target_db_{selected_table}"] in datasource_names:
-                    target_db_index = datasource_names.index(st.session_state[f"target_db_{selected_table}"])
+            st.success(f"✓ Source: Datasource `{source_db_name}` → Table `{source_table_name}` ({len(df_raw)} columns)")
 
-                if datasource_names:
+    if selected_table and df_raw is not None:
+        st.markdown("---")
+        init_editor_state(df_raw[df_raw['Table'] == selected_table], selected_table)
+
+        # ==================== TARGET TABLE CONFIGURATION ====================
+        # Initialize target variables
+        target_db_input = None
+        target_table_input = None
+        module_input = "patient"
+        dependencies_input = []
+
+        with st.expander("📤 Target Table Configuration", expanded=True):
+            if not datasource_names:
+                st.warning("⚠️ No datasources configured. Please add datasources in Settings page.")
+            else:
+                st.markdown("**Configure target database and table:**")
+
+                col_tgt_ds, col_tgt_tbl = st.columns(2)
+
+                with col_tgt_ds:
+                    # Target DB dropdown
+                    target_db_index = 0
+                    if f"target_db_{selected_table}" in st.session_state and st.session_state[f"target_db_{selected_table}"] in datasource_names:
+                        target_db_index = datasource_names.index(st.session_state[f"target_db_{selected_table}"])
+
                     target_db_input = st.selectbox(
-                        "Target DB",
+                        "Target Datasource",
                         options=datasource_names,
                         index=target_db_index,
                         key=f"tgt_{selected_table}",
-                        help="Select datasource from configured list"
+                        help="Select target datasource"
                     )
 
+                with col_tgt_tbl:
                     # Load tables from target datasource
                     target_datasource = db.get_datasource_by_name(target_db_input)
                     if target_datasource:
@@ -134,20 +231,38 @@ def render_schema_mapper_page():
                                 options=target_tables,
                                 index=target_table_index,
                                 key=f"tbl_{selected_table}",
-                                help="Select target table from database"
+                                help=f"{len(target_tables)} tables available"
                             )
                         else:
                             st.warning(f"⚠️ Could not load tables: {result}")
                             target_table_input = st.text_input("Target Table", value=selected_table, key=f"tbl_{selected_table}")
                     else:
                         target_table_input = st.text_input("Target Table", value=selected_table, key=f"tbl_{selected_table}")
-                else:
-                    target_db_input = st.text_input("Target DB", value="", key=f"tgt_{selected_table}", disabled=True)
-                    target_table_input = st.text_input("Target Table", value="", key=f"tbl_{selected_table}", disabled=True)
 
-            with conf_c3:
+                st.success(f"✓ Target: Datasource `{target_db_input}` → Table `{target_table_input}`")
+
+        # ==================== GENERAL CONFIGURATION ====================
+        with st.expander("⚙️ General Configuration", expanded=False):
+            col_mod, col_dep = st.columns(2)
+
+            with col_mod:
+                module_input_value = st.text_input(
+                    "Module",
+                    value="patient",
+                    key=f"mod_{selected_table}",
+                    help="Module name for organizing configurations"
+                )
+                module_input = module_input_value  # Update the outer scope variable
+
+            with col_dep:
                 all_tables = df_raw['Table'].unique().tolist()
-                dependencies_input = st.multiselect("Dependencies", options=all_tables, key=f"dep_{selected_table}")
+                dependencies_input_value = st.multiselect(
+                    "Dependencies",
+                    options=all_tables,
+                    key=f"dep_{selected_table}",
+                    help="Tables that must be processed before this one"
+                )
+                dependencies_input = dependencies_input_value  # Update the outer scope variable
 
         st.markdown("### 📋 Field Mapping")
         

@@ -324,7 +324,7 @@ if page == "📊 Schema Mapper":
                     st.rerun()
 
         st.markdown("---")
-        st.subheader("💻 Generated Registry Config (JSON)")
+        st.markdown("### 💻 Generated Registry Config (JSON)")
         
         params = {
             "table_name": selected_table,
@@ -339,17 +339,33 @@ if page == "📊 Schema Mapper":
         json_data = generate_json_config(params, st.session_state[f"df_{selected_table}"])
         json_str = json.dumps(json_data, indent=2, ensure_ascii=False)
         
-        # Preview Area
-        st.json(json_data, expanded=False)
+        # --- ACTION AREA ---
+        ac_left, ac_right = st.columns([1, 1])
         
-        # Download Button
-        st.download_button(
-            label="📥 Download JSON Config",
-            data=json_str,
-            file_name=f"{selected_table}.json",
-            mime="application/json",
-            type="primary"
-        )
+        with ac_left:
+            st.download_button(
+                label="📥 Download JSON Config",
+                data=json_str,
+                file_name=f"{selected_table}.json",
+                mime="application/json",
+                type="primary",
+                use_container_width=True
+            )
+            
+        with ac_right:
+            # Toggle for Tree View (Default is True as requested)
+            is_expanded = st.toggle("Expand JSON Tree", value=True)
+
+        # --- PREVIEW AREA (Tabs for Tree vs Raw/Copy) ---
+        tab_tree, tab_raw = st.tabs(["🌳 Tree View", "📄 Raw / Copy"])
+        
+        with tab_tree:
+            # st.json expanded defaults to is_expanded (which is True)
+            st.json(json_data, expanded=is_expanded)
+            
+        with tab_raw:
+            st.caption("คลิกปุ่มไอคอน 📄 มุมขวาบนเพื่อ Copy")
+            st.code(json_str, language="json")
 
     else:
         st.info("Please select a table.")

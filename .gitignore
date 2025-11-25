@@ -2,3 +2,4 @@ migration_report
 mini_his/full_his_mockup.sql
 config.json
 venv
+migration_tool.db

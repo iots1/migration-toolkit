@@ -326,6 +326,30 @@ def get_foreign_keys(db_type, host, port, db_name, user, password, schema=None):
     except Exception as e:
         return False, f"Error getting FKs: {str(e)}"
 
+def get_table_sample_data(db_type, host, port, db_name, user, password, table_name, limit=50):
+    """
+    Retrieves a sample of data from a table to analyze content.
+    Returns: (success: bool, data: list of lists (rows), columns: list of str)
+    """
+    try:
+        conn, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
+        
+        query = ""
+        if db_type == "Microsoft SQL Server":
+            query = f"SELECT TOP {limit} * FROM {table_name}"
+        else:
+            query = f"SELECT * FROM {table_name} LIMIT {limit}"
+            
+        cursor.execute(query)
+        
+        # Get column names
+        columns = [desc[0] for desc in cursor.description]
+        rows = cursor.fetchall()
+        
+        cursor.close()
+        return True, rows, columns
+    except Exception as e:
+        return False, str(e), []
 
 def close_connection(db_type, host, port, db_name, user):
     """

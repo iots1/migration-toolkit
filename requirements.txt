@@ -5,3 +5,6 @@ pymssql
 psycopg2-binary
 streamlit-agraph
 streamlit-aggrid
+sentence-transformers
+scikit-learn
+torch --index-url https://download.pytorch.org/whl/cpu

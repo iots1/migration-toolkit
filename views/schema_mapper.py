@@ -7,18 +7,18 @@ from config import TRANSFORMER_OPTIONS, VALIDATOR_OPTIONS
 import utils.helpers as helpers
 import database as db
 from services.db_connector import get_tables_from_datasource, get_columns_from_table, test_db_connection
-from utils.ui_components import inject_global_css # Import CSS
+from utils.ui_components import inject_global_css 
+from services.ml_mapper import ml_mapper # Import AI Service
 
 # --- AgGrid Imports ---
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode, JsCode
 
 # ==========================================
-# DIALOGS (Define at module level)
+# DIALOGS
 # ==========================================
 @st.dialog("Preview Configuration JSON")
 def show_json_preview(json_data):
     st.caption("This is the JSON structure that will be saved.")
-    # Convert dict to formatted string for raw view
     json_str = json.dumps(json_data, indent=2, ensure_ascii=False)
     st.code(json_str, language="json")
 
@@ -26,13 +26,12 @@ def show_json_preview(json_data):
 # MAIN RENDER
 # ==========================================
 def render_schema_mapper_page():
-    # 1. Inject Global CSS (Makes Primary buttons Green)
     inject_global_css()
 
     # --- HEADER & CONTROLS ---
     c_title, c_mode = st.columns([3, 1])
     with c_title:
-        st.markdown("## 🗂️ Schema Mapper (AgGrid Edition)")
+        st.markdown("## 🗂️ Schema Mapper (AI Powered 🧠)")
     
     if "mapper_focus_mode" not in st.session_state:
         st.session_state.mapper_focus_mode = False
@@ -51,7 +50,6 @@ def render_schema_mapper_page():
     # Session Init
     if "source_mode" not in st.session_state: st.session_state.source_mode = "Run ID"
     
-    # Temporary variables
     selected_table = None
     df_raw = None
     source_db_input = None
@@ -230,7 +228,6 @@ def render_schema_mapper_page():
                 if state_key in st.session_state:
                     del st.session_state[state_key]
                 
-                # Reset Target State if not loading a config
                 if not loaded_config_json:
                     st.session_state.mapper_tgt_db = None
                     st.session_state.mapper_tgt_tbl = None
@@ -251,7 +248,7 @@ def render_schema_mapper_page():
             else:
                  st.session_state.mapper_loaded_config = None
 
-    # ==================== MAPPING LOGIC (AgGrid) ====================
+    # ==================== MAPPING LOGIC ====================
     active_table = st.session_state.get("mapper_active_table")
     active_df_raw = st.session_state.get("mapper_df_raw")
     loaded_config = st.session_state.get("mapper_loaded_config")
@@ -287,7 +284,6 @@ def render_schema_mapper_page():
                         )
                         if ok: 
                             target_tables = res
-                            # Select Table Logic
                             def_tbl_idx = target_tables.index(default_tgt_tbl) if (default_tgt_tbl and default_tgt_tbl in target_tables) else (target_tables.index(active_table) if active_table in target_tables else 0)
                             target_table_input = c_tgt_2.selectbox("Target Table", target_tables, index=def_tbl_idx, key="tgt_tbl_sel")
                         else:
@@ -316,25 +312,43 @@ def render_schema_mapper_page():
 
         # ------------------ 1. AGGRID TABLE ------------------
         if not st.session_state.mapper_focus_mode:
-            st.markdown("### 📋 Field Mapping")
-            st.caption("Select a row to edit details below.")
+            c_head, c_ai = st.columns([2, 1])
+            with c_head:
+                st.markdown("### 📋 Field Mapping")
+                st.caption("Select a row to edit details below.")
+            with c_ai:
+                # --- AI AUTO-MAP BUTTON ---
+                if real_target_columns:
+                    if st.button("🤖 AI Auto-Map", type="primary", use_container_width=True, help="Use AI to guess target columns"):
+                        with st.spinner("🤖 AI is analyzing column meanings..."):
+                            # Run ML Mapping
+                            source_cols = st.session_state[f"df_{active_table}"]['Source Column'].tolist()
+                            suggestions = ml_mapper.suggest_mapping(source_cols, real_target_columns)
+                            
+                            # Apply suggestions
+                            df_current = st.session_state[f"df_{active_table}"]
+                            match_count = 0
+                            for idx, row in df_current.iterrows():
+                                src = row['Source Column']
+                                if src in suggestions and suggestions[src]:
+                                    df_current.at[idx, 'Target Column'] = suggestions[src]
+                                    match_count += 1
+                            
+                            st.session_state[f"df_{active_table}"] = df_current
+                            st.session_state.mapper_editor_ver = time.time()
+                            st.success(f"🤖 AI matched {match_count} columns!")
+                            st.rerun()
         
         # Prepare DataFrame
         df_to_edit = st.session_state[f"df_{active_table}"].copy()
         
-        # Configure Grid Options
         gb = GridOptionsBuilder.from_dataframe(df_to_edit)
-        
         gb.configure_column("Status", editable=False, width=90, cellStyle={'textAlign': 'center'})
         gb.configure_column("Source Column", editable=False, width=200)
         gb.configure_column("Type", editable=False, width=120)
         
         if real_target_columns:
-            gb.configure_column(
-                "Target Column", editable=True, width=250,
-                cellEditor='agRichSelectCellEditor',
-                cellEditorParams={'values': real_target_columns, 'searchDebounceDelay': 200, 'allowTyping': True, 'filterList': True}
-            )
+            gb.configure_column("Target Column", editable=True, width=250, cellEditor='agRichSelectCellEditor', cellEditorParams={'values': real_target_columns, 'searchDebounceDelay': 200, 'allowTyping': True, 'filterList': True})
         else:
             gb.configure_column("Target Column", editable=True, width=250)
 
@@ -344,7 +358,6 @@ def render_schema_mapper_page():
 
         gb.configure_selection('single')
         gb.configure_grid_options(suppressColumnVirtualisation=True)
-        
         gridOptions = gb.build()
 
         grid_height = 500 if st.session_state.mapper_focus_mode else 400
@@ -353,18 +366,12 @@ def render_schema_mapper_page():
         unique_key = f"aggrid_{source_context}_{active_table}_{editor_ver}"
 
         grid_response = AgGrid(
-            df_to_edit,
-            gridOptions=gridOptions,
-            height=grid_height,
-            width='100%',
+            df_to_edit, gridOptions=gridOptions, height=grid_height, width='100%',
             data_return_mode=DataReturnMode.FILTERED_AND_SORTED, 
             update_mode=GridUpdateMode.MODEL_CHANGED,
-            fit_columns_on_grid_load=False,
-            allow_unsafe_jscode=True,
-            key=unique_key
+            fit_columns_on_grid_load=False, allow_unsafe_jscode=True, key=unique_key
         )
 
-        # Sync Grid Changes (Target/Ignore)
         if grid_response['data'] is not None:
             updated_df = pd.DataFrame(grid_response['data'])
             if not updated_df.equals(st.session_state[f"df_{active_table}"]):
@@ -372,12 +379,9 @@ def render_schema_mapper_page():
 
         # ------------------ 2. QUICK EDIT PANEL ------------------
         selected_rows = grid_response['selected_rows']
-        
         if selected_rows is not None and len(selected_rows) > 0:
-            if isinstance(selected_rows, pd.DataFrame):
-                sel_row = selected_rows.iloc[0].to_dict()
-            else:
-                sel_row = selected_rows[0]
+            if isinstance(selected_rows, pd.DataFrame): sel_row = selected_rows.iloc[0].to_dict()
+            else: sel_row = selected_rows[0]
             
             src_col = sel_row.get('Source Column')
             df_state = st.session_state[f"df_{active_table}"]
@@ -387,7 +391,6 @@ def render_schema_mapper_page():
                 idx = row_idx[0]
                 with st.container(border=True):
                     st.markdown(f"#### ✏️ Edit: `{src_col}`")
-                    
                     c_edit_1, c_edit_2, c_edit_3 = st.columns([1, 1, 1])
                     
                     current_tgt = sel_row.get('Target Column', '')
@@ -399,17 +402,14 @@ def render_schema_mapper_page():
                     
                     current_trans = sel_row.get('Transformers', '')
                     def_trans = [t.strip() for t in str(current_trans).split(',') if t.strip() and t.strip() in TRANSFORMER_OPTIONS]
-                    
                     with c_edit_2:
                         new_trans = st.multiselect("Transformers", TRANSFORMER_OPTIONS, default=def_trans, key=f"ms_tf_{src_col}")
                     
                     current_val = sel_row.get('Validators', '')
                     def_vals = [v.strip() for v in str(current_val).split(',') if v.strip() and v.strip() in VALIDATOR_OPTIONS]
-                    
                     with c_edit_3:
                         new_vals = st.multiselect("Validators", VALIDATOR_OPTIONS, default=def_vals, key=f"ms_vd_{src_col}")
                     
-                    # Update Button (Green because Primary)
                     if st.button("✅ Update Row", type="primary"):
                         st.session_state[f"df_{active_table}"].at[idx, 'Target Column'] = new_target
                         st.session_state[f"df_{active_table}"].at[idx, 'Transformers'] = ", ".join(new_trans)
@@ -427,7 +427,6 @@ def render_schema_mapper_page():
         
         col_validate, col_preview, col_save = st.columns([1, 1, 2.5])
         
-        # 1. Validate
         with col_validate:
             st.write("") 
             if st.button("🔍 Validate Targets", use_container_width=True):
@@ -461,7 +460,6 @@ def render_schema_mapper_page():
                     else:
                         st.error("Target Datasource configuration not found.")
 
-        # 2. Preview JSON (New Button)
         with col_preview:
             st.write("")
             if st.button("👁️ Preview JSON", use_container_width=True):
@@ -480,7 +478,6 @@ def render_schema_mapper_page():
                 json_data = generate_json_config(params, current_df)
                 show_json_preview(json_data)
 
-        # 3. Save Controls
         with col_save:
             def do_save(save_name):
                 current_df = st.session_state[f"df_{active_table}"]
@@ -503,7 +500,6 @@ def render_schema_mapper_page():
                 with c_ovr:
                      st.write("") 
                      st.write("") 
-                     # Save (Overwrite) -> Primary -> Green
                      if st.button(f"💾 Save (Overwrite)", type="primary", use_container_width=True, help=f"Update '{default_config_name}'"):
                         do_save(default_config_name)
                 with c_new:
@@ -517,7 +513,6 @@ def render_schema_mapper_page():
                 with c_btn:
                     st.write("") 
                     st.write("") 
-                    # Save Config -> Primary -> Green
                     if st.button("💾 Save Configuration", type="primary", use_container_width=True):
                         do_save(save_name_input)
 

@@ -4,3 +4,4 @@ pymysql
 pymssql
 psycopg2-binary
 streamlit-agraph
+streamlit-aggrid

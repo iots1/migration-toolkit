@@ -1,252 +1,209 @@
+import pandas as pd
+import numpy as np
 import re
 from datetime import datetime
-from typing import Any, Dict, List
-import pandas as pd
-
+from typing import Any, Dict, List, Optional
 
 class DataTransformer:
     """
-    Handles data transformations for migration operations.
-    Applies transformations specified in the config mappings.
+    Service for handling data transformations in the ETL pipeline.
+    Optimized for Pandas Series (Batch Processing) but supports single value transformation.
     """
-
-    @staticmethod
-    def transform_value(value: Any, transformers: List[str]) -> Any:
-        """
-        Apply a sequence of transformers to a value.
-
-        Args:
-            value: The value to transform
-            transformers: List of transformer names
-
-        Returns:
-            Transformed value
-        """
-        if value is None or (isinstance(value, str) and value.strip() == ''):
-            return value
-
-        for transformer in transformers:
-            try:
-                value = DataTransformer._apply_transformer(value, transformer)
-            except Exception as e:
-                print(f"Error applying {transformer}: {e}")
-                continue
-
-        return value
-
-    @staticmethod
-    def _apply_transformer(value: Any, transformer: str) -> Any:
-        """Apply a single transformer to a value."""
-
-        # String transformations
-        if transformer == "TRIM":
-            return str(value).strip() if value else value
-
-        elif transformer == "UPPER_TRIM":
-            return str(value).strip().upper() if value else value
-
-        elif transformer == "LOWER_TRIM":
-            return str(value).strip().lower() if value else value
-
-        # Date transformations
-        elif transformer == "BUDDHIST_TO_ISO":
-            return DataTransformer._buddhist_to_iso(value)
-
-        elif transformer == "ENG_DATE_TO_ISO":
-            return DataTransformer._eng_date_to_iso(value)
-
-        # Name splitting
-        elif transformer == "SPLIT_THAI_NAME":
-            # Returns Thai name, splits by space
-            return str(value).strip() if value else value
-
-        elif transformer == "SPLIT_ENG_NAME":
-            # Returns English name, splits by space
-            return str(value).strip() if value else value
-
-        # Phone and gender
-        elif transformer == "FORMAT_PHONE":
-            return DataTransformer._format_phone(value)
-
-        elif transformer == "MAP_GENDER":
-            return DataTransformer._map_gender(value)
-
-        # Number transformations
-        elif transformer == "TO_NUMBER":
-            try:
-                return float(value) if value else None
-            except (ValueError, TypeError):
-                return None
-
-        elif transformer == "FLOAT_TO_INT":
-            try:
-                return int(float(value)) if value else None
-            except (ValueError, TypeError):
-                return None
-
-        elif transformer == "CLEAN_SPACES":
-            return re.sub(r'\s+', ' ', str(value).strip()) if value else value
-
-        # String operations
-        elif transformer == "REMOVE_PREFIX":
-            # This would need specific prefix in mapping configuration
-            return str(value).strip() if value else value
-
-        elif transformer == "REPLACE_EMPTY_WITH_NULL":
-            return None if (value is None or str(value).strip() == '') else value
-
-        # Lookup operations (would need reference data)
-        elif transformer == "LOOKUP_VISIT_ID":
-            return value  # Placeholder for lookup operation
-
-        elif transformer == "LOOKUP_PATIENT_ID":
-            return value  # Placeholder for lookup operation
-
-        elif transformer == "LOOKUP_DOCTOR_ID":
-            return value  # Placeholder for lookup operation
-
-        # JSON parsing
-        elif transformer == "PARSE_JSON":
-            try:
-                if isinstance(value, str):
-                    import json
-                    return json.loads(value)
-                return value
-            except:
-                return value
-
-        return value
-
-    @staticmethod
-    def _buddhist_to_iso(value: Any) -> str:
-        """Convert Buddhist year to ISO format date."""
-        try:
-            value_str = str(value).strip()
-            # Assume format like YYYY-MM-DD in Buddhist calendar
-            parts = value_str.split('-')
-            if len(parts) == 3:
-                year = int(parts[0]) - 543  # Buddhist to ISO
-                month = int(parts[1])
-                day = int(parts[2])
-                return f"{year:04d}-{month:02d}-{day:02d}"
-            return value_str
-        except:
-            return value
-
-    @staticmethod
-    def _eng_date_to_iso(value: Any) -> str:
-        """Convert English date format to ISO format."""
-        try:
-            value_str = str(value).strip()
-            # Try common English formats
-            for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d']:
-                try:
-                    dt = datetime.strptime(value_str, fmt)
-                    return dt.strftime('%Y-%m-%d')
-                except:
-                    continue
-            return value_str
-        except:
-            return value
-
-    @staticmethod
-    def _format_phone(value: Any) -> str:
-        """Format phone number to standard format."""
-        try:
-            # Remove non-digits
-            digits = re.sub(r'\D', '', str(value))
-
-            # Format based on length
-            if len(digits) == 10:
-                return f"{digits[:3]}-{digits[3:6]}-{digits[6:]}"
-            elif len(digits) == 11:
-                return f"+{digits[0]} {digits[1:4]}-{digits[4:7]}-{digits[7:]}"
-            return digits
-        except:
-            return value
-
-    @staticmethod
-    def _map_gender(value: Any) -> str:
-        """Map gender values to standard format."""
-        try:
-            value_str = str(value).strip().upper()
-
-            gender_map = {
-                'M': 'M', 'MALE': 'M', '1': 'M',
-                'F': 'F', 'FEMALE': 'F', '2': 'F',
-                'O': 'O', 'OTHER': 'O', '3': 'O'
-            }
-
-            return gender_map.get(value_str, value_str)
-        except:
-            return value
-
-    @staticmethod
-    def apply_mapping_transformers(row: Dict[str, Any], mapping: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Apply transformers specified in a mapping to a row of data.
-
-        Args:
-            row: Dictionary of column values
-            mapping: Mapping configuration with transformers
-
-        Returns:
-            Dictionary with transformed values
-        """
-        transformed_row = {}
-
-        for key, value in row.items():
-            # Find matching mapping for this source column
-            matching_mapping = mapping.get(key)
-
-            if matching_mapping and 'transformers' in matching_mapping:
-                transformers = matching_mapping['transformers']
-                transformed_row[matching_mapping['target']] = DataTransformer.transform_value(
-                    value,
-                    transformers
-                )
-            else:
-                transformed_row[key] = value
-
-        return transformed_row
 
     @staticmethod
     def apply_transformers_to_batch(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
         """
-        Apply transformers to a batch of data (DataFrame).
-
-        Args:
-            df: Pandas DataFrame with source data
-            config: Migration configuration with mappings
-
-        Returns:
-            Transformed DataFrame
+        Main Entry Point: Apply transformers to an entire DataFrame based on config.
+        Uses vectorized operations where possible for maximum speed.
         """
+        if df.empty or not config or 'mappings' not in config:
+            return df
+
+        # Get list of columns present in the dataframe
+        available_cols = set(df.columns)
+
+        for mapping in config.get('mappings', []):
+            source_col = mapping.get('source')
+            target_col = mapping.get('target', source_col)
+            transformers = mapping.get('transformers', [])
+
+            # Skip if source column doesn't exist
+            if source_col not in available_cols:
+                continue
+
+            # Apply each transformer in sequence
+            if transformers:
+                # If target is different, copy source to target first (or rename later)
+                # Here we operate on source_col and rename at the end of the loop if needed
+                series_data = df[source_col]
+                
+                for t_name in transformers:
+                    try:
+                        series_data = DataTransformer.transform_series(series_data, t_name)
+                    except Exception as e:
+                        # Log error but don't crash the whole batch
+                        print(f"Error transforming {source_col} with {t_name}: {e}")
+                
+                # Assign back to DataFrame
+                # If renaming is needed (Source != Target)
+                if source_col != target_col:
+                    df[target_col] = series_data
+                else:
+                    df[source_col] = series_data
+
+        return df
+
+    @staticmethod
+    def transform_series(series: pd.Series, transformer_name: str) -> pd.Series:
+        """
+        Apply transformation to a Pandas Series using Vectorized operations.
+        """
+        if series.empty:
+            return series
+
+        # --- 1. Fast Vectorized Operations (String/Native Pandas) ---
+        if transformer_name == "TRIM":
+            return series.astype(str).str.strip()
+        
+        if transformer_name == "UPPER_TRIM":
+            return series.astype(str).str.strip().str.upper()
+        
+        if transformer_name == "LOWER_TRIM":
+            return series.astype(str).str.strip().str.lower()
+            
+        if transformer_name == "CLEAN_SPACES":
+            return series.astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
+        
+        if transformer_name == "TO_NUMBER":
+            return series.astype(str).str.replace(r'\D', '', regex=True)
+
+        if transformer_name == "REPLACE_EMPTY_WITH_NULL":
+            return series.replace(r'^\s*$', np.nan, regex=True)
+
+        # --- 2. Complex/Custom Logic (Apply per row) ---
+        # These are slower but necessary for complex logic
+        complex_transformers = [
+            "REMOVE_PREFIX", 
+            "BUDDHIST_TO_ISO", 
+            "ENG_DATE_TO_ISO", 
+            "MAP_GENDER",
+            "FORMAT_PHONE",
+            "EXTRACT_FIRST_NAME", # Renamed for clarity
+            "EXTRACT_LAST_NAME"   # Renamed for clarity
+        ]
+        
+        if transformer_name in complex_transformers:
+            return series.apply(lambda x: DataTransformer.transform_value(x, transformer_name))
+            
+        return series
+
+    @staticmethod
+    def transform_value(value: Any, transformer_name: str) -> Any:
+        """
+        Apply transformer to a single scalar value.
+        Used as a fallback or for row-by-row processing.
+        """
+        if value is None or pd.isna(value): 
+            return None
+        
+        value_str = str(value)
+
+        # Basic text ops
+        if transformer_name == "TRIM": return value_str.strip()
+        if transformer_name == "UPPER_TRIM": return value_str.strip().upper()
+        if transformer_name == "LOWER_TRIM": return value_str.strip().lower()
+        if transformer_name == "CLEAN_SPACES": return re.sub(r'\s+', ' ', value_str).strip()
+        if transformer_name == "TO_NUMBER": return ''.join(filter(str.isdigit, value_str))
+        if transformer_name == "REMOVE_PREFIX": return DataTransformer._remove_prefix(value_str)
+        if transformer_name == "REPLACE_EMPTY_WITH_NULL": return None if not value_str.strip() else value_str
+        
+        # Domain logic
+        if transformer_name == "BUDDHIST_TO_ISO": return DataTransformer._buddhist_to_iso(value_str)
+        if transformer_name == "ENG_DATE_TO_ISO": return DataTransformer._eng_date_to_iso(value_str)
+        if transformer_name == "MAP_GENDER": return DataTransformer._map_gender(value_str)
+        if transformer_name == "FORMAT_PHONE": return DataTransformer._format_phone(value_str)
+        
+        # Name splitting (Map specific parts)
+        if transformer_name == "EXTRACT_FIRST_NAME": return DataTransformer._split_name(value_str).get("fname")
+        if transformer_name == "EXTRACT_LAST_NAME": return DataTransformer._split_name(value_str).get("lname")
+        
+        return value
+
+    # --- Internal Helper Methods (Logic Implementation) ---
+
+    @staticmethod
+    def _buddhist_to_iso(date_str: str) -> Optional[str]:
+        """Convert Thai Buddhist Date (dd/mm/2566) to ISO"""
+        if not date_str or len(date_str) < 8: return None
         try:
-            if df.empty or 'mappings' not in config:
-                return df
+            # Handle various separators
+            parts = re.split(r'[-/]', date_str.strip())
+            if len(parts) == 3:
+                d, m, y = parts
+                # Logic to detect if year is BE (Thailand usually > 2400)
+                year_val = int(y)
+                iso_year = year_val - 543 if year_val > 2000 else year_val
+                
+                return f"{iso_year}-{m.zfill(2)}-{d.zfill(2)}"
+        except:
+            pass
+        return None # Return None on failure to ensure DB consistency
 
-            # Build transformer map from config
-            transformer_map = {}
-            for mapping in config.get('mappings', []):
-                source_col = mapping.get('source')
-                target_col = mapping.get('target')
-                transformers = mapping.get('transformers', [])
+    @staticmethod
+    def _eng_date_to_iso(date_str: str) -> Optional[str]:
+        """Convert English Date variants to ISO"""
+        if not date_str: return None
+        try:
+            # Try parsing with pandas (very robust)
+            return pd.to_datetime(date_str, dayfirst=True).strftime('%Y-%m-%d')
+        except:
+            pass
+            
+        # Fallback to manual parsing if pandas fails or is too slow for single value
+        try:
+            parts = re.split(r'[-/]', date_str.strip())
+            if len(parts) == 3:
+                d, m, y = parts
+                return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
+        except:
+            return None
 
-                if source_col and transformers:
-                    transformer_map[source_col] = {
-                        'target': target_col,
-                        'transformers': transformers
-                    }
+    @staticmethod
+    def _map_gender(val: str) -> str:
+        """Normalize Gender (Thai/Eng) to M/F/U"""
+        v = val.strip().lower()
+        if v in ['1', 'm', 'male', 'ช', 'ชาย', 'นาย', 'd.b.', 'เด็กชาย']: return 'M'
+        if v in ['2', 'f', 'female', 'ญ', 'หญิง', 'นาง', 'นางสาว', 'น.s.', 'ด.ญ.', 'เด็กหญิง']: return 'F'
+        return 'U'
 
-            # Apply transformers to each column
-            for source_col, trans_config in transformer_map.items():
-                if source_col in df.columns:
-                    df[source_col] = df[source_col].apply(
-                        lambda x: DataTransformer.transform_value(x, trans_config['transformers'])
-                    )
+    @staticmethod
+    def _format_phone(val: str) -> str:
+        """Format Thai Phone Number"""
+        nums = ''.join(filter(str.isdigit, val))
+        if len(nums) == 10 and nums.startswith('0'):
+            return f"{nums[:3]}-{nums[3:6]}-{nums[6:]}"
+        elif len(nums) == 9 and nums.startswith('0'): # Landline
+            return f"{nums[:2]}-{nums[2:5]}-{nums[5:]}"
+        return nums
 
-            return df
-        except Exception as e:
-            print(f"Error applying batch transformers: {e}")
-            return df
+    @staticmethod
+    def _remove_prefix(val: str) -> str:
+        """Remove common Thai prefixes"""
+        prefixes = ['นาย', 'นาง', 'น.ส.', 'นางสาว', 'ด.ช.', 'ด.ญ.', 'เด็กชาย', 'เด็กหญิง', 'Mr.', 'Mrs.', 'Ms.']
+        # Sort by length desc to handle 'นางสาว' before 'นาง'
+        prefixes.sort(key=len, reverse=True) 
+        
+        val = val.strip()
+        for p in prefixes:
+            if val.startswith(p):
+                return val[len(p):].strip()
+        return val
+
+    @staticmethod
+    def _split_name(val: str) -> Dict[str, str]:
+        """Split name into First and Last"""
+        clean_val = DataTransformer._remove_prefix(val)
+        parts = clean_val.split()
+        if len(parts) >= 2:
+            return {"fname": parts[0], "lname": " ".join(parts[1:])}
+        return {"fname": clean_val, "lname": ""}

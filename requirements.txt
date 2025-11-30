@@ -8,3 +8,4 @@ streamlit-aggrid
 sentence-transformers
 scikit-learn
 torch --index-url https://download.pytorch.org/whl/cpu
+sqlalchemy

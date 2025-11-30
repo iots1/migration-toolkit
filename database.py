@@ -3,39 +3,40 @@ import pandas as pd
 import json
 from datetime import datetime
 from config import DB_FILE
+import uuid
 
 def get_connection():
     """Creates a database connection to the SQLite database specified by DB_FILE."""
     return sqlite3.connect(DB_FILE)
 
-def ensure_config_history_table():
-    """Ensures config_history table exists with correct schema."""
+def ensure_config_histories_table():
+    """Ensures config_histories table exists with correct schema."""
     conn = get_connection()
     c = conn.cursor()
     try:
-        # Check if table exists
+        # Check if old table exists and migrate
         c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config_history'")
-        exists = c.fetchone()
+        old_exists = c.fetchone()
 
-        if exists:
-            # Check if version column exists
-            c.execute("PRAGMA table_info(config_history)")
-            columns = [row[1] for row in c.fetchall()]
-            if 'version' not in columns:
-                # Drop and recreate table with correct schema
+        if old_exists:
+            # Migrate old data to new table
+            try:
+                c.execute("ALTER TABLE config_history RENAME TO config_histories")
+            except:
+                # If rename fails, just drop old table
                 c.execute("DROP TABLE IF EXISTS config_history")
 
         # Create table with correct schema
-        c.execute('''CREATE TABLE IF NOT EXISTS config_history
-                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                      config_name TEXT,
+        c.execute('''CREATE TABLE IF NOT EXISTS config_histories
+                     (id TEXT PRIMARY KEY,
+                      config_id TEXT,
                       version INTEGER,
                       json_data TEXT,
                       created_at TIMESTAMP,
-                      FOREIGN KEY(config_name) REFERENCES configs(config_name) ON DELETE CASCADE)''')
+                      FOREIGN KEY(config_id) REFERENCES configs(id) ON DELETE CASCADE)''')
         conn.commit()
     except Exception as e:
-        print(f"Error ensuring config_history table: {e}")
+        print(f"Error ensuring config_histories table: {e}")
     finally:
         conn.close()
 
@@ -57,20 +58,20 @@ def init_db():
     
     # Table: Configs
     c.execute('''CREATE TABLE IF NOT EXISTS configs
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 (id TEXT PRIMARY KEY,
                   config_name TEXT UNIQUE,
                   table_name TEXT,
                   json_data TEXT,
                   updated_at TIMESTAMP)''')
 
-    # Table: Config History
-    c.execute('''CREATE TABLE IF NOT EXISTS config_history
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  config_name TEXT,
+    # Table: Config Histories (renamed from config_history)
+    c.execute('''CREATE TABLE IF NOT EXISTS config_histories
+                 (id TEXT PRIMARY KEY,
+                  config_id TEXT,
                   version INTEGER,
                   json_data TEXT,
                   created_at TIMESTAMP,
-                  FOREIGN KEY(config_name) REFERENCES configs(config_name) ON DELETE CASCADE)''')
+                  FOREIGN KEY(config_id) REFERENCES configs(id) ON DELETE CASCADE)''')
     conn.commit()
     conn.close()
 
@@ -165,28 +166,34 @@ def delete_datasource(id):
 
 def save_config_to_db(config_name, table_name, json_data):
     """Saves or updates a JSON configuration in the database and tracks history."""
-    # Ensure config_history table exists with correct schema
-    ensure_config_history_table()
+    # Ensure config_histories table exists with correct schema
+    ensure_config_histories_table()
 
     conn = get_connection()
     c = conn.cursor()
     try:
         json_str = json.dumps(json_data)
 
+        # Check if config already exists
+        c.execute("SELECT id FROM configs WHERE config_name=?", (config_name,))
+        existing = c.fetchone()
+        config_id = existing[0] if existing else str(uuid.uuid4())
+
         # Get next version number
-        c.execute("SELECT MAX(version) FROM config_history WHERE config_name=?", (config_name,))
+        c.execute("SELECT MAX(version) FROM config_histories WHERE config_id=?", (config_id,))
         max_version = c.fetchone()[0]
         next_version = (max_version + 1) if max_version else 1
 
         # Save to configs table (INSERT OR REPLACE)
-        c.execute('''INSERT OR REPLACE INTO configs (config_name, table_name, json_data, updated_at)
-                     VALUES (?, ?, ?, ?)''',
-                  (config_name, table_name, json_str, datetime.now()))
+        c.execute('''INSERT OR REPLACE INTO configs (id, config_name, table_name, json_data, updated_at)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (config_id, config_name, table_name, json_str, datetime.now()))
 
-        # Save to config_history table
-        c.execute('''INSERT INTO config_history (config_name, version, json_data, created_at)
-                     VALUES (?, ?, ?, ?)''',
-                  (config_name, next_version, json_str, datetime.now()))
+        # Save to config_histories table
+        history_id = str(uuid.uuid4())
+        c.execute('''INSERT INTO config_histories (id, config_id, version, json_data, created_at)
+                     VALUES (?, ?, ?, ?, ?)''',
+                  (history_id, config_id, next_version, json_str, datetime.now()))
 
         conn.commit()
         return True, "Config saved!"
@@ -251,16 +258,25 @@ def delete_config(config_name):
 
 def get_config_history(config_name):
     """Retrieves all versions of a configuration."""
-    # Ensure config_history table exists with correct schema
-    ensure_config_history_table()
+    # Ensure config_histories table exists with correct schema
+    ensure_config_histories_table()
 
     conn = get_connection()
     try:
-        df = pd.read_sql_query(
-            "SELECT id, version, created_at FROM config_history WHERE config_name=? ORDER BY version DESC",
-            conn,
-            params=(config_name,)
-        )
+        # Get config_id from config_name first
+        c = conn.cursor()
+        c.execute("SELECT id FROM configs WHERE config_name=?", (config_name,))
+        result = c.fetchone()
+
+        if result:
+            config_id = result[0]
+            df = pd.read_sql_query(
+                "SELECT id, version, created_at FROM config_histories WHERE config_id=? ORDER BY version DESC",
+                conn,
+                params=(config_id,)
+            )
+        else:
+            df = pd.DataFrame(columns=['id', 'version', 'created_at'])
     except:
         df = pd.DataFrame(columns=['id', 'version', 'created_at'])
     finally:
@@ -269,16 +285,22 @@ def get_config_history(config_name):
 
 def get_config_version(config_name, version):
     """Retrieves a specific version of a configuration."""
-    # Ensure config_history table exists with correct schema
-    ensure_config_history_table()
+    # Ensure config_histories table exists with correct schema
+    ensure_config_histories_table()
 
     conn = get_connection()
     c = conn.cursor()
     try:
-        c.execute("SELECT json_data FROM config_history WHERE config_name=? AND version=?", (config_name, version))
-        row = c.fetchone()
-        if row:
-            return json.loads(row[0])
+        # Get config_id first
+        c.execute("SELECT id FROM configs WHERE config_name=?", (config_name,))
+        result = c.fetchone()
+
+        if result:
+            config_id = result[0]
+            c.execute("SELECT json_data FROM config_histories WHERE config_id=? AND version=?", (config_id, version))
+            row = c.fetchone()
+            if row:
+                return json.loads(row[0])
         return None
     except:
         return None

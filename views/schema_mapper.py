@@ -22,6 +22,81 @@ def show_json_preview(json_data):
     json_str = json.dumps(json_data, indent=2, ensure_ascii=False)
     st.code(json_str, language="json")
 
+@st.dialog("Compare Config Versions", width="large")
+def show_diff_dialog(config_name, version1, version2, diff_data):
+    """Shows a fullscreen git-like diff comparison between two config versions."""
+    st.markdown(f"### 🔄 Comparing: **{config_name}**")
+    st.caption(f"Version {version1} ➡️ Version {version2}")
+
+    # Get full JSON for both versions
+    config_v1 = db.get_config_version(config_name, version1)
+    config_v2 = db.get_config_version(config_name, version2)
+
+    st.markdown("#### 🔍 Git-Style Diff View")
+
+    # Generate git-style diff
+    diff_lines = []
+    diff_lines.append(f"--- Version {version1}")
+    diff_lines.append(f"+++ Version {version2}")
+    diff_lines.append("")
+
+    # Show metadata changes
+    if config_v1.get('module') != config_v2.get('module'):
+        diff_lines.append("@@ Metadata @@")
+        diff_lines.append(f"- module: {config_v1.get('module')}")
+        diff_lines.append(f"+ module: {config_v2.get('module')}")
+        diff_lines.append("")
+
+    # Show source/target changes
+    v1_src = config_v1.get('source', {})
+    v2_src = config_v2.get('source', {})
+    if v1_src != v2_src:
+        diff_lines.append("@@ Source @@")
+        if v1_src.get('database') != v2_src.get('database'):
+            diff_lines.append(f"- database: {v1_src.get('database')}")
+            diff_lines.append(f"+ database: {v2_src.get('database')}")
+        if v1_src.get('table') != v2_src.get('table'):
+            diff_lines.append(f"- table: {v1_src.get('table')}")
+            diff_lines.append(f"+ table: {v2_src.get('table')}")
+        diff_lines.append("")
+
+    v1_tgt = config_v1.get('target', {})
+    v2_tgt = config_v2.get('target', {})
+    if v1_tgt != v2_tgt:
+        diff_lines.append("@@ Target @@")
+        if v1_tgt.get('database') != v2_tgt.get('database'):
+            diff_lines.append(f"- database: {v1_tgt.get('database')}")
+            diff_lines.append(f"+ database: {v2_tgt.get('database')}")
+        if v1_tgt.get('table') != v2_tgt.get('table'):
+            diff_lines.append(f"- table: {v1_tgt.get('table')}")
+            diff_lines.append(f"+ table: {v2_tgt.get('table')}")
+        diff_lines.append("")
+
+    # Show mapping changes
+    if diff_data['mappings_removed']:
+        diff_lines.append("@@ Removed Mappings @@")
+        for m in diff_data['mappings_removed']:
+            diff_lines.append(f"- {json.dumps(m, indent=2, ensure_ascii=False)}")
+        diff_lines.append("")
+
+    if diff_data['mappings_added']:
+        diff_lines.append("@@ Added Mappings @@")
+        for m in diff_data['mappings_added']:
+            diff_lines.append(f"+ {json.dumps(m, indent=2, ensure_ascii=False)}")
+        diff_lines.append("")
+
+    if diff_data['mappings_modified']:
+        diff_lines.append("@@ Modified Mappings @@")
+        for m in diff_data['mappings_modified']:
+            diff_lines.append(f"  Mapping: {m['source']}")
+            diff_lines.append(f"- {json.dumps(m['old'], indent=2, ensure_ascii=False)}")
+            diff_lines.append(f"+ {json.dumps(m['new'], indent=2, ensure_ascii=False)}")
+            diff_lines.append("")
+
+    # Display with syntax highlighting
+    diff_text = "\n".join(diff_lines)
+    st.code(diff_text, language="diff", line_numbers=True)
+
 # ==========================================
 # MAIN RENDER
 # ==========================================
@@ -231,6 +306,102 @@ def render_schema_mapper_page():
                                 source_db_input = src_db_name
                                 source_table_name = src_tbl_name
 
+        # --- CONFIG DETAILS SECTION (for Saved Config) ---
+        if source_mode == "Saved Config" and loaded_config_json:
+            st.markdown("---")
+            st.markdown("### ⚙️ Config Details")
+
+            config_detail_cols = st.columns([2, 2, 2, 2])
+
+            with config_detail_cols[0]:
+                config_name_display = loaded_config_json.get('name', '')
+                st.text_input("Config Name", value=config_name_display, disabled=True, label_visibility="visible")
+
+            with config_detail_cols[1]:
+                src_db = loaded_config_json.get('source', {}).get('database', '')
+                st.text_input("Source Database", value=src_db, disabled=True, label_visibility="visible")
+
+            with config_detail_cols[2]:
+                src_tbl = loaded_config_json.get('source', {}).get('table', '')
+                st.text_input("Source Table", value=src_tbl, disabled=True, label_visibility="visible")
+
+            config_detail_cols2 = st.columns([2, 2, 2, 2])
+
+            with config_detail_cols2[0]:
+                tgt_db = loaded_config_json.get('target', {}).get('database', '')
+
+                # Initialize session state for target DB
+                if 'mapper_tgt_db_edit' not in st.session_state:
+                    st.session_state.mapper_tgt_db_edit = tgt_db
+                if 'mapper_tgt_tables' not in st.session_state:
+                    st.session_state.mapper_tgt_tables = []
+
+                # Target Database selectbox (from datasources)
+                tgt_db_idx = 0
+                if tgt_db in datasource_names:
+                    tgt_db_idx = datasource_names.index(tgt_db)
+
+                selected_tgt_db = st.selectbox(
+                    "Target Database",
+                    datasource_names,
+                    index=tgt_db_idx,
+                    label_visibility="visible",
+                    key="config_detail_tgt_db"
+                )
+
+                # Update session state and config when database changes
+                st.session_state.mapper_tgt_db_edit = selected_tgt_db
+                loaded_config_json['target']['database'] = selected_tgt_db
+
+                # Fetch tables from selected datasource
+                target_tables = []
+                if selected_tgt_db and selected_tgt_db != "-- Select Datasource --":
+                    tgt_ds = db.get_datasource_by_name(selected_tgt_db)
+                    if tgt_ds:
+                        success, tables = get_tables_from_datasource(
+                            tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'],
+                            tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
+                        )
+                        if success:
+                            target_tables = tables
+                            st.session_state.mapper_tgt_tables = target_tables
+
+            with config_detail_cols2[1]:
+                tgt_tbl = loaded_config_json.get('target', {}).get('table', '')
+
+                # Initialize session state for target table
+                if 'mapper_tgt_tbl_edit' not in st.session_state:
+                    st.session_state.mapper_tgt_tbl_edit = tgt_tbl
+
+                # Target Table selectbox (from fetched tables)
+                target_tables = st.session_state.get('mapper_tgt_tables', [])
+                tgt_tbl_idx = 0
+
+                if target_tables:
+                    if tgt_tbl in target_tables:
+                        tgt_tbl_idx = target_tables.index(tgt_tbl)
+
+                    selected_tgt_tbl = st.selectbox(
+                        "Target Table",
+                        target_tables,
+                        index=tgt_tbl_idx,
+                        label_visibility="visible",
+                        key="config_detail_tgt_tbl"
+                    )
+
+                    # Update session state and config when table changes
+                    st.session_state.mapper_tgt_tbl_edit = selected_tgt_tbl
+                    loaded_config_json['target']['table'] = selected_tgt_tbl
+                else:
+                    # Show disabled field if no tables available
+                    st.text_input(
+                        "Target Table",
+                        value=tgt_tbl,
+                        disabled=True,
+                        label_visibility="visible",
+                        help="Select a Target Database first"
+                    )
+
         # --- Context Switch Detection ---
         if selected_table:
             config_sig = loaded_config_json.get('name', '') if loaded_config_json else ''
@@ -333,12 +504,17 @@ def render_schema_mapper_page():
 
         if not st.session_state.mapper_focus_mode:
             st.markdown("---")
-            c_config_1, c_config_2, c_config_3 = st.columns([2, 1, 1])
+            st.markdown("### 📝 Config Metadata")
+
+            # Row 1: Config Name
+            c_config_1, c_config_2, c_config_3 = st.columns([3, 1, 1])
             with c_config_1:
                 if is_edit_existing:
-                    st.text_input("Current Config Name", value=default_config_name, disabled=True, label_visibility="visible")
+                    current_config_name = st.text_input("Config Name", value=default_config_name, label_visibility="visible", key="config_name_edit")
                 else:
-                    st.session_state.mapper_config_name = st.text_input("Config Name", value=default_config_name, label_visibility="visible", key="config_name_input")
+                    current_config_name = st.text_input("Config Name", value=default_config_name, label_visibility="visible", key="config_name_input")
+                st.session_state.mapper_config_name = current_config_name
+
             with c_config_2:
                 st.write("")
                 st.write("")
@@ -349,6 +525,60 @@ def render_schema_mapper_page():
                 st.write("")
                 if st.button("🔄 Compare Versions", use_container_width=True, help="Compare two config versions"):
                     st.session_state.mapper_show_compare = not st.session_state.mapper_show_compare
+
+            # Row 2: Source Database & Table
+            src_db_cols = st.columns([2, 2])
+            with src_db_cols[0]:
+                src_db_name = loaded_config.get('source', {}).get('database', '') if loaded_config else source_db_input
+                st.text_input("Source Database", value=src_db_name, disabled=True, label_visibility="visible")
+            with src_db_cols[1]:
+                src_tbl_name = loaded_config.get('source', {}).get('table', '') if loaded_config else source_table_name
+                st.text_input("Source Table", value=src_tbl_name, disabled=True, label_visibility="visible")
+
+            # Row 3: Target Database & Table (Editable)
+            tgt_cols = st.columns([2, 2])
+            with tgt_cols[0]:
+                tgt_db_name = st.session_state.get("mapper_tgt_db_edit", target_db_input if target_db_input else "")
+                selected_tgt_db_name = st.selectbox(
+                    "Target Database",
+                    datasource_names,
+                    index=datasource_names.index(tgt_db_name) if tgt_db_name in datasource_names else 0,
+                    label_visibility="visible",
+                    key="config_tgt_db_meta"
+                )
+                st.session_state.mapper_tgt_db_edit = selected_tgt_db_name
+
+            with tgt_cols[1]:
+                tgt_tbl_name = st.session_state.get("mapper_tgt_tbl_edit", target_table_input if target_table_input else "")
+                tgt_tables_meta = []
+                if selected_tgt_db_name and selected_tgt_db_name != "-- Select Datasource --":
+                    tgt_ds_meta = db.get_datasource_by_name(selected_tgt_db_name)
+                    if tgt_ds_meta:
+                        success, tables_meta = get_tables_from_datasource(
+                            tgt_ds_meta['db_type'], tgt_ds_meta['host'], tgt_ds_meta['port'],
+                            tgt_ds_meta['dbname'], tgt_ds_meta['username'], tgt_ds_meta['password']
+                        )
+                        if success:
+                            tgt_tables_meta = tables_meta
+
+                if tgt_tables_meta:
+                    selected_tgt_tbl_meta = st.selectbox(
+                        "Target Table",
+                        tgt_tables_meta,
+                        index=tgt_tables_meta.index(tgt_tbl_name) if tgt_tbl_name in tgt_tables_meta else 0,
+                        label_visibility="visible",
+                        key="config_tgt_tbl_meta"
+                    )
+                    st.session_state.mapper_tgt_tbl_edit = selected_tgt_tbl_meta
+                    target_table_input = selected_tgt_tbl_meta
+                else:
+                    st.text_input(
+                        "Target Table",
+                        value=tgt_tbl_name,
+                        disabled=True,
+                        label_visibility="visible",
+                        help="Select a Target Database first"
+                    )
 
         # ------------------ 1. AGGRID TABLE ------------------
         if not st.session_state.mapper_focus_mode:
@@ -500,13 +730,27 @@ def render_schema_mapper_page():
                 current_df = st.session_state[f"df_{active_table}"]
                 config_name_to_use = st.session_state.get("mapper_config_name", default_config_name) if not is_edit_existing else default_config_name
 
+                # Function to get dbname from display name
+                def get_dbname_preview(display_name):
+                    if display_name and display_name != "-- Select Datasource --":
+                        if display_name in datasource_names:
+                            ds = db.get_datasource_by_name(display_name)
+                            if ds:
+                                return ds.get('dbname', display_name)
+                    return display_name
+
+                # Get actual dbnames from display names
+                src_db_actual = get_dbname_preview(st.session_state.get("mapper_source_db"))
+                tgt_db_actual = get_dbname_preview(st.session_state.get("mapper_tgt_db_edit", target_db_input or ""))
+                tgt_tbl_actual = st.session_state.get("mapper_tgt_tbl_edit", target_table_input or "")
+
                 params = {
                     "config_name": config_name_to_use,
                     "table_name": active_table,
                     "module": loaded_config.get('module', 'patient') if loaded_config else 'patient',
-                    "source_db": st.session_state.get("mapper_source_db"),
-                    "target_db": target_db_input,
-                    "target_table": target_table_input,
+                    "source_db": src_db_actual,
+                    "target_db": tgt_db_actual,
+                    "target_table": tgt_tbl_actual,
                     "dependencies": []
                 }
                 json_data = generate_json_config(params, current_df)
@@ -515,13 +759,34 @@ def render_schema_mapper_page():
         with col_save:
             def do_save(save_name):
                 current_df = st.session_state[f"df_{active_table}"]
+
+                # Function to get dbname from display name
+                def get_dbname(display_name):
+                    if display_name and display_name != "-- Select Datasource --":
+                        if display_name in datasource_names:
+                            ds = db.get_datasource_by_name(display_name)
+                            if ds:
+                                return ds.get('dbname', display_name)
+                    return display_name
+
+                # Get actual dbnames from display names
+                src_db_display = st.session_state.get("mapper_source_db")
+                src_db_actual = get_dbname(src_db_display)
+
+                # Target database - use the metadata input fields
+                tgt_db_display = st.session_state.get("mapper_tgt_db_edit", target_db_input or "")
+                tgt_db_actual = get_dbname(tgt_db_display)
+
+                # Target table - use the metadata input fields
+                tgt_tbl_actual = st.session_state.get("mapper_tgt_tbl_edit", target_table_input or "")
+
                 params = {
                     "config_name": save_name,
                     "table_name": active_table,
                     "module": loaded_config.get('module', 'patient') if loaded_config else 'patient',
-                    "source_db": st.session_state.get("mapper_source_db"),
-                    "target_db": target_db_input,
-                    "target_table": target_table_input,
+                    "source_db": src_db_actual,
+                    "target_db": tgt_db_actual,
+                    "target_table": tgt_tbl_actual,
                     "dependencies": []
                 }
                 json_data = generate_json_config(params, current_df)
@@ -584,37 +849,7 @@ def render_schema_mapper_page():
                 if st.button("📊 Show Diff", type="primary", use_container_width=True):
                     diff = db.compare_config_versions(config_to_compare, int(v1), int(v2))
                     if diff:
-                        st.write(f"**Comparing Version {int(v1)} vs Version {int(v2)}**")
-
-                        if diff['mappings_added']:
-                            st.markdown("#### ✅ Added Mappings")
-                            for m in diff['mappings_added']:
-                                st.write(f"- `{m['source']}` → `{m['target']}`")
-
-                        if diff['mappings_removed']:
-                            st.markdown("#### ❌ Removed Mappings")
-                            for m in diff['mappings_removed']:
-                                st.write(f"- `{m['source']}` → `{m['target']}`")
-
-                        if diff['mappings_modified']:
-                            st.markdown("#### 🔄 Modified Mappings")
-                            for m in diff['mappings_modified']:
-                                st.write(f"**{m['source']}**")
-                                old_target = m['old'].get('target', '')
-                                new_target = m['new'].get('target', '')
-                                st.write(f"  - Target: `{old_target}` → `{new_target}`")
-
-                                # Show transformer changes
-                                old_trans = m['old'].get('transformers', [])
-                                new_trans = m['new'].get('transformers', [])
-                                if old_trans != new_trans:
-                                    st.write(f"  - Transformers: {old_trans} → {new_trans}")
-
-                                # Show validator changes
-                                old_val = m['old'].get('validators', [])
-                                new_val = m['new'].get('validators', [])
-                                if old_val != new_val:
-                                    st.write(f"  - Validators: {old_val} → {new_val}")
+                        show_diff_dialog(config_to_compare, int(v1), int(v2), diff)
             else:
                 st.info(f"Need at least 2 versions to compare. Current versions: {len(history_df)}")
 
@@ -718,7 +953,7 @@ def generate_json_config(params, mappings_df):
         mapping_item = {
             "source": row['Source Column'],
             "target": row['Target Column'],
-            "status": not is_ignored
+            "ignore": is_ignored
         }
 
         tf_val = row.get('Transformers')

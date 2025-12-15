@@ -27,6 +27,7 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Op
                 host=host,
                 port=port_int or 3306,
                 database=db_name,
+                query={"charset": "utf8mb4"}
             )
             
         elif db_type == "PostgreSQL":
@@ -37,7 +38,8 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Op
                 password=password,
                 host=host,
                 port=port_int or 5432,
-                database=db_name
+                database=db_name,
+                query={"client_encoding": "utf8"}
             )
             
         elif db_type == "Microsoft SQL Server":
@@ -131,7 +133,8 @@ class DatabaseConnectionPool:
                 import pymysql
                 connect_args = {
                     "host": host, "user": user, "password": password,
-                    "database": db_name, "connect_timeout": 5, "autocommit": True
+                    "database": db_name, "connect_timeout": 5, "autocommit": True,
+                    "charset": "utf8mb4"
                 }
                 if port_int: connect_args["port"] = port_int
                 return pymysql.connect(**connect_args)

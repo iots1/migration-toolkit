@@ -291,16 +291,21 @@ def render_migration_engine_page():
                         dup_cols = df_batch.columns[df_batch.columns.duplicated()].tolist()
                         df_batch = df_batch.loc[:, ~df_batch.columns.duplicated(keep='first')]
 
-                    # อ่าน BIT columns จาก config (ตรวจหา POSTGRES_BIT_CAST transformer)
+                    # อ่าน BIT columns จาก config (ตรวจหา BIT_CAST transformers)
                     bit_columns = []    
+                    bit_cast_types = ['MYSQL_BIT_CAST', 'POSTGRES_BIT_CAST', 'MSSQL_BIT_CAST']
                     for mapping in config.get('mappings', []):
-                        if 'transformers' in mapping and 'POSTGRES_BIT_CAST' in mapping['transformers']:
-                            target_col = mapping.get('target', '').lower()
-                            if target_col:
-                                bit_columns.append(target_col)
+                        if 'transformers' in mapping:
+                            for bit_type in bit_cast_types:
+                                if bit_type in mapping['transformers']:
+                                    target_col = mapping.get('target', '').lower()
+                                    if target_col:
+                                        bit_columns.append((target_col, bit_type))
+                                    break
                     
                     # แปลง Boolean/Integer → 0/1 สำหรับ BIT columns (จะใช้ CAST ใน SQL)
-                    for col in bit_columns:
+                    for col_info in bit_columns:
+                        col = col_info[0] if isinstance(col_info, tuple) else col_info
                         if col in df_batch.columns:
                             # แปลง Boolean/Integer เป็น 0 หรือ 1
                             df_batch[col] = df_batch[col].apply(
@@ -314,16 +319,24 @@ def render_migration_engine_page():
                 try:
                     # ถ้ามี BIT columns ให้ใช้ custom method, ไม่งั้นใช้ method='multi'
                     if bit_columns:
+                        # สร้าง dict สำหรับ lookup bit column types
+                        bit_col_map = {col: cast_type for col, cast_type in bit_columns}
+                        
                         # Custom insert method สำหรับ CAST integer → BIT
-                        def psql_insert_method(table, conn, keys, data_iter):
+                        def bit_insert_method(table, conn, keys, data_iter):
                             from sqlalchemy import text
                             
                             # สร้าง INSERT statement พร้อม CAST สำหรับ BIT columns
                             columns = ', '.join([f'"{k}"' for k in keys])
                             placeholders = []
                             for k in keys:
-                                if k in bit_columns:
-                                    placeholders.append(f"CAST(:{k} AS BIT)")
+                                if k in bit_col_map:
+                                    cast_type = bit_col_map[k]
+                                    # PostgreSQL ต้อง CAST, MySQL/MSSQL ไม่ต้อง
+                                    if cast_type == 'POSTGRES_BIT_CAST':
+                                        placeholders.append(f"CAST(:{k} AS BIT)")
+                                    else:
+                                        placeholders.append(f":{k}")
                                 else:
                                     placeholders.append(f":{k}")
                             placeholders_str = ', '.join(placeholders)
@@ -339,7 +352,7 @@ def render_migration_engine_page():
                             con=tgt_engine,
                             if_exists='append',
                             index=False,
-                            method=psql_insert_method,
+                            method=bit_insert_method,
                             chunksize=500 
                         )
                     else:

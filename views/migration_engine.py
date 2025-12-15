@@ -274,24 +274,84 @@ def render_migration_engine_page():
                     # Rename Column to match Target
                     rename_map = {}
                     for m in config.get('mappings', []):
-                        if 'target' in m and m['source'] in df_batch.columns:
+                        if not m.get('ignore', False) and 'target' in m and m['source'] in df_batch.columns:
                             rename_map[m['source']] = m['target']
                     if rename_map:
                         df_batch.rename(columns=rename_map, inplace=True)
+                    
+                    # ลบ column ที่ถูก ignore
+                    ignored_cols = [m['target'] for m in config.get('mappings', []) if m.get('ignore', False)]
+                    df_batch = df_batch.drop(columns=[c for c in ignored_cols if c in df_batch.columns], errors='ignore')
+                    
+                    # บังคับ lowercase ทุก column เพื่อรองรับ PostgreSQL (case-sensitive)
+                    df_batch.columns = df_batch.columns.str.lower()
+                    
+                    # ตรวจสอบและลบ duplicate columns
+                    if df_batch.columns.duplicated().any():
+                        dup_cols = df_batch.columns[df_batch.columns.duplicated()].tolist()
+                        df_batch = df_batch.loc[:, ~df_batch.columns.duplicated(keep='first')]
+
+                    # อ่าน BIT columns จาก config (ตรวจหา POSTGRES_BIT_CAST transformer)
+                    bit_columns = []    
+                    for mapping in config.get('mappings', []):
+                        if 'transformers' in mapping and 'POSTGRES_BIT_CAST' in mapping['transformers']:
+                            target_col = mapping.get('target', '').lower()
+                            if target_col:
+                                bit_columns.append(target_col)
+                    
+                    # แปลง Boolean/Integer → 0/1 สำหรับ BIT columns (จะใช้ CAST ใน SQL)
+                    for col in bit_columns:
+                        if col in df_batch.columns:
+                            # แปลง Boolean/Integer เป็น 0 หรือ 1
+                            df_batch[col] = df_batch[col].apply(
+                                lambda x: 1 if (x == True or x == 1 or x == '1') else 0
+                            ).astype('int64')
                         
                 except Exception as e:
                     add_log(f"     ⚠️ Transformation Warning in Batch {batch_num}: {e}")
 
-                # --- B. LOAD (Bulk Insert) ---
+                # --- B. LOAD (Bulk Insert) with BIT column handling ---
                 try:
-                    df_batch.to_sql(
-                        name=target_table,
-                        con=tgt_engine,
-                        if_exists='append',
-                        index=False,
-                        method='multi',
-                        chunksize=500 
-                    )
+                    # ถ้ามี BIT columns ให้ใช้ custom method, ไม่งั้นใช้ method='multi'
+                    if bit_columns:
+                        # Custom insert method สำหรับ CAST integer → BIT
+                        def psql_insert_method(table, conn, keys, data_iter):
+                            from sqlalchemy import text
+                            
+                            # สร้าง INSERT statement พร้อม CAST สำหรับ BIT columns
+                            columns = ', '.join([f'"{k}"' for k in keys])
+                            placeholders = []
+                            for k in keys:
+                                if k in bit_columns:
+                                    placeholders.append(f"CAST(:{k} AS BIT)")
+                                else:
+                                    placeholders.append(f":{k}")
+                            placeholders_str = ', '.join(placeholders)
+                            
+                            insert_stmt = f'INSERT INTO "{table.name}" ({columns}) VALUES ({placeholders_str})'
+                            
+                            # Execute batch insert
+                            data_list = [dict(zip(keys, row)) for row in data_iter]
+                            conn.execute(text(insert_stmt), data_list)
+                        
+                        df_batch.to_sql(
+                            name=target_table,
+                            con=tgt_engine,
+                            if_exists='append',
+                            index=False,
+                            method=psql_insert_method,
+                            chunksize=500 
+                        )
+                    else:
+                        # ไม่มี BIT columns ใช้ method='multi' ธรรมดา
+                        df_batch.to_sql(
+                            name=target_table,
+                            con=tgt_engine,
+                            if_exists='append',
+                            index=False,
+                            method='multi',
+                            chunksize=500 
+                        )
                     total_rows_processed += rows_in_batch
                     add_log(f"     💾 Inserted {rows_in_batch} rows successfully")
                     
@@ -328,5 +388,5 @@ def render_migration_engine_page():
                 st.rerun()
         with col_end2:
             if st.session_state.migration_log_file and os.path.exists(st.session_state.migration_log_file):
-                with open(st.session_state.migration_log_file, "r") as f:
+                with open(st.session_state.migration_log_file, "r", encoding="utf-8") as f:
                     st.download_button("📥 Download Log", data=f, file_name="migration.log")

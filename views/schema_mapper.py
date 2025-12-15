@@ -1007,6 +1007,11 @@ def generate_json_config(params, mappings_df):
             "target": row['Target Column'],
             "ignore": is_ignored
         }
+        
+        # เพิ่ม target_type ถ้ามี
+        tgt_type = row.get('Target Type')
+        if tgt_type and str(tgt_type).strip():
+            mapping_item["target_type"] = str(tgt_type).strip()
 
         tf_val = row.get('Transformers')
         if tf_val:

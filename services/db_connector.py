@@ -26,7 +26,7 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Op
                 password=password,
                 host=host,
                 port=port_int or 3306,
-                database=db_name
+                database=db_name,
             )
             
         elif db_type == "PostgreSQL":
@@ -55,7 +55,7 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Op
         else:
             raise ValueError(f"Unsupported DB Type for Engine: {db_type}")
 
-        # Create Engine
+        # Create Engine with pool settings
         engine = create_engine(connection_url)
         return engine
 

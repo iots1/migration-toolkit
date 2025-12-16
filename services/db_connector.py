@@ -9,10 +9,14 @@ from sqlalchemy.engine import Engine, URL
 #  Used for Migration Engine (Pandas read_sql/to_sql)
 # ==========================================
 
-def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Optional[Engine]:
+def create_sqlalchemy_engine(db_type, host, port, db_name, user, password, charset=None) -> Optional[Engine]:
     """
     Creates a SQLAlchemy Engine using URL object construction.
     This prevents errors when passwords contain special characters (@, :, /).
+    
+    Args:
+        charset: Optional charset override. For Thai legacy databases, use 'tis620' or 'latin1'.
+                 Default: 'utf8mb4' for MySQL, 'utf8' for others.
     """
     try:
         # Convert port to int if exists
@@ -20,6 +24,8 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Op
 
         if db_type == "MySQL":
             # Requires: pip install pymysql
+            # สำหรับ database เก่าที่เก็บภาษาไทยเป็น TIS-620 ให้ใช้ charset='tis620' หรือ 'latin1'
+            mysql_charset = charset if charset else "utf8mb4"
             connection_url = URL.create(
                 "mysql+pymysql",
                 username=user,
@@ -27,11 +33,12 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Op
                 host=host,
                 port=port_int or 3306,
                 database=db_name,
-                query={"charset": "utf8mb4"}
+                query={"charset": mysql_charset}
             )
             
         elif db_type == "PostgreSQL":
             # Requires: pip install psycopg2-binary
+            pg_encoding = charset if charset else "utf8"
             connection_url = URL.create(
                 "postgresql+psycopg2",
                 username=user,
@@ -39,11 +46,12 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Op
                 host=host,
                 port=port_int or 5432,
                 database=db_name,
-                query={"client_encoding": "utf8"}
+                query={"client_encoding": pg_encoding}
             )
             
         elif db_type == "Microsoft SQL Server":
             # Requires: pip install pymssql
+            mssql_charset = charset if charset else "utf8"
             connection_url = URL.create(
                 "mssql+pymssql",
                 username=user,
@@ -51,7 +59,7 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password) -> Op
                 host=host,
                 port=port_int or 1433,
                 database=db_name,
-                query={"charset": "utf8"}
+                query={"charset": mssql_charset}
             )
         
         else:

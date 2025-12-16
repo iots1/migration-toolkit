@@ -123,6 +123,22 @@ def render_migration_engine_page():
             st.markdown("#### Source Database")
             src_sel = st.selectbox("Source Profile", ds_options, key="src_sel")
             st.session_state.migration_src_profile = src_sel
+            
+            # Charset option for legacy Thai databases
+            charset_options = ["utf8mb4 (Default)", "tis620 (Thai Legacy)", "latin1 (Raw Bytes)"]
+            src_charset_sel = st.selectbox(
+                "Source Charset (ถ้าภาษาไทยเพี้ยนให้ลอง tis620)", 
+                charset_options, 
+                key="src_charset_sel"
+            )
+            # Map selection to actual charset value
+            charset_map = {
+                "utf8mb4 (Default)": None,
+                "tis620 (Thai Legacy)": "tis620",
+                "latin1 (Raw Bytes)": "latin1"
+            }
+            st.session_state.src_charset = charset_map.get(src_charset_sel)
+            
             if src_sel != "Select Profile...":
                 if st.button("🔍 Test Source"):
                     with st.spinner("Connecting..."):
@@ -231,15 +247,19 @@ def render_migration_engine_page():
 
             add_log(f"[{datetime.now().time()}] 🔗 Creating Database Engines...")
             
+            # Get charset from session state (set in Step 2)
+            src_charset = st.session_state.get('src_charset', None)
+            
             # Use SQLAlchemy Engine for Pandas
             src_engine = connector.create_sqlalchemy_engine(
-                src_ds['db_type'], src_ds['host'], src_ds['port'], src_ds['dbname'], src_ds['username'], src_ds['password']
+                src_ds['db_type'], src_ds['host'], src_ds['port'], src_ds['dbname'], src_ds['username'], src_ds['password'],
+                charset=src_charset
             )
             tgt_engine = connector.create_sqlalchemy_engine(
                 tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
             )
             
-            add_log(f"   ✅ Connected to Source: {src_ds['db_type']} @ {src_ds['host']}")
+            add_log(f"   ✅ Connected to Source: {src_ds['db_type']} @ {src_ds['host']} (charset: {src_charset or 'default'})")
             add_log(f"   ✅ Connected to Target: {tgt_ds['db_type']} @ {tgt_ds['host']}")
 
             # 3. Prepare Query & Parameters

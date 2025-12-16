@@ -80,7 +80,14 @@ class DataTransformer:
         if transformer_name == "REPLACE_EMPTY_WITH_NULL":
             return series.replace(r'^\s*$', np.nan, regex=True)
 
-        # --- 2. Complex/Custom Logic (Apply per row) ---
+        # --- 2. Encoding Fix (Vectorized for Thai text) ---
+        if transformer_name == "FIX_THAI_ENCODING_CP874":
+            return series.apply(lambda x: DataTransformer._fix_thai_encoding(x, 'cp874') if x and not pd.isna(x) else x)
+        
+        if transformer_name == "FIX_THAI_ENCODING_TIS620":
+            return series.apply(lambda x: DataTransformer._fix_thai_encoding(x, 'tis-620') if x and not pd.isna(x) else x)
+
+        # --- 3. Complex/Custom Logic (Apply per row) ---
         # These are slower but necessary for complex logic
         complex_transformers = [
             "REMOVE_PREFIX", 
@@ -130,6 +137,31 @@ class DataTransformer:
         return value
 
     # --- Internal Helper Methods (Logic Implementation) ---
+
+    @staticmethod
+    def _fix_thai_encoding(value: Any, target_encoding: str = 'cp874') -> str:
+        """
+        Fix Thai encoding issues by converting incorrectly decoded text back to bytes
+        and decoding with the correct Thai encoding (cp874 or tis-620).
+        
+        Example: '¤.2 ·ËÒÃ¹Í¡' -> 'ด.ช. ธีรนนท์'
+        """
+        if value is None or pd.isna(value):
+            return value
+        
+        try:
+            value_str = str(value)
+            # Try to detect if already correctly encoded (contains Thai characters)
+            if any('\u0e00' <= c <= '\u0e7f' for c in value_str):
+                return value_str  # Already correctly decoded
+            
+            # Convert back to bytes using latin-1 (preserves byte values)
+            # Then decode with Thai encoding
+            byte_data = value_str.encode('latin-1', errors='ignore')
+            return byte_data.decode(target_encoding, errors='ignore')
+        except Exception as e:
+            # If conversion fails, return original value
+            return value
 
     @staticmethod
     def _buddhist_to_iso(date_str: str) -> Optional[str]:

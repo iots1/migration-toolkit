@@ -274,7 +274,13 @@ def render_migration_engine_page():
             add_log(f"[{datetime.now().time()}] 🔄 Starting REAL Data Transfer...")
             
             # Use pd.read_sql with chunksize -> Returns an Iterator
-            data_iterator = pd.read_sql(select_query, src_engine, chunksize=batch_size)
+            # coerce_float=False ป้องกัน pandas แปลง numeric ผิด
+            data_iterator = pd.read_sql(
+                select_query, 
+                src_engine, 
+                chunksize=batch_size,
+                coerce_float=False  # ป้องกัน auto-convert ที่อาจทำให้ encoding พัง
+            )
             
             total_rows_processed = 0
             batch_num = 0
@@ -286,6 +292,14 @@ def render_migration_engine_page():
                 
                 status_text.text(f"Processing Batch {batch_num} ({rows_in_batch} rows)...")
                 add_log(f"   ▶ Batch {batch_num}: Fetched {rows_in_batch} rows")
+
+                # --- FIX: Clean problematic characters (0xa0 = non-breaking space) ---
+                # แปลง non-breaking space และ special bytes เป็น space ปกติ
+                for col in df_batch.select_dtypes(include=['object']).columns:
+                    df_batch[col] = df_batch[col].apply(
+                        lambda x: x.replace('\xa0', ' ').replace('\x00', '') 
+                        if isinstance(x, str) else x
+                    )
 
                 # --- A. TRANSFORM (In-Memory) ---
                 try:

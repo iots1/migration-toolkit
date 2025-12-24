@@ -33,7 +33,10 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password, chars
                 host=host,
                 port=port_int or 3306,
                 database=db_name,
-                query={"charset": mysql_charset}
+                query={
+                    "charset": mysql_charset,
+                    "binary_prefix": "true"  # ช่วยจัดการ binary/blob data ได้ดีขึ้น
+                }
             )
             
         elif db_type == "PostgreSQL":

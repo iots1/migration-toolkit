@@ -293,13 +293,34 @@ def render_migration_engine_page():
                 status_text.text(f"Processing Batch {batch_num} ({rows_in_batch} rows)...")
                 add_log(f"   ▶ Batch {batch_num}: Fetched {rows_in_batch} rows")
 
-                # --- FIX: Clean problematic characters (0xa0 = non-breaking space) ---
+                # --- FIX: Clean problematic characters (0xa0 = non-breaking space, etc.) ---
                 # แปลง non-breaking space และ special bytes เป็น space ปกติ
+                # รองรับทั้ง str และ bytes ที่อาจ decode ไม่ได้
+                def clean_encoding_issues(x):
+                    if x is None:
+                        return x
+                    if isinstance(x, bytes):
+                        # ถ้าเป็น bytes ให้ decode ด้วย utf-8 หรือ latin-1 fallback
+                        try:
+                            x = x.decode('utf-8')
+                        except (UnicodeDecodeError, AttributeError):
+                            try:
+                                x = x.decode('latin-1')  # latin-1 รองรับทุก byte 0x00-0xFF
+                            except:
+                                x = str(x)
+                    if isinstance(x, str):
+                        # แทนที่ problematic characters
+                        x = x.replace('\xa0', ' ')  # non-breaking space → space
+                        x = x.replace('\x00', '')   # null byte → remove
+                        x = x.replace('\x85', '...')  # NEL → ellipsis
+                        x = x.replace('\x96', '-')   # en-dash → hyphen
+                        x = x.replace('\x97', '-')   # em-dash → hyphen
+                        # ลบ control characters อื่นๆ (0x00-0x1F ยกเว้น tab, newline)
+                        x = ''.join(c if c in '\t\n\r' or ord(c) >= 32 else '' for c in x)
+                    return x
+                
                 for col in df_batch.select_dtypes(include=['object']).columns:
-                    df_batch[col] = df_batch[col].apply(
-                        lambda x: x.replace('\xa0', ' ').replace('\x00', '') 
-                        if isinstance(x, str) else x
-                    )
+                    df_batch[col] = df_batch[col].apply(clean_encoding_issues)
 
                 # --- A. TRANSFORM (In-Memory) ---
                 try:
@@ -435,5 +456,5 @@ def render_migration_engine_page():
                 st.rerun()
         with col_end2:
             if st.session_state.migration_log_file and os.path.exists(st.session_state.migration_log_file):
-                with open(st.session_state.migration_log_file, "r", encoding="utf-8") as f:
-                    st.download_button("📥 Download Log", data=f, file_name="migration.log")
+                with open(st.session_state.migration_log_file, "r", encoding="utf-8", errors="replace") as f:
+                    st.download_button("📥 Download Log", data=f.read(), file_name="migration.log")

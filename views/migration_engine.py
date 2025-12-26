@@ -53,7 +53,7 @@ def write_log(log_file: str, message: str):
     """Write message to log file and flush immediately."""
     if log_file:
         try:
-            with open(log_file, "a", encoding="utf-8") as f:
+            with open(log_file, "a", encoding="utf-8", errors="replace") as f:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 f.write(f"[{timestamp}] {message}\n")
         except Exception as e:
@@ -456,5 +456,17 @@ def render_migration_engine_page():
                 st.rerun()
         with col_end2:
             if st.session_state.migration_log_file and os.path.exists(st.session_state.migration_log_file):
-                with open(st.session_state.migration_log_file, "r", encoding="utf-8", errors="replace") as f:
-                    st.download_button("📥 Download Log", data=f.read(), file_name="migration.log")
+                # ลองอ่านด้วย utf-8 ก่อน ถ้าไม่ได้ให้ลอง cp874 (Windows-874 สำหรับภาษาไทย)
+                log_content = None
+                for encoding in ['utf-8', 'cp874', 'tis-620', 'latin-1']:
+                    try:
+                        with open(st.session_state.migration_log_file, "r", encoding=encoding, errors="replace") as f:
+                            log_content = f.read()
+                        break
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                if log_content is None:
+                    # Fallback: อ่านแบบ binary แล้ว decode ด้วย errors='ignore'
+                    with open(st.session_state.migration_log_file, "rb") as f:
+                        log_content = f.read().decode('utf-8', errors='ignore')
+                st.download_button("📥 Download Log", data=log_content, file_name="migration.log")

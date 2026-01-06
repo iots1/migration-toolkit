@@ -53,7 +53,7 @@ def write_log(log_file: str, message: str):
     """Write message to log file and flush immediately."""
     if log_file:
         try:
-            with open(log_file, "a", encoding="utf-8") as f:
+            with open(log_file, "a", encoding="utf-8", errors="replace") as f:
                 timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 f.write(f"[{timestamp}] {message}\n")
         except Exception as e:
@@ -123,6 +123,22 @@ def render_migration_engine_page():
             st.markdown("#### Source Database")
             src_sel = st.selectbox("Source Profile", ds_options, key="src_sel")
             st.session_state.migration_src_profile = src_sel
+            
+            # Charset option for legacy Thai databases
+            charset_options = ["utf8mb4 (Default)", "tis620 (Thai Legacy)", "latin1 (Raw Bytes)"]
+            src_charset_sel = st.selectbox(
+                "Source Charset (ถ้าภาษาไทยเพี้ยนให้ลอง tis620)", 
+                charset_options, 
+                key="src_charset_sel"
+            )
+            # Map selection to actual charset value
+            charset_map = {
+                "utf8mb4 (Default)": None,
+                "tis620 (Thai Legacy)": "tis620",
+                "latin1 (Raw Bytes)": "latin1"
+            }
+            st.session_state.src_charset = charset_map.get(src_charset_sel)
+            
             if src_sel != "Select Profile...":
                 if st.button("🔍 Test Source"):
                     with st.spinner("Connecting..."):
@@ -231,15 +247,19 @@ def render_migration_engine_page():
 
             add_log(f"[{datetime.now().time()}] 🔗 Creating Database Engines...")
             
+            # Get charset from session state (set in Step 2)
+            src_charset = st.session_state.get('src_charset', None)
+            
             # Use SQLAlchemy Engine for Pandas
             src_engine = connector.create_sqlalchemy_engine(
-                src_ds['db_type'], src_ds['host'], src_ds['port'], src_ds['dbname'], src_ds['username'], src_ds['password']
+                src_ds['db_type'], src_ds['host'], src_ds['port'], src_ds['dbname'], src_ds['username'], src_ds['password'],
+                charset=src_charset
             )
             tgt_engine = connector.create_sqlalchemy_engine(
                 tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
             )
             
-            add_log(f"   ✅ Connected to Source: {src_ds['db_type']} @ {src_ds['host']}")
+            add_log(f"   ✅ Connected to Source: {src_ds['db_type']} @ {src_ds['host']} (charset: {src_charset or 'default'})")
             add_log(f"   ✅ Connected to Target: {tgt_ds['db_type']} @ {tgt_ds['host']}")
 
             # 3. Prepare Query & Parameters
@@ -254,7 +274,13 @@ def render_migration_engine_page():
             add_log(f"[{datetime.now().time()}] 🔄 Starting REAL Data Transfer...")
             
             # Use pd.read_sql with chunksize -> Returns an Iterator
-            data_iterator = pd.read_sql(select_query, src_engine, chunksize=batch_size)
+            # coerce_float=False ป้องกัน pandas แปลง numeric ผิด
+            data_iterator = pd.read_sql(
+                select_query, 
+                src_engine, 
+                chunksize=batch_size,
+                coerce_float=False  # ป้องกัน auto-convert ที่อาจทำให้ encoding พัง
+            )
             
             total_rows_processed = 0
             batch_num = 0
@@ -267,6 +293,35 @@ def render_migration_engine_page():
                 status_text.text(f"Processing Batch {batch_num} ({rows_in_batch} rows)...")
                 add_log(f"   ▶ Batch {batch_num}: Fetched {rows_in_batch} rows")
 
+                # --- FIX: Clean problematic characters (0xa0 = non-breaking space, etc.) ---
+                # แปลง non-breaking space และ special bytes เป็น space ปกติ
+                # รองรับทั้ง str และ bytes ที่อาจ decode ไม่ได้
+                def clean_encoding_issues(x):
+                    if x is None:
+                        return x
+                    if isinstance(x, bytes):
+                        # ถ้าเป็น bytes ให้ decode ด้วย utf-8 หรือ latin-1 fallback
+                        try:
+                            x = x.decode('utf-8')
+                        except (UnicodeDecodeError, AttributeError):
+                            try:
+                                x = x.decode('latin-1')  # latin-1 รองรับทุก byte 0x00-0xFF
+                            except:
+                                x = str(x)
+                    if isinstance(x, str):
+                        # แทนที่ problematic characters
+                        x = x.replace('\xa0', ' ')  # non-breaking space → space
+                        x = x.replace('\x00', '')   # null byte → remove
+                        x = x.replace('\x85', '...')  # NEL → ellipsis
+                        x = x.replace('\x96', '-')   # en-dash → hyphen
+                        x = x.replace('\x97', '-')   # em-dash → hyphen
+                        # ลบ control characters อื่นๆ (0x00-0x1F ยกเว้น tab, newline)
+                        x = ''.join(c if c in '\t\n\r' or ord(c) >= 32 else '' for c in x)
+                    return x
+                
+                for col in df_batch.select_dtypes(include=['object']).columns:
+                    df_batch[col] = df_batch[col].apply(clean_encoding_issues)
+
                 # --- A. TRANSFORM (In-Memory) ---
                 try:
                     df_batch = DataTransformer.apply_transformers_to_batch(df_batch, config)
@@ -274,23 +329,77 @@ def render_migration_engine_page():
                     # Rename Column to match Target
                     rename_map = {}
                     for m in config.get('mappings', []):
-                        if 'target' in m and m['source'] in df_batch.columns:
+                        if not m.get('ignore', False) and 'target' in m and m['source'] in df_batch.columns:
                             rename_map[m['source']] = m['target']
                     if rename_map:
                         df_batch.rename(columns=rename_map, inplace=True)
+                    
+                    # ลบ column ที่ถูก ignore
+                    ignored_cols = [m['target'] for m in config.get('mappings', []) if m.get('ignore', False)]
+                    df_batch = df_batch.drop(columns=[c for c in ignored_cols if c in df_batch.columns], errors='ignore')
+                    
+                    # บังคับ lowercase ทุก column เพื่อรองรับ PostgreSQL (case-sensitive)
+                    df_batch.columns = df_batch.columns.str.lower()
+                    
+                    # ตรวจสอบและลบ duplicate columns
+                    if df_batch.columns.duplicated().any():
+                        dup_cols = df_batch.columns[df_batch.columns.duplicated()].tolist()
+                        df_batch = df_batch.loc[:, ~df_batch.columns.duplicated(keep='first')]
+
+                    # อ่าน BIT columns จาก config (ตรวจหา BIT_CAST transformers)
+                    bit_columns = []    
+                    for mapping in config.get('mappings', []):
+                        if 'transformers' in mapping and 'BIT_CAST' in mapping['transformers']:
+                            target_col = mapping.get('target', '').lower()
+                            if target_col:
+                                bit_columns.append(target_col)
+                    
+                    # แปลง Boolean/Integer → '0'/'1' string สำหรับ BIT columns (PostgreSQL ต้องการ string)
+                    for col in bit_columns:
+                        if col in df_batch.columns:
+                            # แปลง Boolean/Integer เป็น '1' หรือ '0' (string) สำหรับ PostgreSQL BIT
+                            df_batch[col] = df_batch[col].apply(
+                                lambda x: '1' if (x == True or x == 1 or x == '1' or str(x).lower() == 'true') else '0'
+                            )
                         
                 except Exception as e:
                     add_log(f"     ⚠️ Transformation Warning in Batch {batch_num}: {e}")
 
                 # --- B. LOAD (Bulk Insert) ---
                 try:
+                    # สร้าง dtype mapping สำหรับ BIT columns
+                    from sqlalchemy import text
+                    from sqlalchemy.types import String
+                    
+                    dtype_map = {}
+                    if bit_columns:
+                        if tgt_ds['db_type'] == 'PostgreSQL':
+                            # PostgreSQL: ใช้ BIT type
+                            from sqlalchemy.dialects.postgresql import BIT
+                            for col in bit_columns:
+                                if col in df_batch.columns:
+                                    dtype_map[col] = BIT(1)
+                        elif tgt_ds['db_type'] == 'MySQL':
+                            # MySQL: ใช้ BIT type
+                            from sqlalchemy.types import Integer
+                            for col in bit_columns:
+                                if col in df_batch.columns:
+                                    dtype_map[col] = Integer()  # MySQL BIT(1) = TINYINT(1)
+                        elif tgt_ds['db_type'] == 'MSSQL':
+                            # MSSQL: ใช้ BIT type
+                            from sqlalchemy.dialects.mssql import BIT as MSSQL_BIT
+                            for col in bit_columns:
+                                if col in df_batch.columns:
+                                    dtype_map[col] = MSSQL_BIT()
+                    
                     df_batch.to_sql(
                         name=target_table,
                         con=tgt_engine,
                         if_exists='append',
                         index=False,
                         method='multi',
-                        chunksize=500 
+                        chunksize=500,
+                        dtype=dtype_map if dtype_map else None
                     )
                     total_rows_processed += rows_in_batch
                     add_log(f"     💾 Inserted {rows_in_batch} rows successfully")
@@ -328,5 +437,17 @@ def render_migration_engine_page():
                 st.rerun()
         with col_end2:
             if st.session_state.migration_log_file and os.path.exists(st.session_state.migration_log_file):
-                with open(st.session_state.migration_log_file, "r") as f:
-                    st.download_button("📥 Download Log", data=f, file_name="migration.log")
+                # ลองอ่านด้วย utf-8 ก่อน ถ้าไม่ได้ให้ลอง cp874 (Windows-874 สำหรับภาษาไทย)
+                log_content = None
+                for encoding in ['utf-8', 'cp874', 'tis-620', 'latin-1']:
+                    try:
+                        with open(st.session_state.migration_log_file, "r", encoding=encoding, errors="replace") as f:
+                            log_content = f.read()
+                        break
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                if log_content is None:
+                    # Fallback: อ่านแบบ binary แล้ว decode ด้วย errors='ignore'
+                    with open(st.session_state.migration_log_file, "rb") as f:
+                        log_content = f.read().decode('utf-8', errors='ignore')
+                st.download_button("📥 Download Log", data=log_content, file_name="migration.log")

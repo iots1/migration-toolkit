@@ -367,17 +367,30 @@ def render_migration_engine_page():
 
                 # --- B. LOAD (Bulk Insert) ---
                 try:
-                    # สร้าง dtype mapping สำหรับ BIT columns (PostgreSQL)
+                    # สร้าง dtype mapping สำหรับ BIT columns
                     from sqlalchemy import text
                     from sqlalchemy.types import String
                     
                     dtype_map = {}
-                    if bit_columns and tgt_ds['db_type'] == 'PostgreSQL':
-                        # ใช้ raw SQL type สำหรับ PostgreSQL BIT
-                        from sqlalchemy.dialects.postgresql import BIT
-                        for col in bit_columns:
-                            if col in df_batch.columns:
-                                dtype_map[col] = BIT(1)
+                    if bit_columns:
+                        if tgt_ds['db_type'] == 'PostgreSQL':
+                            # PostgreSQL: ใช้ BIT type
+                            from sqlalchemy.dialects.postgresql import BIT
+                            for col in bit_columns:
+                                if col in df_batch.columns:
+                                    dtype_map[col] = BIT(1)
+                        elif tgt_ds['db_type'] == 'MySQL':
+                            # MySQL: ใช้ BIT type
+                            from sqlalchemy.types import Integer
+                            for col in bit_columns:
+                                if col in df_batch.columns:
+                                    dtype_map[col] = Integer()  # MySQL BIT(1) = TINYINT(1)
+                        elif tgt_ds['db_type'] == 'MSSQL':
+                            # MSSQL: ใช้ BIT type
+                            from sqlalchemy.dialects.mssql import BIT as MSSQL_BIT
+                            for col in bit_columns:
+                                if col in df_batch.columns:
+                                    dtype_map[col] = MSSQL_BIT()
                     
                     df_batch.to_sql(
                         name=target_table,

@@ -348,78 +348,46 @@ def render_migration_engine_page():
 
                     # อ่าน BIT columns จาก config (ตรวจหา BIT_CAST transformers)
                     bit_columns = []    
-                    bit_cast_types = ['MYSQL_BIT_CAST', 'POSTGRES_BIT_CAST', 'MSSQL_BIT_CAST']
                     for mapping in config.get('mappings', []):
-                        if 'transformers' in mapping:
-                            for bit_type in bit_cast_types:
-                                if bit_type in mapping['transformers']:
-                                    target_col = mapping.get('target', '').lower()
-                                    if target_col:
-                                        bit_columns.append((target_col, bit_type))
-                                    break
+                        if 'transformers' in mapping and 'BIT_CAST' in mapping['transformers']:
+                            target_col = mapping.get('target', '').lower()
+                            if target_col:
+                                bit_columns.append(target_col)
                     
-                    # แปลง Boolean/Integer → 0/1 สำหรับ BIT columns (จะใช้ CAST ใน SQL)
-                    for col_info in bit_columns:
-                        col = col_info[0] if isinstance(col_info, tuple) else col_info
+                    # แปลง Boolean/Integer → '0'/'1' string สำหรับ BIT columns (PostgreSQL ต้องการ string)
+                    for col in bit_columns:
                         if col in df_batch.columns:
-                            # แปลง Boolean/Integer เป็น 0 หรือ 1
+                            # แปลง Boolean/Integer เป็น '1' หรือ '0' (string) สำหรับ PostgreSQL BIT
                             df_batch[col] = df_batch[col].apply(
-                                lambda x: 1 if (x == True or x == 1 or x == '1') else 0
-                            ).astype('int64')
+                                lambda x: '1' if (x == True or x == 1 or x == '1' or str(x).lower() == 'true') else '0'
+                            )
                         
                 except Exception as e:
                     add_log(f"     ⚠️ Transformation Warning in Batch {batch_num}: {e}")
 
-                # --- B. LOAD (Bulk Insert) with BIT column handling ---
+                # --- B. LOAD (Bulk Insert) ---
                 try:
-                    # ถ้ามี BIT columns ให้ใช้ custom method, ไม่งั้นใช้ method='multi'
-                    if bit_columns:
-                        # สร้าง dict สำหรับ lookup bit column types
-                        bit_col_map = {col: cast_type for col, cast_type in bit_columns}
-                        
-                        # Custom insert method สำหรับ CAST integer → BIT
-                        def bit_insert_method(table, conn, keys, data_iter):
-                            from sqlalchemy import text
-                            
-                            # สร้าง INSERT statement พร้อม CAST สำหรับ BIT columns
-                            columns = ', '.join([f'"{k}"' for k in keys])
-                            placeholders = []
-                            for k in keys:
-                                if k in bit_col_map:
-                                    cast_type = bit_col_map[k]
-                                    # PostgreSQL ต้อง CAST, MySQL/MSSQL ไม่ต้อง
-                                    if cast_type == 'POSTGRES_BIT_CAST':
-                                        placeholders.append(f"CAST(:{k} AS BIT)")
-                                    else:
-                                        placeholders.append(f":{k}")
-                                else:
-                                    placeholders.append(f":{k}")
-                            placeholders_str = ', '.join(placeholders)
-                            
-                            insert_stmt = f'INSERT INTO "{table.name}" ({columns}) VALUES ({placeholders_str})'
-                            
-                            # Execute batch insert
-                            data_list = [dict(zip(keys, row)) for row in data_iter]
-                            conn.execute(text(insert_stmt), data_list)
-                        
-                        df_batch.to_sql(
-                            name=target_table,
-                            con=tgt_engine,
-                            if_exists='append',
-                            index=False,
-                            method=bit_insert_method,
-                            chunksize=500 
-                        )
-                    else:
-                        # ไม่มี BIT columns ใช้ method='multi' ธรรมดา
-                        df_batch.to_sql(
-                            name=target_table,
-                            con=tgt_engine,
-                            if_exists='append',
-                            index=False,
-                            method='multi',
-                            chunksize=500 
-                        )
+                    # สร้าง dtype mapping สำหรับ BIT columns (PostgreSQL)
+                    from sqlalchemy import text
+                    from sqlalchemy.types import String
+                    
+                    dtype_map = {}
+                    if bit_columns and tgt_ds['db_type'] == 'PostgreSQL':
+                        # ใช้ raw SQL type สำหรับ PostgreSQL BIT
+                        from sqlalchemy.dialects.postgresql import BIT
+                        for col in bit_columns:
+                            if col in df_batch.columns:
+                                dtype_map[col] = BIT(1)
+                    
+                    df_batch.to_sql(
+                        name=target_table,
+                        con=tgt_engine,
+                        if_exists='append',
+                        index=False,
+                        method='multi',
+                        chunksize=500,
+                        dtype=dtype_map if dtype_map else None
+                    )
                     total_rows_processed += rows_in_batch
                     add_log(f"     💾 Inserted {rows_in_batch} rows successfully")
                     

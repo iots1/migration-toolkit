@@ -16,19 +16,37 @@ def generate_select_query(config_data, source_table):
     """
     Generate a SELECT query based on configuration.
     It selects specific columns to minimize data transfer overhead.
+    Excludes columns that use GENERATE_HN transformer since they don't need source data.
     """
     try:
         if not config_data or 'mappings' not in config_data:
             return f"SELECT * FROM {source_table}"
 
-        # เลือกเฉพาะ Column ที่ไม่ได้ถูก Ignore
+        # เลือกเฉพาะ Column ที่ไม่ได้ถูก Ignore และไม่ใช้ GENERATE_HN transformer
         selected_cols = [
             mapping['source']
             for mapping in config_data.get('mappings', [])
             if not mapping.get('ignore', False)
+            and 'GENERATE_HN' not in mapping.get('transformers', [])
         ]
 
+        # If no columns selected (all ignored or GENERATE_HN), select all to maintain row count
+        # GENERATE_HN needs to know how many rows to generate
         if not selected_cols:
+            # Check if there are any GENERATE_HN columns
+            has_generate_hn = any(
+                'GENERATE_HN' in mapping.get('transformers', [])
+                for mapping in config_data.get('mappings', [])
+                if not mapping.get('ignore', False)
+            )
+            if has_generate_hn:
+                # Select first non-ignored column or use * to maintain row count
+                first_col = next(
+                    (m['source'] for m in config_data.get('mappings', []) if not m.get('ignore', False)),
+                    None
+                )
+                if first_col:
+                    return f'SELECT "{first_col}" FROM {source_table}'
             return f"SELECT * FROM {source_table}"
 
         # สร้าง Query String (ใส่ Quote เพื่อรองรับชื่อ column ที่มี space หรือ keyword)

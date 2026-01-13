@@ -29,6 +29,20 @@ class DataTransformer:
             target_col = mapping.get('target', source_col)
             transformers = mapping.get('transformers', [])
 
+            # Special handling for GENERATE_HN: Create column even if source doesn't exist
+            if 'GENERATE_HN' in transformers:
+                # Create a dummy series with the same length as df for GENERATE_HN
+                series_data = pd.Series([None] * len(df), index=df.index)
+
+                for t_name in transformers:
+                    try:
+                        series_data = DataTransformer.transform_series(series_data, t_name)
+                    except Exception as e:
+                        print(f"Error transforming {source_col} with {t_name}: {e}")
+
+                df[target_col] = series_data
+                continue
+
             # Skip if source column doesn't exist
             if source_col not in available_cols:
                 continue
@@ -38,14 +52,14 @@ class DataTransformer:
                 # If target is different, copy source to target first (or rename later)
                 # Here we operate on source_col and rename at the end of the loop if needed
                 series_data = df[source_col]
-                
+
                 for t_name in transformers:
                     try:
                         series_data = DataTransformer.transform_series(series_data, t_name)
                     except Exception as e:
                         # Log error but don't crash the whole batch
                         print(f"Error transforming {source_col} with {t_name}: {e}")
-                
+
                 # Assign back to DataFrame
                 # If renaming is needed (Source != Target)
                 if source_col != target_col:

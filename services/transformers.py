@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import re
+import random
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -80,6 +81,9 @@ class DataTransformer:
         if transformer_name == "REPLACE_EMPTY_WITH_NULL":
             return series.replace(r'^\s*$', np.nan, regex=True)
 
+        if transformer_name == "GENERATE_RANDOM_9":
+            return series.apply(lambda _: DataTransformer._generate_random_9())
+
         # --- 2. Complex/Custom Logic (Apply per row) ---
         # These are slower but necessary for complex logic
         complex_transformers = [
@@ -126,6 +130,9 @@ class DataTransformer:
         # Name splitting (Map specific parts)
         if transformer_name == "EXTRACT_FIRST_NAME": return DataTransformer._split_name(value_str).get("fname")
         if transformer_name == "EXTRACT_LAST_NAME": return DataTransformer._split_name(value_str).get("lname")
+        
+        # Generate random 9-digit number
+        if transformer_name == "GENERATE_RANDOM_9": return DataTransformer._generate_random_9()
         
         return value
 
@@ -207,3 +214,8 @@ class DataTransformer:
         if len(parts) >= 2:
             return {"fname": parts[0], "lname": " ".join(parts[1:])}
         return {"fname": clean_val, "lname": ""}
+
+    @staticmethod
+    def _generate_random_9() -> str:
+        """Generate a random 9-digit number as string"""
+        return str(random.randint(100000000, 999999999))

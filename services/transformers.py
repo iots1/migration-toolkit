@@ -10,6 +10,7 @@ class DataTransformer:
     Service for handling data transformations in the ETL pipeline.
     Optimized for Pandas Series (Batch Processing) but supports single value transformation.
     """
+    _hn_counter = 0  # Counter for sequential HN generation
 
     @staticmethod
     def apply_transformers_to_batch(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
@@ -81,8 +82,12 @@ class DataTransformer:
         if transformer_name == "REPLACE_EMPTY_WITH_NULL":
             return series.replace(r'^\s*$', np.nan, regex=True)
 
-        if transformer_name == "GENERATE_RANDOM_9":
-            return series.apply(lambda _: DataTransformer._generate_random_9())
+        if transformer_name == "GENERATE_HN":
+            # Generate sequential HN numbers for the entire series
+            start_counter = DataTransformer._hn_counter
+            result = pd.Series([f"HN{str(i).zfill(9)}" for i in range(start_counter + 1, start_counter + len(series) + 1)], index=series.index)
+            DataTransformer._hn_counter += len(series)
+            return result
 
         # --- 2. Complex/Custom Logic (Apply per row) ---
         # These are slower but necessary for complex logic
@@ -131,8 +136,8 @@ class DataTransformer:
         if transformer_name == "EXTRACT_FIRST_NAME": return DataTransformer._split_name(value_str).get("fname")
         if transformer_name == "EXTRACT_LAST_NAME": return DataTransformer._split_name(value_str).get("lname")
         
-        # Generate random 9-digit number
-        if transformer_name == "GENERATE_RANDOM_9": return DataTransformer._generate_random_9()
+        # Generate sequential HN number
+        if transformer_name == "GENERATE_HN": return DataTransformer._generate_sequential_hn()
         
         return value
 
@@ -216,6 +221,12 @@ class DataTransformer:
         return {"fname": clean_val, "lname": ""}
 
     @staticmethod
-    def _generate_random_9() -> str:
-        """Generate a random 9-digit number as string"""
-        return str(random.randint(100000000, 999999999))
+    def _generate_sequential_hn() -> str:
+        """Generate sequential HN number (e.g., HN000000001, HN000000002, ...)"""
+        DataTransformer._hn_counter += 1
+        return f"HN{str(DataTransformer._hn_counter).zfill(9)}"
+    
+    @staticmethod
+    def reset_hn_counter(start_value: int = 0):
+        """Reset HN counter to specified value (useful for testing or new migrations)"""
+        DataTransformer._hn_counter = start_value

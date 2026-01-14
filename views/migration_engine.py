@@ -70,6 +70,114 @@ def write_log(log_file: str, message: str):
         except Exception as e:
             print(f"Error writing to log: {e}")
 
+
+def clean_encoding_issues(value):
+    """Clean encoding issues from a single value."""
+    if value is None:
+        return value
+    if isinstance(value, bytes):
+        try:
+            value = value.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                value = value.decode('latin-1')
+            except UnicodeDecodeError:
+                value = str(value)
+    if isinstance(value, str):
+        value = value.replace('\xa0', ' ').replace('\x00', '').replace('\x85', '...')
+        value = ''.join(c if c in '\t\n\r' or ord(c) >= 32 else '' for c in value)
+    return value
+
+
+def clean_batch_encoding(df_batch: pd.DataFrame) -> pd.DataFrame:
+    """Clean encoding issues for all object columns in the batch."""
+    for col in df_batch.select_dtypes(include=['object']).columns:
+        df_batch[col] = df_batch[col].apply(clean_encoding_issues)
+    return df_batch
+
+
+def transform_batch(df_batch: pd.DataFrame, config: dict) -> tuple:
+    """
+    Apply transformations, rename columns, and prepare batch for insert.
+    Returns (transformed_df, bit_columns).
+    """
+    df_batch = DataTransformer.apply_transformers_to_batch(df_batch, config)
+
+    # Build rename map from source to target columns
+    rename_map = {
+        m['source']: m['target']
+        for m in config.get('mappings', [])
+        if not m.get('ignore', False) and 'target' in m and m['source'] in df_batch.columns
+    }
+    if rename_map:
+        df_batch.rename(columns=rename_map, inplace=True)
+
+    # Drop ignored columns
+    ignored_cols = [m['target'] for m in config.get('mappings', []) if m.get('ignore', False)]
+    df_batch = df_batch.drop(columns=[c for c in ignored_cols if c in df_batch.columns], errors='ignore')
+
+    # Normalize column names
+    df_batch.columns = df_batch.columns.str.lower()
+    df_batch = df_batch.loc[:, ~df_batch.columns.duplicated(keep='first')]
+
+    # Identify and convert BIT columns
+    bit_columns = [
+        mapping.get('target', '').lower()
+        for mapping in config.get('mappings', [])
+        if 'transformers' in mapping and 'BIT_CAST' in mapping['transformers'] and mapping.get('target')
+    ]
+
+    for col in bit_columns:
+        if col in df_batch.columns:
+            df_batch[col] = df_batch[col].apply(
+                lambda x: '1' if x in (True, 1, '1') or str(x).lower() == 'true' else '0'
+            )
+
+    return df_batch, bit_columns
+
+
+def build_dtype_map(bit_columns: list, df_batch: pd.DataFrame, db_type: str) -> dict:
+    """Build SQLAlchemy dtype map for BIT columns based on target database type."""
+    if not bit_columns:
+        return {}
+
+    dtype_map = {}
+    if db_type == 'PostgreSQL':
+        from sqlalchemy.dialects.postgresql import BIT
+        for col in bit_columns:
+            if col in df_batch.columns:
+                dtype_map[col] = BIT(1)
+    elif db_type == 'MySQL':
+        from sqlalchemy.types import Integer
+        for col in bit_columns:
+            if col in df_batch.columns:
+                dtype_map[col] = Integer()
+    elif db_type == 'MSSQL':
+        from sqlalchemy.dialects.mssql import BIT as MSSQL_BIT
+        for col in bit_columns:
+            if col in df_batch.columns:
+                dtype_map[col] = MSSQL_BIT()
+    return dtype_map
+
+
+def batch_insert(df_batch: pd.DataFrame, target_table: str, engine, dtype_map: dict = None):
+    """
+    Batch insert using pandas to_sql with multi-row INSERT for speed.
+    """
+    if df_batch.empty:
+        return 0
+
+    df_batch.to_sql(
+        name=target_table,
+        con=engine,
+        if_exists='append',
+        index=False,
+        method='multi',
+        chunksize=500,
+        dtype=dtype_map if dtype_map else None
+    )
+    return len(df_batch)
+
 # --- Main Page Renderer ---
 
 def render_migration_engine_page():
@@ -392,136 +500,60 @@ def render_migration_engine_page():
                 for df_batch in data_iterator:
                     batch_num += 1
                     rows_in_batch = len(df_batch)
-                    
-                    # Update Status Text
                     status_box.update(label=f"Processing Batch {batch_num} ({rows_in_batch} rows)...", state="running")
-                    
-                    # --- 1. CLEANING ---
-                    def clean_encoding_issues(x):
-                        if x is None: return x
-                        if isinstance(x, bytes):
-                            try: x = x.decode('utf-8')
-                            except:
-                                try: x = x.decode('latin-1')
-                                except: x = str(x)
-                        if isinstance(x, str):
-                            x = x.replace('\xa0', ' ').replace('\x00', '').replace('\x85', '...')
-                            x = ''.join(c if c in '\t\n\r' or ord(c) >= 32 else '' for c in x)
-                        return x
-                    
-                    for col in df_batch.select_dtypes(include=['object']).columns:
-                        df_batch[col] = df_batch[col].apply(clean_encoding_issues)
 
-                    # --- 2. TRANSFORM ---
+                    # Clean encoding issues
+                    df_batch = clean_batch_encoding(df_batch)
+
+                    # Transform batch
                     try:
-                        df_batch = DataTransformer.apply_transformers_to_batch(df_batch, config)
-                        
-                        rename_map = {}
-                        for m in config.get('mappings', []):
-                            if not m.get('ignore', False) and 'target' in m and m['source'] in df_batch.columns:
-                                rename_map[m['source']] = m['target']
-                        if rename_map:
-                            df_batch.rename(columns=rename_map, inplace=True)
-                        
-                        ignored_cols = [m['target'] for m in config.get('mappings', []) if m.get('ignore', False)]
-                        df_batch = df_batch.drop(columns=[c for c in ignored_cols if c in df_batch.columns], errors='ignore')
-                        
-                        df_batch.columns = df_batch.columns.str.lower()
-                        df_batch = df_batch.loc[:, ~df_batch.columns.duplicated(keep='first')]
-
-                        # Identify BIT columns
-                        bit_columns = []    
-                        for mapping in config.get('mappings', []):
-                            if 'transformers' in mapping and 'BIT_CAST' in mapping['transformers']:
-                                target_col = mapping.get('target', '').lower()
-                                if target_col: bit_columns.append(target_col)
-                        
-                        for col in bit_columns:
-                            if col in df_batch.columns:
-                                df_batch[col] = df_batch[col].apply(
-                                    lambda x: '1' if (x == True or x == 1 or x == '1' or str(x).lower() == 'true') else '0'
-                                )
-
+                        df_batch, bit_columns = transform_batch(df_batch, config)
                     except Exception as e:
                         add_log(f"Transformation Error in Batch {batch_num}: {e}", "⚠️")
+                        continue
 
-                    # --- 4. LOAD ---
+                    # Insert batch
                     try:
-                        dtype_map = {}
-                        if bit_columns:
-                            if tgt_ds['db_type'] == 'PostgreSQL':
-                                from sqlalchemy.dialects.postgresql import BIT
-                                for col in bit_columns:
-                                    if col in df_batch.columns: dtype_map[col] = BIT(1)
-                            elif tgt_ds['db_type'] == 'MySQL':
-                                from sqlalchemy.types import Integer
-                                for col in bit_columns:
-                                    if col in df_batch.columns: dtype_map[col] = Integer()
-                            elif tgt_ds['db_type'] == 'MSSQL':
-                                from sqlalchemy.dialects.mssql import BIT as MSSQL_BIT
-                                for col in bit_columns:
-                                    if col in df_batch.columns: dtype_map[col] = MSSQL_BIT()
-                        
-                        df_batch.to_sql(
-                            name=target_table,
-                            con=tgt_engine,
-                            if_exists='append',
-                            index=False,
-                            method='multi',
-                            chunksize=500,
-                            dtype=dtype_map if dtype_map else None
-                        )
-                        
+                        dtype_map = build_dtype_map(bit_columns, df_batch, tgt_ds['db_type'])
+                        batch_insert(df_batch, target_table, tgt_engine, dtype_map)
+
                         total_rows_processed += rows_in_batch
                         elapsed = time.time() - start_time
-                        
-                        # Update Metrics
+
                         metric_processed.metric("Rows Processed", f"{total_rows_processed:,}")
                         metric_batch.metric("Current Batch", batch_num)
                         metric_time.metric("Elapsed Time", f"{elapsed:.1f}s")
-                        
-                        # Update Progress Bar
-                        prog = min(batch_num * 5, 95)
-                        progress_bar.progress(prog)
-                        
+                        progress_bar.progress(min(batch_num * 5, 95))
+
                         add_log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
-                        
+
                     except Exception as e:
-                        # --- ERROR HANDLING & RECOVERY ---
                         error_msg_full = str(e)
-                        
-                        # ตัด SQL Query ที่ยาวเกินไปออกเพื่อแสดงใน log สั้นๆ
-                        if "[SQL:" in error_msg_full:
-                            short_error = error_msg_full.split("[SQL:")[0].strip()
-                        else:
-                            short_error = error_msg_full[:300] + "..."
+                        short_error = error_msg_full.split("[SQL:")[0].strip() if "[SQL:" in error_msg_full else error_msg_full[:300]
 
                         add_log(f"Insert Failed: {short_error}", "❌")
-                        
-                        # แสดงผล Error เต็มๆ ใน Expander
                         st.error(f"Migration Failed at Batch {batch_num}: {short_error}")
-                        
-                        # --- EMERGENCY TRUNCATE BUTTON ---
+
                         col_err1, col_err2 = st.columns([1, 1])
                         with col_err1:
-                            if st.button("🗑️ Emergency Truncate Target Table", key="emergency_truncate", help="Clear data to fix UniqueViolation errors"):
+                            if st.button("🗑️ Emergency Truncate Target Table", key="emergency_truncate"):
                                 try:
                                     with tgt_engine.begin() as conn:
                                         try:
                                             conn.execute(text(f"TRUNCATE TABLE {target_table}"))
-                                        except:
+                                        except Exception:
                                             conn.execute(text(f"DELETE FROM {target_table}"))
-                                    st.success(f"Table '{target_table}' truncated! You can now Restart Migration.")
+                                    st.success(f"Table '{target_table}' truncated!")
                                     add_log(f"User triggered Emergency Truncate on {target_table}", "🗑️")
                                 except Exception as e_trunc:
                                     st.error(f"Failed to truncate: {e_trunc}")
 
-                        with st.expander("🔴 View Full Error Details (SQL & Params)", expanded=False):
+                        with st.expander("🔴 View Full Error Details", expanded=False):
                             st.code(error_msg_full, language="sql")
-                            
+
                         status_box.update(label="Migration Failed", state="error", expanded=True)
                         migration_failed = True
-                        break 
+                        break
 
                     if st.session_state.migration_test_sample:
                         add_log("Stopping after first batch (Test Mode)", "🛑")

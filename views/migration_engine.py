@@ -9,20 +9,18 @@ from services.transformers import DataTransformer
 import database as db
 import pandas as pd
 import sqlalchemy
+from sqlalchemy import text
 
 # --- Helper Functions ---
 
 def generate_select_query(config_data, source_table):
     """
     Generate a SELECT query based on configuration.
-    It selects specific columns to minimize data transfer overhead.
-    Excludes columns that use GENERATE_HN transformer since they don't need source data.
     """
     try:
         if not config_data or 'mappings' not in config_data:
             return f"SELECT * FROM {source_table}"
 
-        # เลือกเฉพาะ Column ที่ไม่ได้ถูก Ignore และไม่ใช้ GENERATE_HN transformer
         selected_cols = [
             mapping['source']
             for mapping in config_data.get('mappings', [])
@@ -30,17 +28,13 @@ def generate_select_query(config_data, source_table):
             and 'GENERATE_HN' not in mapping.get('transformers', [])
         ]
 
-        # If no columns selected (all ignored or GENERATE_HN), select all to maintain row count
-        # GENERATE_HN needs to know how many rows to generate
         if not selected_cols:
-            # Check if there are any GENERATE_HN columns
             has_generate_hn = any(
                 'GENERATE_HN' in mapping.get('transformers', [])
                 for mapping in config_data.get('mappings', [])
                 if not mapping.get('ignore', False)
             )
             if has_generate_hn:
-                # Select first non-ignored column or use * to maintain row count
                 first_col = next(
                     (m['source'] for m in config_data.get('mappings', []) if not m.get('ignore', False)),
                     None
@@ -49,7 +43,6 @@ def generate_select_query(config_data, source_table):
                     return f'SELECT "{first_col}" FROM {source_table}'
             return f"SELECT * FROM {source_table}"
 
-        # สร้าง Query String (ใส่ Quote เพื่อรองรับชื่อ column ที่มี space หรือ keyword)
         columns_str = ", ".join([f'"{col}"' for col in selected_cols])
         return f"SELECT {columns_str} FROM {source_table}"
     except Exception as e:
@@ -90,6 +83,8 @@ def render_migration_engine_page():
     if "migration_src_ok" not in st.session_state: st.session_state.migration_src_ok = False
     if "migration_tgt_ok" not in st.session_state: st.session_state.migration_tgt_ok = False
     if "migration_test_sample" not in st.session_state: st.session_state.migration_test_sample = False
+    # Checkbox state
+    if "truncate_target" not in st.session_state: st.session_state.truncate_target = False
 
     # ==========================================
     # STEP 1: Select Configuration
@@ -142,14 +137,12 @@ def render_migration_engine_page():
             src_sel = st.selectbox("Source Profile", ds_options, key="src_sel")
             st.session_state.migration_src_profile = src_sel
             
-            # Charset option for legacy Thai databases
             charset_options = ["utf8mb4 (Default)", "tis620 (Thai Legacy)", "latin1 (Raw Bytes)"]
             src_charset_sel = st.selectbox(
                 "Source Charset (ถ้าภาษาไทยเพี้ยนให้ลอง tis620)", 
                 charset_options, 
                 key="src_charset_sel"
             )
-            # Map selection to actual charset value
             charset_map = {
                 "utf8mb4 (Default)": None,
                 "tis620 (Thai Legacy)": "tis620",
@@ -160,7 +153,6 @@ def render_migration_engine_page():
             if src_sel != "Select Profile...":
                 if st.button("🔍 Test Source"):
                     with st.spinner("Connecting..."):
-                        # Using existing test function
                         row = datasources[datasources['name'] == src_sel].iloc[0]
                         ds = db.get_datasource_by_id(int(row['id']))
                         ok, msg = connector.test_db_connection(ds['db_type'], ds['host'], ds['port'], ds['dbname'], ds['username'], ds['password'])
@@ -212,6 +204,15 @@ def render_migration_engine_page():
             st.markdown("#### Execution Settings")
             batch_size = st.number_input("Batch Size (Rows per chunk)", value=1000, step=500, min_value=100)
             st.session_state.batch_size = batch_size
+            
+            # --- NEW: TRUNCATE OPTION ---
+            st.markdown("#### Data Options")
+            st.session_state.truncate_target = st.checkbox(
+                "🗑️ **Truncate Target Table** before starting", 
+                value=st.session_state.truncate_target,
+                help="⚠️ WARNING: This will DELETE ALL DATA in the target table before migration begins."
+            )
+            
             st.session_state.migration_test_sample = st.checkbox(
                 "🧪 **Test Mode** (Process only 1 batch)", 
                 value=st.session_state.migration_test_sample
@@ -225,227 +226,319 @@ def render_migration_engine_page():
             st.rerun()
 
     # ==========================================
-    # STEP 4: Execution (Real Batch Processing)
+    # STEP 4: Execution (Improved UI)
     # ==========================================
     elif st.session_state.migration_step == 4:
         st.markdown("### ⚙️ Migration in Progress")
         
+        # --- Metrics Dashboard ---
+        col_m1, col_m2, col_m3 = st.columns(3)
+        metric_processed = col_m1.metric("Rows Processed", "0")
+        metric_batch = col_m2.metric("Current Batch", "0")
+        metric_time = col_m3.metric("Elapsed Time", "0s")
+        
+        # --- Progress Bar ---
         progress_bar = st.progress(0)
-        status_text = st.empty()
-        log_container = st.container()
-        log_placeholder = log_container.empty()
-        logs = []
+        
+        # --- Status Container & Logger ---
+        with st.status("Initializing...", expanded=True) as status_box:
+            log_container = st.empty()
+            logs = []
 
-        def add_log(msg):
-            logs.append(msg)
-            # Fix: Added explicit label "Log Output" to prevent Streamlit error
-            log_str = "\n".join(logs)
-            log_placeholder.text_area("Log Output", value=log_str, height=300, disabled=True, label_visibility="visible")
-            if 'migration_log_file' in st.session_state:
-                write_log(st.session_state.migration_log_file, msg)
-
-        try:
-            config = st.session_state.migration_config
-            log_file = create_migration_log_file(config.get('config_name', 'migration'))
-            st.session_state.migration_log_file = log_file
-            
-            add_log(f"[{datetime.now().time()}] 🚀 Initialization started")
-            add_log(f"   Log File: {log_file}")
-
-            # 2. Connect to DBs
-            src_profile_name = st.session_state.migration_src_profile
-            tgt_profile_name = st.session_state.migration_tgt_profile
-            
-            add_log(f"[{datetime.now().time()}] 🔗 Fetching credentials...")
-            src_ds = db.get_datasource_by_name(src_profile_name)
-            tgt_ds = db.get_datasource_by_name(tgt_profile_name)
-
-            if not src_ds or not tgt_ds:
-                raise ValueError("Could not retrieve datasource credentials.")
-
-            add_log(f"[{datetime.now().time()}] 🔗 Creating Database Engines...")
-            
-            # Get charset from session state (set in Step 2)
-            src_charset = st.session_state.get('src_charset', None)
-            
-            # Use SQLAlchemy Engine for Pandas
-            src_engine = connector.create_sqlalchemy_engine(
-                src_ds['db_type'], src_ds['host'], src_ds['port'], src_ds['dbname'], src_ds['username'], src_ds['password'],
-                charset=src_charset
-            )
-            tgt_engine = connector.create_sqlalchemy_engine(
-                tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
-            )
-            
-            add_log(f"   ✅ Connected to Source: {src_ds['db_type']} @ {src_ds['host']} (charset: {src_charset or 'default'})")
-            add_log(f"   ✅ Connected to Target: {tgt_ds['db_type']} @ {tgt_ds['host']}")
-
-            # 3. Prepare Query & Parameters
-            source_table = config['source']['table']
-            target_table = config['target']['table']
-            batch_size = st.session_state.batch_size
-            
-            select_query = generate_select_query(config, source_table)
-            add_log(f"   📝 Generated Query: {select_query}")
-            
-            # 4. START BATCH PROCESSING
-            add_log(f"[{datetime.now().time()}] 🔄 Starting REAL Data Transfer...")
-            
-            # Use pd.read_sql with chunksize -> Returns an Iterator
-            # coerce_float=False ป้องกัน pandas แปลง numeric ผิด
-            data_iterator = pd.read_sql(
-                select_query, 
-                src_engine, 
-                chunksize=batch_size,
-                coerce_float=False  # ป้องกัน auto-convert ที่อาจทำให้ encoding พัง
-            )
-            
-            total_rows_processed = 0
-            batch_num = 0
-            start_time = time.time()
-
-            for df_batch in data_iterator:
-                batch_num += 1
-                rows_in_batch = len(df_batch)
+            def add_log(msg, icon="ℹ️"):
+                """Helper to append log to UI and file"""
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                # Format for UI (Markdown)
+                ui_msg = f"{icon} `[{timestamp}]` {msg}"
+                logs.append(ui_msg)
                 
-                status_text.text(f"Processing Batch {batch_num} ({rows_in_batch} rows)...")
-                add_log(f"   ▶ Batch {batch_num}: Fetched {rows_in_batch} rows")
+                # Show only last 20 lines in the preview to keep UI clean
+                display_logs = logs[-20:] if len(logs) > 20 else logs
+                log_container.markdown("\n\n".join(display_logs))
+                
+                # Write plain text to file
+                if 'migration_log_file' in st.session_state:
+                    file_msg = f"{msg}" # Timestamp is added in write_log
+                    write_log(st.session_state.migration_log_file, file_msg)
 
-                # --- FIX: Clean problematic characters (0xa0 = non-breaking space, etc.) ---
-                # แปลง non-breaking space และ special bytes เป็น space ปกติ
-                # รองรับทั้ง str และ bytes ที่อาจ decode ไม่ได้
-                def clean_encoding_issues(x):
-                    if x is None:
-                        return x
-                    if isinstance(x, bytes):
-                        # ถ้าเป็น bytes ให้ decode ด้วย utf-8 หรือ latin-1 fallback
+            try:
+                config = st.session_state.migration_config
+                log_file = create_migration_log_file(config.get('config_name', 'migration'))
+                st.session_state.migration_log_file = log_file
+                
+                add_log(f"Log File created: `{log_file}`", "📂")
+
+                # Connect to DBs
+                src_profile_name = st.session_state.migration_src_profile
+                tgt_profile_name = st.session_state.migration_tgt_profile
+                
+                add_log("Connecting to databases...", "🔗")
+                src_ds = db.get_datasource_by_name(src_profile_name)
+                tgt_ds = db.get_datasource_by_name(tgt_profile_name)
+
+                if not src_ds or not tgt_ds:
+                    raise ValueError("Could not retrieve datasource credentials.")
+
+                src_charset = st.session_state.get('src_charset', None)
+                
+                # FIX: Handle PostgreSQL compatibility with Thai legacy encoding
+                if src_ds['db_type'] == 'PostgreSQL' and src_charset == 'tis620':
+                    add_log("Auto-adjusting encoding: 'tis620' -> 'WIN874' (PostgreSQL Standard)", "🔧")
+                    src_charset = 'WIN874'
+
+                src_engine = connector.create_sqlalchemy_engine(
+                    src_ds['db_type'], src_ds['host'], src_ds['port'], src_ds['dbname'], src_ds['username'], src_ds['password'],
+                    charset=src_charset
+                )
+                tgt_engine = connector.create_sqlalchemy_engine(
+                    tgt_ds['db_type'], tgt_ds['host'], tgt_ds['port'], tgt_ds['dbname'], tgt_ds['username'], tgt_ds['password']
+                )
+                
+                add_log(f"Source connected: {src_ds['db_type']} (charset: {src_charset or 'default'})", "✅")
+                add_log(f"Target connected: {tgt_ds['db_type']}", "✅")
+
+                target_table = config['target']['table']
+
+                # --- NEW: TRUNCATE EXECUTION ---
+                if st.session_state.get('truncate_target', False):
+                    add_log(f"Cleaning target table: {target_table}...", "🧹")
+                    try:
+                        with tgt_engine.begin() as conn:
+                            conn.execute(text(f"TRUNCATE TABLE {target_table}"))
+                        add_log("Target table truncated successfully.", "✅")
+                    except Exception as e:
+                        add_log(f"TRUNCATE failed, trying DELETE FROM... ({str(e)})", "⚠️")
                         try:
-                            x = x.decode('utf-8')
-                        except (UnicodeDecodeError, AttributeError):
-                            try:
-                                x = x.decode('latin-1')  # latin-1 รองรับทุก byte 0x00-0xFF
-                            except:
-                                x = str(x)
-                    if isinstance(x, str):
-                        # แทนที่ problematic characters
-                        x = x.replace('\xa0', ' ')  # non-breaking space → space
-                        x = x.replace('\x00', '')   # null byte → remove
-                        x = x.replace('\x85', '...')  # NEL → ellipsis
-                        x = x.replace('\x96', '-')   # en-dash → hyphen
-                        x = x.replace('\x97', '-')   # em-dash → hyphen
-                        # ลบ control characters อื่นๆ (0x00-0x1F ยกเว้น tab, newline)
-                        x = ''.join(c if c in '\t\n\r' or ord(c) >= 32 else '' for c in x)
-                    return x
-                
-                for col in df_batch.select_dtypes(include=['object']).columns:
-                    df_batch[col] = df_batch[col].apply(clean_encoding_issues)
+                            with tgt_engine.begin() as conn:
+                                conn.execute(text(f"DELETE FROM {target_table}"))
+                            add_log("Target table cleared using DELETE.", "✅")
+                        except Exception as e2:
+                            add_log(f"Failed to clean table: {str(e2)}", "❌")
+                            raise e2
 
-                # --- A. TRANSFORM (In-Memory) ---
+                # --- NEW: Schema Validation (Pre-flight check) ---
+                add_log("Validating Schema Compatibility...", "🧐")
                 try:
-                    df_batch = DataTransformer.apply_transformers_to_batch(df_batch, config)
+                    source_table = config['source']['table']
                     
-                    # Rename Column to match Target
-                    rename_map = {}
-                    for m in config.get('mappings', []):
-                        if not m.get('ignore', False) and 'target' in m and m['source'] in df_batch.columns:
-                            rename_map[m['source']] = m['target']
-                    if rename_map:
-                        df_batch.rename(columns=rename_map, inplace=True)
+                    src_inspector = sqlalchemy.inspect(src_engine)
+                    tgt_inspector = sqlalchemy.inspect(tgt_engine)
                     
-                    # ลบ column ที่ถูก ignore
-                    ignored_cols = [m['target'] for m in config.get('mappings', []) if m.get('ignore', False)]
-                    df_batch = df_batch.drop(columns=[c for c in ignored_cols if c in df_batch.columns], errors='ignore')
+                    try:
+                        src_parts = source_table.split('.')
+                        tgt_parts = target_table.split('.')
+                        src_t = src_parts[-1]
+                        src_s = src_parts[0] if len(src_parts) > 1 else None
+                        tgt_t = tgt_parts[-1]
+                        tgt_s = tgt_parts[0] if len(tgt_parts) > 1 else None
+
+                        src_col_defs = {col['name']: col['type'] for col in src_inspector.get_columns(src_t, schema=src_s)}
+                        tgt_col_defs = {col['name']: col['type'] for col in tgt_inspector.get_columns(tgt_t, schema=tgt_s)}
+                    except Exception as e:
+                        src_col_defs = {col['name']: col['type'] for col in src_inspector.get_columns(source_table)}
+                        tgt_col_defs = {col['name']: col['type'] for col in tgt_inspector.get_columns(target_table)}
+
+                    warnings = []
+                    for mapping in config.get('mappings', []):
+                        if mapping.get('ignore', False): continue
+                        
+                        src_col = mapping['source']
+                        tgt_col = mapping['target']
+                        
+                        if src_col in src_col_defs and tgt_col in tgt_col_defs:
+                            src_type = src_col_defs[src_col]
+                            tgt_type = tgt_col_defs[tgt_col]
+                            
+                            src_len = getattr(src_type, 'length', None)
+                            tgt_len = getattr(tgt_type, 'length', None)
+                            
+                            if tgt_len is not None:
+                                if src_len is None:
+                                    warnings.append(f"- **{src_col}** (Unknown/Text) ➔ **{tgt_col}** (Limit: {tgt_len})")
+                                elif src_len > tgt_len:
+                                    warnings.append(f"- **{src_col}** (Limit: {src_len}) ➔ **{tgt_col}** (Limit: {tgt_len})")
                     
-                    # บังคับ lowercase ทุก column เพื่อรองรับ PostgreSQL (case-sensitive)
-                    df_batch.columns = df_batch.columns.str.lower()
+                    if warnings:
+                        warn_msg_log = "⚠️ Potential Truncation Detected:\n" + "\n".join(warnings).replace("**", "")
+                        # Log to memory so it appears BEFORE insert logs
+                        add_log(warn_msg_log, "⚠️")
+                        st.warning("⚠️ **Potential Truncation Detected!** check logs for details.")
+                        time.sleep(1)
+                    else:
+                        add_log("Schema compatibility check passed.", "✅")
+
+                except Exception as e:
+                     add_log(f"Skipping schema check (Non-critical): {e}", "⚠️")
+
+                # Prepare Query
+                batch_size = st.session_state.batch_size
+                select_query = generate_select_query(config, source_table)
+                
+                add_log(f"Starting Batch Processing (Size: {batch_size})...", "🚀")
+                
+                # Start Iteration
+                data_iterator = pd.read_sql(
+                    select_query, 
+                    src_engine, 
+                    chunksize=batch_size,
+                    coerce_float=False
+                )
+                
+                total_rows_processed = 0
+                batch_num = 0
+                start_time = time.time()
+                migration_failed = False
+
+                for df_batch in data_iterator:
+                    batch_num += 1
+                    rows_in_batch = len(df_batch)
                     
-                    # ตรวจสอบและลบ duplicate columns
-                    if df_batch.columns.duplicated().any():
-                        dup_cols = df_batch.columns[df_batch.columns.duplicated()].tolist()
+                    # Update Status Text
+                    status_box.update(label=f"Processing Batch {batch_num} ({rows_in_batch} rows)...", state="running")
+                    
+                    # --- 1. CLEANING ---
+                    def clean_encoding_issues(x):
+                        if x is None: return x
+                        if isinstance(x, bytes):
+                            try: x = x.decode('utf-8')
+                            except:
+                                try: x = x.decode('latin-1')
+                                except: x = str(x)
+                        if isinstance(x, str):
+                            x = x.replace('\xa0', ' ').replace('\x00', '').replace('\x85', '...')
+                            x = ''.join(c if c in '\t\n\r' or ord(c) >= 32 else '' for c in x)
+                        return x
+                    
+                    for col in df_batch.select_dtypes(include=['object']).columns:
+                        df_batch[col] = df_batch[col].apply(clean_encoding_issues)
+
+                    # --- 2. TRANSFORM ---
+                    try:
+                        df_batch = DataTransformer.apply_transformers_to_batch(df_batch, config)
+                        
+                        rename_map = {}
+                        for m in config.get('mappings', []):
+                            if not m.get('ignore', False) and 'target' in m and m['source'] in df_batch.columns:
+                                rename_map[m['source']] = m['target']
+                        if rename_map:
+                            df_batch.rename(columns=rename_map, inplace=True)
+                        
+                        ignored_cols = [m['target'] for m in config.get('mappings', []) if m.get('ignore', False)]
+                        df_batch = df_batch.drop(columns=[c for c in ignored_cols if c in df_batch.columns], errors='ignore')
+                        
+                        df_batch.columns = df_batch.columns.str.lower()
                         df_batch = df_batch.loc[:, ~df_batch.columns.duplicated(keep='first')]
 
-                    # อ่าน BIT columns จาก config (ตรวจหา BIT_CAST transformers)
-                    bit_columns = []    
-                    for mapping in config.get('mappings', []):
-                        if 'transformers' in mapping and 'BIT_CAST' in mapping['transformers']:
-                            target_col = mapping.get('target', '').lower()
-                            if target_col:
-                                bit_columns.append(target_col)
-                    
-                    # แปลง Boolean/Integer → '0'/'1' string สำหรับ BIT columns (PostgreSQL ต้องการ string)
-                    for col in bit_columns:
-                        if col in df_batch.columns:
-                            # แปลง Boolean/Integer เป็น '1' หรือ '0' (string) สำหรับ PostgreSQL BIT
-                            df_batch[col] = df_batch[col].apply(
-                                lambda x: '1' if (x == True or x == 1 or x == '1' or str(x).lower() == 'true') else '0'
-                            )
+                        # Identify BIT columns
+                        bit_columns = []    
+                        for mapping in config.get('mappings', []):
+                            if 'transformers' in mapping and 'BIT_CAST' in mapping['transformers']:
+                                target_col = mapping.get('target', '').lower()
+                                if target_col: bit_columns.append(target_col)
                         
-                except Exception as e:
-                    add_log(f"     ⚠️ Transformation Warning in Batch {batch_num}: {e}")
+                        for col in bit_columns:
+                            if col in df_batch.columns:
+                                df_batch[col] = df_batch[col].apply(
+                                    lambda x: '1' if (x == True or x == 1 or x == '1' or str(x).lower() == 'true') else '0'
+                                )
 
-                # --- B. LOAD (Bulk Insert) ---
-                try:
-                    # สร้าง dtype mapping สำหรับ BIT columns
-                    from sqlalchemy import text
-                    from sqlalchemy.types import String
-                    
-                    dtype_map = {}
-                    if bit_columns:
-                        if tgt_ds['db_type'] == 'PostgreSQL':
-                            # PostgreSQL: ใช้ BIT type
-                            from sqlalchemy.dialects.postgresql import BIT
-                            for col in bit_columns:
-                                if col in df_batch.columns:
-                                    dtype_map[col] = BIT(1)
-                        elif tgt_ds['db_type'] == 'MySQL':
-                            # MySQL: ใช้ BIT type
-                            from sqlalchemy.types import Integer
-                            for col in bit_columns:
-                                if col in df_batch.columns:
-                                    dtype_map[col] = Integer()  # MySQL BIT(1) = TINYINT(1)
-                        elif tgt_ds['db_type'] == 'MSSQL':
-                            # MSSQL: ใช้ BIT type
-                            from sqlalchemy.dialects.mssql import BIT as MSSQL_BIT
-                            for col in bit_columns:
-                                if col in df_batch.columns:
-                                    dtype_map[col] = MSSQL_BIT()
-                    
-                    df_batch.to_sql(
-                        name=target_table,
-                        con=tgt_engine,
-                        if_exists='append',
-                        index=False,
-                        method='multi',
-                        chunksize=500,
-                        dtype=dtype_map if dtype_map else None
-                    )
-                    total_rows_processed += rows_in_batch
-                    add_log(f"     💾 Inserted {rows_in_batch} rows successfully")
-                    
-                except Exception as e:
-                    st.error(f"Insert Failed: {e}")
-                    add_log(f"     ❌ Insert Failed: {e}")
-                    break 
+                    except Exception as e:
+                        add_log(f"Transformation Error in Batch {batch_num}: {e}", "⚠️")
 
-                prog = min(batch_num * 5, 95)
-                progress_bar.progress(prog)
+                    # --- 4. LOAD ---
+                    try:
+                        dtype_map = {}
+                        if bit_columns:
+                            if tgt_ds['db_type'] == 'PostgreSQL':
+                                from sqlalchemy.dialects.postgresql import BIT
+                                for col in bit_columns:
+                                    if col in df_batch.columns: dtype_map[col] = BIT(1)
+                            elif tgt_ds['db_type'] == 'MySQL':
+                                from sqlalchemy.types import Integer
+                                for col in bit_columns:
+                                    if col in df_batch.columns: dtype_map[col] = Integer()
+                            elif tgt_ds['db_type'] == 'MSSQL':
+                                from sqlalchemy.dialects.mssql import BIT as MSSQL_BIT
+                                for col in bit_columns:
+                                    if col in df_batch.columns: dtype_map[col] = MSSQL_BIT()
+                        
+                        df_batch.to_sql(
+                            name=target_table,
+                            con=tgt_engine,
+                            if_exists='append',
+                            index=False,
+                            method='multi',
+                            chunksize=500,
+                            dtype=dtype_map if dtype_map else None
+                        )
+                        
+                        total_rows_processed += rows_in_batch
+                        elapsed = time.time() - start_time
+                        
+                        # Update Metrics
+                        metric_processed.metric("Rows Processed", f"{total_rows_processed:,}")
+                        metric_batch.metric("Current Batch", batch_num)
+                        metric_time.metric("Elapsed Time", f"{elapsed:.1f}s")
+                        
+                        # Update Progress Bar
+                        prog = min(batch_num * 5, 95)
+                        progress_bar.progress(prog)
+                        
+                        add_log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
+                        
+                    except Exception as e:
+                        # --- ERROR HANDLING & RECOVERY ---
+                        error_msg_full = str(e)
+                        
+                        # ตัด SQL Query ที่ยาวเกินไปออกเพื่อแสดงใน log สั้นๆ
+                        if "[SQL:" in error_msg_full:
+                            short_error = error_msg_full.split("[SQL:")[0].strip()
+                        else:
+                            short_error = error_msg_full[:300] + "..."
 
-                if st.session_state.migration_test_sample:
-                    add_log("   🛑 Stopping after first batch (Test Mode Enabled)")
-                    break
+                        add_log(f"Insert Failed: {short_error}", "❌")
+                        
+                        # แสดงผล Error เต็มๆ ใน Expander
+                        st.error(f"Migration Failed at Batch {batch_num}: {short_error}")
+                        
+                        # --- EMERGENCY TRUNCATE BUTTON ---
+                        col_err1, col_err2 = st.columns([1, 1])
+                        with col_err1:
+                            if st.button("🗑️ Emergency Truncate Target Table", key="emergency_truncate", help="Clear data to fix UniqueViolation errors"):
+                                try:
+                                    with tgt_engine.begin() as conn:
+                                        try:
+                                            conn.execute(text(f"TRUNCATE TABLE {target_table}"))
+                                        except:
+                                            conn.execute(text(f"DELETE FROM {target_table}"))
+                                    st.success(f"Table '{target_table}' truncated! You can now Restart Migration.")
+                                    add_log(f"User triggered Emergency Truncate on {target_table}", "🗑️")
+                                except Exception as e_trunc:
+                                    st.error(f"Failed to truncate: {e_trunc}")
+
+                        with st.expander("🔴 View Full Error Details (SQL & Params)", expanded=False):
+                            st.code(error_msg_full, language="sql")
+                            
+                        status_box.update(label="Migration Failed", state="error", expanded=True)
+                        migration_failed = True
+                        break 
+
+                    if st.session_state.migration_test_sample:
+                        add_log("Stopping after first batch (Test Mode)", "🛑")
+                        break
             
-            end_time = time.time()
-            duration = end_time - start_time
+                # Loop finished (either naturally or by break in Test Mode)
+                if not migration_failed:
+                    # Finish Progress Bar
+                    progress_bar.progress(100)
+                    status_box.update(label="Migration Complete!", state="complete", expanded=False)
+                    st.success(f"✅ Migration Finished Successfully! Total Rows: {total_rows_processed}")
+                    st.balloons()
             
-            progress_bar.progress(100)
-            status_text.success("Migration Complete!")
-            st.success(f"✅ Migration Finished Successfully in {duration:.2f} seconds")
-            add_log(f"SUMMARY: Total Records: {total_rows_processed}")
-            st.balloons()
-
-        except Exception as e:
-            st.error(f"Critical Error: {str(e)}")
-            add_log(f"❌ CRITICAL ERROR: {str(e)}")
+            except Exception as e:
+                status_box.update(label="Critical Error", state="error", expanded=True)
+                st.error(f"Critical Error: {str(e)}")
+                add_log(f"CRITICAL ERROR: {str(e)}", "💀")
 
         st.divider()
         col_end1, col_end2 = st.columns(2)
@@ -455,17 +548,13 @@ def render_migration_engine_page():
                 st.rerun()
         with col_end2:
             if st.session_state.migration_log_file and os.path.exists(st.session_state.migration_log_file):
-                # ลองอ่านด้วย utf-8 ก่อน ถ้าไม่ได้ให้ลอง cp874 (Windows-874 สำหรับภาษาไทย)
                 log_content = None
                 for encoding in ['utf-8', 'cp874', 'tis-620', 'latin-1']:
                     try:
                         with open(st.session_state.migration_log_file, "r", encoding=encoding, errors="replace") as f:
                             log_content = f.read()
                         break
-                    except (UnicodeDecodeError, LookupError):
-                        continue
-                if log_content is None:
-                    # Fallback: อ่านแบบ binary แล้ว decode ด้วย errors='ignore'
-                    with open(st.session_state.migration_log_file, "rb") as f:
-                        log_content = f.read().decode('utf-8', errors='ignore')
-                st.download_button("📥 Download Log", data=log_content, file_name="migration.log")
+                    except: continue
+                
+                if log_content:
+                    st.download_button("📥 Download Full Log", data=log_content, file_name="migration.log")

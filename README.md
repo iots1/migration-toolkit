@@ -10,6 +10,7 @@ A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migratin
 ## ✨ Features
 
 ### Core Features
+
 - **🔍 Multi-Database Support**: Analyze MySQL, PostgreSQL, and MSSQL databases
 - **📊 Deep Data Profiling**: Column-level statistics, data quality metrics, and composition analysis
 - **🗂️ Schema Analysis**: Automatic DDL extraction with schema namespace support
@@ -19,6 +20,7 @@ A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migratin
 - **🔧 Configuration Generator**: Export migration configs in TypeScript/JSON format
 
 ### New in v8.0
+
 - **🗄️ Datasource Management**: Centralized database connection profiles with SQLite storage
 - **🔌 Connection Pooling**: Singleton pattern for efficient connection reuse across requests
 - **🗺️ Enhanced Schema Mapper**: Dual-mode source selection (Run ID or Live Datasource)
@@ -244,9 +246,12 @@ On first run, the application automatically creates `migration_tool.db` SQLite d
 ```bash
 # Start the Streamlit application
 streamlit run app.py
+# or hot reload
+streamlit run app.py --server.runOnSave true
 ```
 
 **The database is created automatically** with the following tables:
+
 - `datasources` - Stores database connection profiles
 - `configs` - Stores schema mapping configurations
 
@@ -268,6 +273,7 @@ Navigate to **Settings** page in the Streamlit interface to manage datasources:
 6. Save datasource
 
 **Datasources are stored in SQLite** and reused across:
+
 - Schema Mapper (source & target selection)
 - Migration Engine (connection profiles)
 - All database operations (via connection pool)
@@ -381,18 +387,19 @@ This toolkit uses a **pure Bash shell script** ([unified_db_analyzer.sh](analysi
 
 #### Why Shell Script?
 
-| Aspect | Shell Script Approach | Python/Tools Alternative |
-|--------|----------------------|--------------------------|
-| **Dependencies** | Minimal: `bash`, `jq`, native DB clients | Heavy: pandas, SQLAlchemy, various libraries |
-| **Portability** | Runs anywhere with Bash 4.0+ | Requires Python environment setup |
-| **Performance** | Direct database access, minimal overhead | Abstraction layers slow down queries |
-| **Security** | No code execution risks, simple audit | Complex dependency chains, supply chain risks |
-| **Maintenance** | Single 600-line script, easy to debug | Multiple packages, version conflicts |
-| **Installation** | Auto-installs missing DB clients via Homebrew | Manual pip installs, virtual environments |
+| Aspect           | Shell Script Approach                         | Python/Tools Alternative                      |
+| ---------------- | --------------------------------------------- | --------------------------------------------- |
+| **Dependencies** | Minimal: `bash`, `jq`, native DB clients      | Heavy: pandas, SQLAlchemy, various libraries  |
+| **Portability**  | Runs anywhere with Bash 4.0+                  | Requires Python environment setup             |
+| **Performance**  | Direct database access, minimal overhead      | Abstraction layers slow down queries          |
+| **Security**     | No code execution risks, simple audit         | Complex dependency chains, supply chain risks |
+| **Maintenance**  | Single 600-line script, easy to debug         | Multiple packages, version conflicts          |
+| **Installation** | Auto-installs missing DB clients via Homebrew | Manual pip installs, virtual environments     |
 
 #### Benefits for ETL & Data Migration
 
 **1. Zero-Setup Profiling**
+
 ```bash
 # No Python, no pip install, no virtual env - just run
 cd analysis_report
@@ -400,11 +407,13 @@ cd analysis_report
 ```
 
 **2. Multi-Database Native Support**
+
 - Directly uses `mysql`, `psql`, `sqlcmd` for optimal performance
 - Schema-aware profiling (PostgreSQL `public`, MSSQL `dbo`)
 - Handles database-specific quirks (MSSQL SSL certs, NULL warnings)
 
 **3. Production-Ready Features**
+
 - **Smart Sampling**: Filters NULL/empty values automatically
 - **Deep Analysis Mode**: Min/Max, Top-5 frequencies, data composition
 - **Exception Rules**: Per-column sampling limits
@@ -412,12 +421,14 @@ cd analysis_report
 - **DDL Export**: Complete schema with indexes and constraints
 
 **4. Migration-Friendly Output**
+
 - **CSV Format**: Universal, works with any ETL tool
 - **HTML Reports**: Interactive DataTables for business users
 - **Timestamped Runs**: Tracks profiling history (`YYYYMMDD_HHMM/`)
 - **Process Logs**: Complete audit trail for compliance
 
 **5. Real-World Migration Use Cases**
+
 ```bash
 # Before migration: Profile source database
 ./unified_db_analyzer.sh  # Analyzes source system
@@ -433,6 +444,7 @@ open migration_report/20251130_1523/data_profile/data_profile.html
 ```
 
 **6. Shell Script Advantages for Migration**
+
 - **Repeatable**: Run daily to track data changes over time
 - **Scriptable**: Integrate into CI/CD pipelines
 - **Offline**: Profile production DB, analyze on laptop (CSV export)
@@ -474,10 +486,12 @@ The dashboard provides several interfaces:
 #### 📊 **Schema Mapper** (v8.0 Enhanced)
 
 **Dual Source Mode:**
+
 - **Run ID Mode**: Load from CSV analysis reports (legacy)
 - **Datasource Mode**: Connect directly to live database (new!)
 
 **Features:**
+
 - View table and column statistics
 - Map source to target fields with live schema discovery
 - Smart target column suggestions from actual database
@@ -487,6 +501,7 @@ The dashboard provides several interfaces:
 - Export configurations as downloadable files
 
 **Workflow:**
+
 1. **Source Configuration**: Choose Run ID or Datasource
    - Run ID: Select from analysis report folders
    - Datasource: Select datasource → Choose table (auto-loads schema)
@@ -498,12 +513,14 @@ The dashboard provides several interfaces:
 #### ⚙️ **Settings** (v8.0 New)
 
 **Datasources Tab:**
+
 - Add/Edit/Delete datasource profiles
 - Test database connections
 - View all configured datasources
 - Secure credential storage in SQLite
 
 **Saved Configs Tab:**
+
 - View all saved schema mapping configurations
 - Load configurations for editing
 - Delete unused configurations
@@ -608,12 +625,14 @@ flowchart TD
 The toolkit uses a singleton connection pool pattern for efficient database operations:
 
 **Benefits:**
+
 - Reuses connections across multiple requests
 - Automatic health checks and reconnection
 - Significant performance improvement for repeated operations
 - Thread-safe connection management
 
 **How it works:**
+
 ```python
 # First call - creates connection
 get_tables_from_datasource(...)  # Creates new connection
@@ -625,12 +644,14 @@ get_columns_from_table(...)      # Reuses existing connection
 ```
 
 **Connection Management:**
+
 - Connections are identified by unique hash (host, port, db, user)
 - Dead connections are automatically detected and recreated
 - All functions use autocommit mode for stability
 - Connections persist across Streamlit reruns
 
 **Manual Control:**
+
 ```python
 from services.db_connector import close_connection, close_all_connections
 
@@ -648,6 +669,7 @@ close_all_connections()
 **Tables:**
 
 1. **datasources** - Database connection profiles
+
    ```sql
    CREATE TABLE datasources (
        id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -673,6 +695,7 @@ close_all_connections()
    ```
 
 **Automatic Initialization:**
+
 - Database created on first application run
 - No manual SQL scripts required
 - Handles migrations automatically
@@ -680,18 +703,21 @@ close_all_connections()
 ### Schema Mapper Dual Mode (v8.0)
 
 **Mode 1: Run ID (Traditional)**
+
 - Uses CSV analysis reports
 - Offline operation
 - Historical data analysis
 - Best for: Initial exploration, documented analysis
 
 **Mode 2: Datasource (New)**
+
 - Connects directly to live database
 - Real-time schema discovery
 - Auto-loads tables and columns
 - Best for: Active development, latest schema
 
 **Switching between modes:**
+
 1. Open Schema Mapper
 2. Select source mode (Run ID / Datasource)
 3. Choose source accordingly
@@ -784,6 +810,7 @@ Track every change to your schema mapping configurations with built-in version c
 **How It Works:**
 
 Every time you save a configuration, the system automatically:
+
 1. Creates a new version entry in `config_histories` table
 2. Preserves complete JSON snapshot with timestamp
 3. Increments version number (v1, v2, v3...)
@@ -815,11 +842,13 @@ CREATE TABLE config_histories (
 **Key Features:**
 
 1. **Automatic Versioning**
+
    - No manual intervention needed
    - Every save creates a new version
    - Original version preserved forever
 
 2. **Version Comparison**
+
    ```python
    # Compare two versions to see what changed
    diff = db.compare_config_versions("PatientMigration", version1=1, version2=3)
@@ -832,6 +861,7 @@ CREATE TABLE config_histories (
    ```
 
 3. **Rollback Support**
+
    - View all historical versions in Settings page
    - Load any previous version
    - Restore deleted configurations from history
@@ -877,12 +907,14 @@ Production-ready ETL execution engine with enterprise features.
 **Key Features:**
 
 **1. Batch Processing**
+
 - Configurable batch size (default: 1000 rows)
 - Streaming execution - handles millions of rows
 - Memory-efficient: processes one chunk at a time
 - Progress tracking with visual progress bar
 
 **2. Smart Query Generation**
+
 ```python
 # Only selects mapped columns - reduces network overhead
 SELECT "hn", "fname", "lname", "dob" FROM patients
@@ -890,6 +922,7 @@ SELECT "hn", "fname", "lname", "dob" FROM patients
 ```
 
 **3. Data Transformation Pipeline**
+
 ```python
 for batch in data_iterator:
     # 1. Fetch batch (1000 rows)
@@ -906,17 +939,20 @@ for batch in data_iterator:
 ```
 
 **4. Comprehensive Logging**
+
 - Real-time log viewer in UI
 - Persistent log files: `migration_logs/migration_NAME_TIMESTAMP.log`
 - Audit trail: timestamps, row counts, errors
 - Downloadable after completion
 
 **5. Test Mode**
+
 - Process only 1 batch (configurable limit)
 - Validate mappings without full migration
 - Dry-run capability for safety
 
 **6. Error Handling**
+
 - Transaction-safe batch commits
 - Stops on first error (prevents data corruption)
 - Detailed error messages with context
@@ -953,11 +989,11 @@ Step 4: Execute Migration
 **Performance Characteristics:**
 
 | Dataset Size | Batch Size | Approx. Time | Memory Usage |
-|-------------|------------|--------------|--------------|
-| 10K rows    | 1000       | ~10 seconds  | < 50 MB      |
-| 100K rows   | 1000       | ~1-2 minutes | < 200 MB     |
-| 1M rows     | 1000       | ~10-15 min   | < 500 MB     |
-| 10M+ rows   | 5000       | ~1-2 hours   | < 1 GB       |
+| ------------ | ---------- | ------------ | ------------ |
+| 10K rows     | 1000       | ~10 seconds  | < 50 MB      |
+| 100K rows    | 1000       | ~1-2 minutes | < 200 MB     |
+| 1M rows      | 1000       | ~10-15 min   | < 500 MB     |
+| 10M+ rows    | 5000       | ~1-2 hours   | < 1 GB       |
 
 **Use Cases:**
 
@@ -1028,14 +1064,14 @@ analysis = ml_mapper.analyze_column_with_sample(
 
 **4. Pattern Detection**
 
-| Pattern | Detection Logic | Suggested Transformer |
-|---------|----------------|----------------------|
-| Thai Buddhist Year | `25[5-9]\d` in >50% samples | `BUDDHIST_TO_ISO` |
-| Whitespace Issues | Leading/trailing spaces | `TRIM` |
-| JSON Structures | `{...}` or `[...]` | `PARSE_JSON` |
-| Float IDs | `123.0` pattern | `FLOAT_TO_INT` |
-| Leading Zeros | ID with `0` prefix | Keep as string |
-| All NULL/Empty | No valid data | Mark as IGNORE |
+| Pattern            | Detection Logic             | Suggested Transformer |
+| ------------------ | --------------------------- | --------------------- |
+| Thai Buddhist Year | `25[5-9]\d` in >50% samples | `BUDDHIST_TO_ISO`     |
+| Whitespace Issues  | Leading/trailing spaces     | `TRIM`                |
+| JSON Structures    | `{...}` or `[...]`          | `PARSE_JSON`          |
+| Float IDs          | `123.0` pattern             | `FLOAT_TO_INT`        |
+| Leading Zeros      | ID with `0` prefix          | Keep as string        |
+| All NULL/Empty     | No valid data               | Mark as IGNORE        |
 
 **5. Healthcare-Specific Validation**
 
@@ -1263,6 +1299,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ## 🗺️ Roadmap
 
 ### Completed ✅
+
 - [x] Datasource management with SQLite storage (v8.0)
 - [x] Connection pooling and reuse (v8.0)
 - [x] Dual-mode schema mapper (Run ID / Datasource) (v8.0)
@@ -1278,6 +1315,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [x] Automatic transformer suggestions (v8.0)
 
 ### Planned
+
 - [ ] Support for Oracle Database
 - [ ] REST API for programmatic access
 - [ ] Docker containerization

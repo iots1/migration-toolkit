@@ -11,6 +11,43 @@ import pandas as pd
 import sqlalchemy
 from sqlalchemy import text
 
+# --- Checkpoint Functions ---
+
+CHECKPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "migration_checkpoints")
+
+def save_checkpoint(config_name: str, batch_num: int, rows_processed: int):
+    """Save migration checkpoint to resume later."""
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in config_name)
+    checkpoint_file = os.path.join(CHECKPOINT_DIR, f"checkpoint_{safe_name}.json")
+    checkpoint_data = {
+        "config_name": config_name,
+        "last_batch": batch_num,
+        "rows_processed": rows_processed,
+        "timestamp": datetime.now().isoformat()
+    }
+    with open(checkpoint_file, "w") as f:
+        json.dump(checkpoint_data, f)
+
+
+def load_checkpoint(config_name: str) -> dict:
+    """Load checkpoint if exists."""
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in config_name)
+    checkpoint_file = os.path.join(CHECKPOINT_DIR, f"checkpoint_{safe_name}.json")
+    if os.path.exists(checkpoint_file):
+        with open(checkpoint_file, "r") as f:
+            return json.load(f)
+    return None
+
+
+def clear_checkpoint(config_name: str):
+    """Remove checkpoint file after successful migration."""
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in config_name)
+    checkpoint_file = os.path.join(CHECKPOINT_DIR, f"checkpoint_{safe_name}.json")
+    if os.path.exists(checkpoint_file):
+        os.remove(checkpoint_file)
+
+
 # --- Helper Functions ---
 
 def generate_select_query(config_data, source_table):
@@ -45,7 +82,7 @@ def generate_select_query(config_data, source_table):
 
         columns_str = ", ".join([f'"{col}"' for col in selected_cols])
         return f"SELECT {columns_str} FROM {source_table}"
-    except Exception as e:
+    except Exception:
         return f"SELECT * FROM {source_table}"
 
 def create_migration_log_file(config_name: str) -> str:
@@ -173,7 +210,7 @@ def batch_insert(df_batch: pd.DataFrame, target_table: str, engine, dtype_map: d
         if_exists='append',
         index=False,
         method='multi',
-        chunksize=500,
+        chunksize=2000,
         dtype=dtype_map if dtype_map else None
     )
     return len(df_batch)
@@ -191,8 +228,13 @@ def render_migration_engine_page():
     if "migration_src_ok" not in st.session_state: st.session_state.migration_src_ok = False
     if "migration_tgt_ok" not in st.session_state: st.session_state.migration_tgt_ok = False
     if "migration_test_sample" not in st.session_state: st.session_state.migration_test_sample = False
-    # Checkbox state
     if "truncate_target" not in st.session_state: st.session_state.truncate_target = False
+    # Prevent hot reload re-execution
+    if "migration_running" not in st.session_state: st.session_state.migration_running = False
+    if "migration_completed" not in st.session_state: st.session_state.migration_completed = False
+    # Resume from checkpoint
+    if "resume_from_checkpoint" not in st.session_state: st.session_state.resume_from_checkpoint = False
+    if "checkpoint_batch" not in st.session_state: st.session_state.checkpoint_batch = 0
 
     # ==========================================
     # STEP 1: Select Configuration
@@ -298,6 +340,11 @@ def render_migration_engine_page():
     elif st.session_state.migration_step == 3:
         st.markdown("### Step 3: Review & Settings")
         config = st.session_state.migration_config
+        config_name = config.get('config_name', 'migration')
+
+        # Check for existing checkpoint
+        checkpoint = load_checkpoint(config_name)
+
         with st.expander("📄 View Configuration JSON", expanded=False):
             st.json(config)
 
@@ -312,42 +359,101 @@ def render_migration_engine_page():
             st.markdown("#### Execution Settings")
             batch_size = st.number_input("Batch Size (Rows per chunk)", value=1000, step=500, min_value=100)
             st.session_state.batch_size = batch_size
-            
-            # --- NEW: TRUNCATE OPTION ---
+
             st.markdown("#### Data Options")
             st.session_state.truncate_target = st.checkbox(
-                "🗑️ **Truncate Target Table** before starting", 
+                "🗑️ **Truncate Target Table** before starting",
                 value=st.session_state.truncate_target,
-                help="⚠️ WARNING: This will DELETE ALL DATA in the target table before migration begins."
+                help="⚠️ WARNING: This will DELETE ALL DATA in the target table before migration begins.",
+                disabled=checkpoint is not None and st.session_state.resume_from_checkpoint
             )
-            
+
             st.session_state.migration_test_sample = st.checkbox(
-                "🧪 **Test Mode** (Process only 1 batch)", 
+                "🧪 **Test Mode** (Process only 1 batch)",
                 value=st.session_state.migration_test_sample
             )
             if st.session_state.migration_test_sample:
                 st.warning("Running in Test Mode: Migration will stop after the first batch.")
 
+        # Show checkpoint resume option if exists
+        if checkpoint:
+            st.divider()
+            st.warning(f"⚠️ **Previous migration was interrupted!**")
+            col_ck1, col_ck2 = st.columns(2)
+            with col_ck1:
+                st.markdown(f"""
+                - **Last Batch:** {checkpoint['last_batch']}
+                - **Rows Processed:** {checkpoint['rows_processed']:,}
+                - **Saved:** {checkpoint['timestamp']}
+                """)
+            with col_ck2:
+                st.session_state.resume_from_checkpoint = st.checkbox(
+                    "🔄 **Resume from checkpoint**",
+                    value=st.session_state.resume_from_checkpoint,
+                    help="Continue from where the migration stopped"
+                )
+                if st.button("🗑️ Clear Checkpoint", type="secondary"):
+                    clear_checkpoint(config_name)
+                    st.session_state.resume_from_checkpoint = False
+                    st.success("Checkpoint cleared!")
+                    st.rerun()
+
         st.divider()
-        if st.button("🚀 Start Migration Engine", type="primary", use_container_width=True):
-            st.session_state.migration_step = 4
-            st.rerun()
+        col_btn1, col_btn2 = st.columns([1, 4])
+        with col_btn1:
+            if st.button("← Back"):
+                st.session_state.migration_step = 2
+                st.rerun()
+        with col_btn2:
+            btn_label = "🔄 Resume Migration" if (checkpoint and st.session_state.resume_from_checkpoint) else "🚀 Start Migration Engine"
+            if st.button(btn_label, type="primary", use_container_width=True):
+                st.session_state.migration_running = False
+                st.session_state.migration_completed = False
+                if checkpoint and st.session_state.resume_from_checkpoint:
+                    st.session_state.checkpoint_batch = checkpoint['last_batch']
+                else:
+                    st.session_state.checkpoint_batch = 0
+                st.session_state.migration_step = 4
+                st.rerun()
 
     # ==========================================
     # STEP 4: Execution (Improved UI)
     # ==========================================
     elif st.session_state.migration_step == 4:
+        # Prevent hot reload from re-running migration
+        if st.session_state.migration_running:
+            st.warning("⏳ Migration is already running. Please wait...")
+            st.info("If you believe this is stuck, click 'Start New Migration' below.")
+            if st.button("🔄 Start New Migration", use_container_width=True):
+                st.session_state.migration_running = False
+                st.session_state.migration_completed = False
+                st.session_state.migration_step = 1
+                st.rerun()
+            st.stop()
+
+        if st.session_state.migration_completed:
+            st.success("✅ Migration already completed!")
+            if st.button("🔄 Start New Migration", use_container_width=True):
+                st.session_state.migration_running = False
+                st.session_state.migration_completed = False
+                st.session_state.migration_step = 1
+                st.rerun()
+            st.stop()
+
+        # Mark migration as running
+        st.session_state.migration_running = True
+
         st.markdown("### ⚙️ Migration in Progress")
-        
+
         # --- Metrics Dashboard ---
         col_m1, col_m2, col_m3 = st.columns(3)
         metric_processed = col_m1.metric("Rows Processed", "0")
         metric_batch = col_m2.metric("Current Batch", "0")
         metric_time = col_m3.metric("Elapsed Time", "0s")
-        
+
         # --- Progress Bar ---
         progress_bar = st.progress(0)
-        
+
         # --- Status Container & Logger ---
         with st.status("Initializing...", expanded=True) as status_box:
             log_container = st.empty()
@@ -356,24 +462,24 @@ def render_migration_engine_page():
             def add_log(msg, icon="ℹ️"):
                 """Helper to append log to UI and file"""
                 timestamp = datetime.now().strftime("%H:%M:%S")
-                # Format for UI (Markdown)
                 ui_msg = f"{icon} `[{timestamp}]` {msg}"
                 logs.append(ui_msg)
-                
-                # Show only last 20 lines in the preview to keep UI clean
                 display_logs = logs[-20:] if len(logs) > 20 else logs
                 log_container.markdown("\n\n".join(display_logs))
-                
-                # Write plain text to file
                 if 'migration_log_file' in st.session_state:
-                    file_msg = f"{msg}" # Timestamp is added in write_log
-                    write_log(st.session_state.migration_log_file, file_msg)
+                    write_log(st.session_state.migration_log_file, msg)
 
             try:
                 config = st.session_state.migration_config
-                log_file = create_migration_log_file(config.get('config_name', 'migration'))
+                config_name = config.get('config_name', 'migration')
+                log_file = create_migration_log_file(config_name)
                 st.session_state.migration_log_file = log_file
-                
+
+                # Get checkpoint info
+                skip_batches = st.session_state.get('checkpoint_batch', 0)
+                if skip_batches > 0:
+                    add_log(f"Resuming from checkpoint: skipping first {skip_batches} batches", "🔄")
+
                 add_log(f"Log File created: `{log_file}`", "📂")
 
                 # Connect to DBs
@@ -500,6 +606,13 @@ def render_migration_engine_page():
                 for df_batch in data_iterator:
                     batch_num += 1
                     rows_in_batch = len(df_batch)
+
+                    # Skip batches if resuming from checkpoint
+                    if batch_num <= skip_batches:
+                        total_rows_processed += rows_in_batch
+                        add_log(f"Batch {batch_num}: Skipped (checkpoint)", "⏭️")
+                        continue
+
                     status_box.update(label=f"Processing Batch {batch_num} ({rows_in_batch} rows)...", state="running")
 
                     # Clean encoding issues
@@ -525,13 +638,20 @@ def render_migration_engine_page():
                         metric_time.metric("Elapsed Time", f"{elapsed:.1f}s")
                         progress_bar.progress(min(batch_num * 5, 95))
 
+                        # Save checkpoint after each successful batch
+                        save_checkpoint(config_name, batch_num, total_rows_processed)
+
                         add_log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
 
                     except Exception as e:
+                        # Save checkpoint before failing
+                        save_checkpoint(config_name, batch_num - 1, total_rows_processed)
+
                         error_msg_full = str(e)
                         short_error = error_msg_full.split("[SQL:")[0].strip() if "[SQL:" in error_msg_full else error_msg_full[:300]
 
                         add_log(f"Insert Failed: {short_error}", "❌")
+                        add_log(f"Checkpoint saved at batch {batch_num - 1}", "💾")
                         st.error(f"Migration Failed at Batch {batch_num}: {short_error}")
 
                         col_err1, col_err2 = st.columns([1, 1])
@@ -552,22 +672,29 @@ def render_migration_engine_page():
                             st.code(error_msg_full, language="sql")
 
                         status_box.update(label="Migration Failed", state="error", expanded=True)
+                        st.session_state.migration_running = False
                         migration_failed = True
                         break
 
                     if st.session_state.migration_test_sample:
                         add_log("Stopping after first batch (Test Mode)", "🛑")
                         break
-            
+
                 # Loop finished (either naturally or by break in Test Mode)
                 if not migration_failed:
-                    # Finish Progress Bar
                     progress_bar.progress(100)
                     status_box.update(label="Migration Complete!", state="complete", expanded=False)
                     st.success(f"✅ Migration Finished Successfully! Total Rows: {total_rows_processed}")
+                    # Clear checkpoint on success
+                    clear_checkpoint(config_name)
+                    add_log("Checkpoint cleared (migration complete)", "🧹")
+                    st.session_state.migration_completed = True
                     st.balloons()
-            
+
+                st.session_state.migration_running = False
+
             except Exception as e:
+                st.session_state.migration_running = False
                 status_box.update(label="Critical Error", state="error", expanded=True)
                 st.error(f"Critical Error: {str(e)}")
                 add_log(f"CRITICAL ERROR: {str(e)}", "💀")
@@ -576,17 +703,22 @@ def render_migration_engine_page():
         col_end1, col_end2 = st.columns(2)
         with col_end1:
             if st.button("🔄 Start New Migration", use_container_width=True):
+                st.session_state.migration_running = False
+                st.session_state.migration_completed = False
+                st.session_state.resume_from_checkpoint = False
+                st.session_state.checkpoint_batch = 0
                 st.session_state.migration_step = 1
                 st.rerun()
         with col_end2:
-            if st.session_state.migration_log_file and os.path.exists(st.session_state.migration_log_file):
+            if st.session_state.get('migration_log_file') and os.path.exists(st.session_state.migration_log_file):
                 log_content = None
                 for encoding in ['utf-8', 'cp874', 'tis-620', 'latin-1']:
                     try:
                         with open(st.session_state.migration_log_file, "r", encoding=encoding, errors="replace") as f:
                             log_content = f.read()
                         break
-                    except: continue
-                
+                    except Exception:
+                        continue
+
                 if log_content:
                     st.download_button("📥 Download Full Log", data=log_content, file_name="migration.log")

@@ -50,20 +50,26 @@ def clear_checkpoint(config_name: str):
 
 # --- Helper Functions ---
 
-def generate_select_query(config_data, source_table):
+def generate_select_query(config_data, source_table, db_type='MySQL'):
     """
     Generate a SELECT query based on configuration.
+    Applies TRIM at source for MSSQL CHAR columns to prevent padding.
     """
     try:
         if not config_data or 'mappings' not in config_data:
             return f"SELECT * FROM {source_table}"
 
-        selected_cols = [
-            mapping['source']
-            for mapping in config_data.get('mappings', [])
-            if not mapping.get('ignore', False)
-            and 'GENERATE_HN' not in mapping.get('transformers', [])
-        ]
+        selected_cols = []
+        for mapping in config_data.get('mappings', []):
+            if mapping.get('ignore', False) or 'GENERATE_HN' in mapping.get('transformers', []):
+                continue
+
+            source_col = mapping['source']
+            # Apply TRIM at source for MSSQL to handle CHAR padding
+            if db_type == 'Microsoft SQL Server' and 'TRIM' in mapping.get('transformers', []):
+                selected_cols.append(f'TRIM("{source_col}") AS "{source_col}"')
+            else:
+                selected_cols.append(f'"{source_col}"')
 
         if not selected_cols:
             has_generate_hn = any(
@@ -80,7 +86,7 @@ def generate_select_query(config_data, source_table):
                     return f'SELECT "{first_col}" FROM {source_table}'
             return f"SELECT * FROM {source_table}"
 
-        columns_str = ", ".join([f'"{col}"' for col in selected_cols])
+        columns_str = ", ".join(selected_cols)
         return f"SELECT {columns_str} FROM {source_table}"
     except Exception:
         return f"SELECT * FROM {source_table}"
@@ -189,7 +195,7 @@ def build_dtype_map(bit_columns: list, df_batch: pd.DataFrame, db_type: str) -> 
         for col in bit_columns:
             if col in df_batch.columns:
                 dtype_map[col] = Integer()
-    elif db_type == 'MSSQL':
+    elif db_type == 'Microsoft SQL Server':
         from sqlalchemy.dialects.mssql import BIT as MSSQL_BIT
         for col in bit_columns:
             if col in df_batch.columns:
@@ -586,8 +592,9 @@ def render_migration_engine_page():
 
                 # Prepare Query
                 batch_size = st.session_state.batch_size
-                select_query = generate_select_query(config, source_table)
-                
+                select_query = generate_select_query(config, source_table, src_ds['db_type'])
+                add_log(f"SELECT Query: {select_query}", "🔍")
+
                 add_log(f"Starting Batch Processing (Size: {batch_size})...", "🚀")
                 
                 # Start Iteration

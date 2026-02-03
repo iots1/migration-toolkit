@@ -259,6 +259,16 @@ class SmartMapper:
             if result["reason"]:
                 result["reason"] += f"; multiple spaces in {multi_space_count} samples"
 
+        # Empty/whitespace-only strings → suggest NULL
+        empty_count = sum(1 for s in sample_str if not s.strip())
+        if empty_count > 0:
+            result["has_issues"] = True
+            if "TRIM" not in result["transformers"]:
+                result["transformers"].append("TRIM")
+            result["transformers"].append("REPLACE_EMPTY_WITH_NULL")
+            reason_part = f"empty/whitespace-only in {empty_count}/{len(sample_str)} samples"
+            result["reason"] = f"{result['reason']}; {reason_part}" if result["reason"] else reason_part
+
         # JSON-like structures
         json_indicators = sum(1 for s in sample_str if s.startswith('{') or s.startswith('['))
         if json_indicators > len(sample_str) * 0.5:

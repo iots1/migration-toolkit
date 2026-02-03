@@ -94,7 +94,7 @@ class DataTransformer:
             return series.astype(str).str.replace(r'\D', '', regex=True)
 
         if transformer_name == "REPLACE_EMPTY_WITH_NULL":
-            return series.replace(r'^\s*$', np.nan, regex=True)
+            return series.where(series.astype(str).str.strip().ne('') & series.astype(str).str.strip().ne('None'), other=np.nan)
 
         if transformer_name == "GENERATE_HN":
             # Generate sequential HN numbers for the entire series

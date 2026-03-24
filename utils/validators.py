@@ -7,7 +7,8 @@ def validate_value(value, validator_name):
     value = str(value).strip()
 
     if validator_name == "REQUIRED" or validator_name == "NOT_EMPTY":
-        return (bool(value), "Value is required")
+        valid = bool(value)
+        return (valid, "" if valid else "Value is required")
     
     if not value: return (True, "") # Skip other checks if empty and not required
 
@@ -17,7 +18,7 @@ def validate_value(value, validator_name):
     if validator_name == "POSITIVE_NUMBER":
         try:
             return (float(value) > 0, "Must be > 0")
-        except:
+        except (ValueError, TypeError):
             return (False, "Not a number")
 
     if validator_name == "MIN_LENGTH_13":
@@ -43,7 +44,7 @@ def validate_value(value, validator_name):
         try:
             datetime.strptime(value, '%Y-%m-%d')
             return (True, "")
-        except:
+        except (ValueError, TypeError):
             return (False, "Invalid Date (YYYY-MM-DD)")
 
     return (True, "")

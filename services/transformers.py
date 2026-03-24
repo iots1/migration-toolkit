@@ -78,23 +78,25 @@ class DataTransformer:
             return series
 
         # --- 1. Fast Vectorized Operations (String/Native Pandas) ---
+        # NOTE: Use series.where(series.isna(), ...) to preserve NaN/None.
+        # series.astype(str) converts NaN → "nan" which corrupts DB NULL values.
         if transformer_name == "TRIM":
-            return series.astype(str).str.strip()
-        
+            return series.where(series.isna(), series.astype(str).str.strip())
+
         if transformer_name == "UPPER_TRIM":
-            return series.astype(str).str.strip().str.upper()
-        
+            return series.where(series.isna(), series.astype(str).str.strip().str.upper())
+
         if transformer_name == "LOWER_TRIM":
-            return series.astype(str).str.strip().str.lower()
-            
+            return series.where(series.isna(), series.astype(str).str.strip().str.lower())
+
         if transformer_name == "CLEAN_SPACES":
-            return series.astype(str).str.replace(r'\s+', ' ', regex=True).str.strip()
-        
+            return series.where(series.isna(), series.astype(str).str.replace(r'\s+', ' ', regex=True).str.strip())
+
         if transformer_name == "TO_NUMBER":
-            return series.astype(str).str.replace(r'\D', '', regex=True)
+            return series.where(series.isna(), series.astype(str).str.replace(r'\D', '', regex=True))
 
         if transformer_name == "REPLACE_EMPTY_WITH_NULL":
-            return series.where(series.astype(str).str.strip().ne('') & series.astype(str).str.strip().ne('None'), other=np.nan)
+            return series.where(series.notna() & series.astype(str).str.strip().ne(''), other=np.nan)
 
         if transformer_name == "GENERATE_HN":
             # Generate sequential HN numbers for the entire series
@@ -168,7 +170,9 @@ class DataTransformer:
                 d, m, y = parts
                 # Logic to detect if year is BE (Thailand usually > 2400)
                 year_val = int(y)
-                iso_year = year_val - 543 if year_val > 2000 else year_val
+                # BE years in Thailand are ~2500+; threshold >2400 avoids
+                # misidentifying Gregorian years (2001-2399) as Buddhist Era.
+                iso_year = year_val - 543 if year_val > 2400 else year_val
                 
                 return f"{iso_year}-{m.zfill(2)}-{d.zfill(2)}"
         except:
@@ -190,8 +194,11 @@ class DataTransformer:
             parts = re.split(r'[-/]', date_str.strip())
             if len(parts) == 3:
                 d, m, y = parts
-                return f"{y}-{m.zfill(2)}-{d.zfill(2)}"
-        except:
+                d_val, m_val, y_val = int(d), int(m), int(y)
+                if not (1 <= m_val <= 12 and 1 <= d_val <= 31 and y_val > 0):
+                    return None
+                return f"{y_val:04d}-{m_val:02d}-{d_val:02d}"
+        except (ValueError, AttributeError):
             return None
 
     @staticmethod

@@ -66,4 +66,8 @@ def generic_confirm_dialog(title, message, confirm_label, on_confirm_func, *args
     with c_confirm:
         # ปุ่มนี้จะเป็นสีแดงตาม CSS ที่เรา Override ไว้
         if st.button(confirm_label, type="primary", use_container_width=True):
-            on_confirm_func(*args, **kwargs)
+            try:
+                on_confirm_func(*args, **kwargs)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Error: {e}")

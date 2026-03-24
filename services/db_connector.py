@@ -1,8 +1,21 @@
 import sqlite3
+import re
 from typing import Dict, Any, Optional
 import hashlib
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, URL
+
+
+def _safe_id(name: str) -> str:
+    """Validate DB identifier (table/schema/column) to prevent SQL injection.
+    Allows alphanumeric, underscore, hyphen, dot, and spaces (for MSSQL schemas).
+    Raises ValueError on suspicious input.
+    """
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError(f"Invalid identifier: {name!r}")
+    if not re.match(r'^[a-zA-Z0-9_\-\. ]+$', name):
+        raise ValueError(f"Unsafe identifier rejected: {name!r}")
+    return name
 
 # ==========================================
 #  PART 1: SQLAlchemy Integration
@@ -225,10 +238,10 @@ def get_tables_from_datasource(db_type, host, port, db_name, user, password, sch
         if db_type == "MySQL":
             cursor.execute("SHOW TABLES")
         elif db_type == "Microsoft SQL Server":
-            schema_filter = schema if schema else 'dbo'
+            schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = '{schema_filter}' ORDER BY TABLE_NAME")
         elif db_type == "PostgreSQL":
-            schema_filter = schema if schema else 'public'
+            schema_filter = _safe_id(schema) if schema else 'public'
             cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{schema_filter}' ORDER BY table_name")
         else:
             return False, f"Unknown Database Type: {db_type}"
@@ -243,19 +256,23 @@ def get_columns_from_table(db_type, host, port, db_name, user, password, table_n
     """Retrieves column information from a specific table."""
     try:
         _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
+        safe_table = _safe_id(table_name)
 
         if db_type == "MySQL":
-            cursor.execute(f"DESCRIBE `{table_name}`")
+            cursor.execute(f"DESCRIBE `{safe_table}`")
             columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
         elif db_type == "Microsoft SQL Server":
-            schema_filter = schema if schema else 'dbo'
-            cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{table_name}' AND TABLE_SCHEMA = '{schema_filter}' ORDER BY ORDINAL_POSITION")
+            schema_filter = _safe_id(schema) if schema else 'dbo'
+            cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{safe_table}' AND TABLE_SCHEMA = '{schema_filter}' ORDER BY ORDINAL_POSITION")
             columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
         elif db_type == "PostgreSQL":
-            schema_filter = schema if schema else 'public'
-            cursor.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{table_name}' AND table_schema = '{schema_filter}' ORDER BY ordinal_position")
+            schema_filter = _safe_id(schema) if schema else 'public'
+            cursor.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{safe_table}' AND table_schema = '{schema_filter}' ORDER BY ordinal_position")
             columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
-        
+        else:
+            cursor.close()
+            return False, f"Unknown Database Type: {db_type}"
+
         cursor.close()
         return True, columns
     except Exception as e:
@@ -268,10 +285,11 @@ def get_foreign_keys(db_type, host, port, db_name, user, password, schema=None):
         relationships = []
 
         if db_type == "MySQL":
+            safe_db = _safe_id(db_name)
             query = f"""
                 SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
                 FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-                WHERE REFERENCED_TABLE_SCHEMA = '{db_name}' 
+                WHERE REFERENCED_TABLE_SCHEMA = '{safe_db}'
                 AND REFERENCED_TABLE_NAME IS NOT NULL
             """
             cursor.execute(query)
@@ -282,7 +300,7 @@ def get_foreign_keys(db_type, host, port, db_name, user, password, schema=None):
                 })
 
         elif db_type == "PostgreSQL":
-            schema_filter = schema if schema else 'public'
+            schema_filter = _safe_id(schema) if schema else 'public'
             query = f"""
                 SELECT
                     tc.table_name, kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name
@@ -337,12 +355,16 @@ def get_table_sample_data(db_type, host, port, db_name, user, password, table_na
     try:
         _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
 
-        table_ref = table_name
-        if schema:
+        safe_table = _safe_id(table_name)
+        safe_schema = _safe_id(schema) if schema else None
+        limit = int(limit)  # ensure numeric
+
+        table_ref = safe_table
+        if safe_schema:
             if db_type == "Microsoft SQL Server":
-                table_ref = f"[{schema}].[{table_name}]"
+                table_ref = f"[{safe_schema}].[{safe_table}]"
             elif db_type == "PostgreSQL":
-                table_ref = f'"{schema}"."{table_name}"'
+                table_ref = f'"{safe_schema}"."{safe_table}"'
 
         query = ""
         if db_type == "Microsoft SQL Server":
@@ -364,19 +386,24 @@ def get_column_sample_values(db_type, host, port, db_name, user, password, table
     try:
         _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
 
-        table_ref = table_name
-        if schema:
+        safe_table = _safe_id(table_name)
+        safe_col = _safe_id(column_name)
+        safe_schema = _safe_id(schema) if schema else None
+        limit = int(limit)  # ensure numeric
+
+        table_ref = safe_table
+        if safe_schema:
             if db_type == "Microsoft SQL Server":
-                table_ref = f"[{schema}].[{table_name}]"
+                table_ref = f"[{safe_schema}].[{safe_table}]"
             elif db_type == "PostgreSQL":
-                table_ref = f'"{schema}"."{table_name}"'
+                table_ref = f'"{safe_schema}"."{safe_table}"'
 
         if db_type == "MySQL":
-            query = f"SELECT DISTINCT `{column_name}` FROM {table_ref} WHERE `{column_name}` IS NOT NULL AND CAST(`{column_name}` AS CHAR) <> '' LIMIT {limit}"
+            query = f"SELECT DISTINCT `{safe_col}` FROM {table_ref} WHERE `{safe_col}` IS NOT NULL AND CAST(`{safe_col}` AS CHAR) <> '' LIMIT {limit}"
         elif db_type == "PostgreSQL":
-            query = f'SELECT DISTINCT "{column_name}" FROM {table_ref} WHERE "{column_name}" IS NOT NULL AND CAST("{column_name}" AS TEXT) <> \'\' LIMIT {limit}'
+            query = f'SELECT DISTINCT "{safe_col}" FROM {table_ref} WHERE "{safe_col}" IS NOT NULL AND CAST("{safe_col}" AS TEXT) <> \'\' LIMIT {limit}'
         elif db_type == "Microsoft SQL Server":
-            query = f"SELECT DISTINCT TOP {limit} [{column_name}] FROM {table_ref} WHERE [{column_name}] IS NOT NULL AND CAST([{column_name}] AS NVARCHAR(MAX)) <> ''"
+            query = f"SELECT DISTINCT TOP {limit} [{safe_col}] FROM {table_ref} WHERE [{safe_col}] IS NOT NULL AND CAST([{safe_col}] AS NVARCHAR(MAX)) <> ''"
         else:
             return False, f"Unknown Database Type: {db_type}"
 

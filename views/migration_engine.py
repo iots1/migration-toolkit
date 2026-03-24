@@ -147,11 +147,23 @@ def transform_batch(df_batch: pd.DataFrame, config: dict) -> tuple:
     df_batch = DataTransformer.apply_transformers_to_batch(df_batch, config)
 
     # Build rename map from source to target columns
-    rename_map = {
-        m['source']: m['target']
-        for m in config.get('mappings', [])
-        if not m.get('ignore', False) and 'target' in m and m['source'] in df_batch.columns
-    }
+    # Skip if target column already exists (created by apply_transformers_to_batch when source != target)
+    rename_map = {}
+    transformed_source_cols = []
+    for m in config.get('mappings', []):
+        if m.get('ignore', False) or 'target' not in m:
+            continue
+        src, tgt = m['source'], m['target']
+        if src not in df_batch.columns or src == tgt:
+            continue
+        if tgt in df_batch.columns:
+            # Target was already created by transformer; drop the raw source column
+            transformed_source_cols.append(src)
+        else:
+            rename_map[src] = tgt
+
+    if transformed_source_cols:
+        df_batch = df_batch.drop(columns=transformed_source_cols, errors='ignore')
     if rename_map:
         df_batch.rename(columns=rename_map, inplace=True)
 

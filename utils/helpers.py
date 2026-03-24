@@ -5,7 +5,11 @@ import re
 from config import MIGRATION_REPORT_DIR
 
 def safe_str(val):
-    if pd.isna(val) or val is None: return ""
+    if val is None: return ""
+    try:
+        if pd.isna(val): return ""
+    except (ValueError, TypeError):
+        pass
     return str(val).strip()
 
 def to_camel_case(snake_str):
@@ -28,6 +32,6 @@ def to_snake_case(str_val):
 
 def get_report_folders():
     if not os.path.exists(MIGRATION_REPORT_DIR): return []
-    folders = glob.glob(os.path.join(MIGRATION_REPORT_DIR, "*"))
+    folders = [f for f in glob.glob(os.path.join(MIGRATION_REPORT_DIR, "*")) if os.path.isdir(f)]
     folders.sort(reverse=True)
     return folders

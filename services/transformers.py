@@ -28,6 +28,7 @@ class DataTransformer:
             source_col = mapping.get('source')
             target_col = mapping.get('target', source_col)
             transformers = mapping.get('transformers', [])
+            transformer_params = mapping.get('transformer_params', {})
 
             # Special handling for GENERATE_HN: Create column even if source doesn't exist
             if 'GENERATE_HN' in transformers:
@@ -36,7 +37,11 @@ class DataTransformer:
 
                 for t_name in transformers:
                     try:
-                        series_data = DataTransformer.transform_series(series_data, t_name)
+                        if t_name == 'VALUE_MAP':
+                            vmap_params = transformer_params.get('VALUE_MAP', {})
+                            df = DataTransformer.apply_value_map(df, source_col, target_col, vmap_params)
+                        else:
+                            series_data = DataTransformer.transform_series(series_data, t_name)
                     except Exception as e:
                         print(f"Error transforming {source_col} with {t_name}: {e}")
 
@@ -55,7 +60,12 @@ class DataTransformer:
 
                 for t_name in transformers:
                     try:
-                        series_data = DataTransformer.transform_series(series_data, t_name)
+                        if t_name == 'VALUE_MAP':
+                            vmap_params = transformer_params.get('VALUE_MAP', {})
+                            df = DataTransformer.apply_value_map(df, source_col, target_col, vmap_params)
+                            series_data = df[target_col] if target_col in df.columns else df[source_col]
+                        else:
+                            series_data = DataTransformer.transform_series(series_data, t_name)
                     except Exception as e:
                         # Log error but don't crash the whole batch
                         print(f"Error transforming {source_col} with {t_name}: {e}")
@@ -251,3 +261,54 @@ class DataTransformer:
     def reset_hn_counter(start_value: int = 0):
         """Reset HN counter to specified value (useful for testing or new migrations)"""
         DataTransformer._hn_counter = start_value
+
+    @staticmethod
+    def apply_value_map(df: pd.DataFrame, source_col: str, target_col: str, params: dict) -> pd.DataFrame:
+        """
+        Apply conditional value mapping to a DataFrame.
+        Supports single-column and multi-column conditions.
+
+        params = {
+            "rules": [
+                {"when": {"Sex": "1"}, "then": "M"},
+                {"when": {"Sex": "2"}, "then": "F"},
+                {"when": {"type": "A", "grade": "1"}, "then": "PASS"}
+            ],
+            "default": null or value to use when no rule matches
+        }
+
+        If default is None, keeps the source value when no rule matches.
+        """
+        rules = params.get('rules', [])
+        default_val = params.get('default', None)
+
+        if not rules:
+            # No rules defined, just copy source to target if they differ
+            if source_col != target_col:
+                df[target_col] = df[source_col]
+            return df
+
+        def map_row(row):
+            for rule in rules:
+                conditions = rule.get('when', {})
+                # Check if all condition columns match their values
+                match = True
+                for col, val in conditions.items():
+                    row_val = str(row.get(col, '')).strip()
+                    cond_val = str(val).strip()
+                    if row_val != cond_val:
+                        match = False
+                        break
+
+                if match:
+                    return rule.get('then')
+
+            # No rule matched - use default or keep source
+            if default_val is not None:
+                return default_val
+            else:
+                # Keep original source value
+                return row.get(source_col)
+
+        df[target_col] = df.apply(map_row, axis=1)
+        return df

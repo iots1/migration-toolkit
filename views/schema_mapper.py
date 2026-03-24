@@ -306,6 +306,41 @@ def render_schema_mapper_page():
                                 source_db_input = src_db_name
                                 source_table_name = src_tbl_name
 
+        # --- AUTO-FILL SESSION STATE FOR SAVED CONFIG ---
+        if source_mode == "Saved Config" and loaded_config_json:
+            tgt_db_name = loaded_config_json.get('target', {}).get('database', '')
+            tgt_tbl_name = loaded_config_json.get('target', {}).get('table', '')
+
+            if tgt_db_name and tgt_db_name in datasource_names:
+                st.session_state.setdefault('mapper_tgt_db_edit', tgt_db_name)
+            if tgt_tbl_name:
+                st.session_state.setdefault('mapper_tgt_tbl_edit', tgt_tbl_name)
+
+            # --- RESTORE VALUE_MAP RULES FROM SAVED CONFIG ---
+            for m in loaded_config_json.get('mappings', []):
+                src_col_name = m.get('source')
+                if 'transformer_params' in m and 'VALUE_MAP' in m['transformer_params']:
+                    vmap_data = m['transformer_params']['VALUE_MAP']
+                    vmap_rules = vmap_data.get('rules', [])
+
+                    # Convert rule list to DataFrame format
+                    if vmap_rules:
+                        rules_rows = []
+                        for rule in vmap_rules:
+                            conditions = rule.get('when', {})
+                            for col, val in conditions.items():
+                                rules_rows.append({
+                                    'condition_column': col,
+                                    'condition_value': str(val),
+                                    'output': str(rule.get('then', ''))
+                                })
+                        vmap_key = f"vmap_rules_{src_col_name}"
+                        st.session_state[vmap_key] = pd.DataFrame(rules_rows)
+
+                    # Restore default value
+                    vmap_default_key = f"vmap_default_{src_col_name}"
+                    st.session_state[vmap_default_key] = vmap_data.get('default', '')
+
         # --- CONFIG DETAILS SECTION (for Saved Config) ---
         if source_mode == "Saved Config" and loaded_config_json:
             st.markdown("---")
@@ -722,9 +757,75 @@ def render_schema_mapper_page():
                     def_vals = [v.strip() for v in str(current_val).split(',') if v.strip() and v.strip() in VALIDATOR_OPTIONS]
                     with c_edit_3:
                         new_vals = st.multiselect("Validators", VALIDATOR_OPTIONS, default=def_vals, key=f"ms_vd_{src_col}")
-                    
+
                     # Get ignore status from the row
                     is_ignored = sel_row.get('Ignore', False)
+
+                    # --- VALUE_MAP RULES EDITOR ---
+                    if "VALUE_MAP" in new_trans:
+                        st.markdown("**VALUE_MAP Rules** — ค่าไหน → เปลี่ยนเป็นอะไร")
+
+                        vmap_key = f"vmap_rules_{src_col}"
+                        vmap_default_key = f"vmap_default_{src_col}"
+
+                        # Load existing rules from config or session
+                        if vmap_key not in st.session_state:
+                            existing_params = sel_row.get('transformer_params', {})
+                            existing_rules = existing_params.get('VALUE_MAP', {}).get('rules', [])
+
+                            if existing_rules:
+                                # Convert rules to DataFrame format
+                                rules_rows = []
+                                for rule in existing_rules:
+                                    conditions = rule.get('when', {})
+                                    for col, val in conditions.items():
+                                        rules_rows.append({
+                                            'condition_column': col,
+                                            'condition_value': str(val),
+                                            'output': str(rule.get('then', ''))
+                                        })
+                                st.session_state[vmap_key] = pd.DataFrame(rules_rows)
+                            else:
+                                st.session_state[vmap_key] = pd.DataFrame(columns=['condition_column', 'condition_value', 'output'])
+
+                        # Get available columns for condition
+                        available_cols = list(active_df_raw['Column']) if active_df_raw is not None else [src_col]
+
+                        # Render rules as editable table
+                        rules_df = st.session_state.get(vmap_key, pd.DataFrame(columns=['condition_column', 'condition_value', 'output']))
+
+                        edited_rules = st.data_editor(
+                            rules_df,
+                            num_rows="dynamic",
+                            column_config={
+                                "condition_column": st.column_config.SelectboxColumn(
+                                    "Column",
+                                    options=available_cols,
+                                    required=True
+                                ),
+                                "condition_value": st.column_config.TextColumn(
+                                    "Value (=)",
+                                    width="medium"
+                                ),
+                                "output": st.column_config.TextColumn(
+                                    "→ Output",
+                                    width="medium"
+                                ),
+                            },
+                            key=f"de_vmap_{src_col}",
+                            use_container_width=True,
+                            hide_index=False
+                        )
+                        st.session_state[vmap_key] = edited_rules
+
+                        # Default value field
+                        default_val = st.session_state.get(vmap_default_key, '')
+                        st.text_input(
+                            "Default (ไม่ match ใช้ค่านี้ หรือว่างไว้ = คง original)",
+                            value=default_val,
+                            key=vmap_default_key,
+                            help="If no rule matches, use this value or keep the original source value"
+                        )
 
                     if st.button("✅ Update Row", type="primary"):
                         st.session_state[f"df_{active_table}"].at[idx, 'Target Column'] = new_target
@@ -1007,18 +1108,52 @@ def generate_json_config(params, mappings_df):
             "target": row['Target Column'],
             "ignore": is_ignored
         }
-        
+
         # เพิ่ม target_type ถ้ามี
         tgt_type = row.get('Target Type')
         if tgt_type and str(tgt_type).strip():
             mapping_item["target_type"] = str(tgt_type).strip()
 
         tf_val = row.get('Transformers')
+        transformers_list = []
         if tf_val:
             if isinstance(tf_val, list):
                 mapping_item["transformers"] = tf_val
+                transformers_list = tf_val
             elif isinstance(tf_val, str) and tf_val.strip():
-                mapping_item["transformers"] = [t.strip() for t in tf_val.split(',') if t.strip()]
+                transformers_list = [t.strip() for t in tf_val.split(',') if t.strip()]
+                mapping_item["transformers"] = transformers_list
+
+        # Handle VALUE_MAP transformer_params
+        src_col = row['Source Column']
+        if "VALUE_MAP" in transformers_list:
+            vmap_rules_key = f"vmap_rules_{src_col}"
+            vmap_default_key = f"vmap_default_{src_col}"
+
+            vmap_rules_df = st.session_state.get(vmap_rules_key)
+            default_val = st.session_state.get(vmap_default_key, '')
+
+            if vmap_rules_df is not None and not vmap_rules_df.empty:
+                # Convert DataFrame rows to rule dictionaries
+                rules = []
+                for _, rule_row in vmap_rules_df.iterrows():
+                    condition_col = rule_row.get('condition_column', '')
+                    condition_val = rule_row.get('condition_value', '')
+                    output = rule_row.get('output', '')
+
+                    if condition_col and condition_val and output:
+                        rules.append({
+                            "when": {condition_col: condition_val},
+                            "then": output
+                        })
+
+                if rules:
+                    mapping_item['transformer_params'] = {
+                        'VALUE_MAP': {
+                            'rules': rules,
+                            'default': default_val if default_val else None
+                        }
+                    }
 
         vd_val = row.get('Validators')
         if vd_val:

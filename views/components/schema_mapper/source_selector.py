@@ -255,6 +255,20 @@ def _auto_fill_from_config(loaded_config: dict, datasource_names: list) -> None:
         st.session_state.pop("mapper_tgt_tbl_edit", None)
         st.session_state["_mapper_loaded_config_name"] = current_cfg_name
 
+        # Reset widget keys so next render picks up new values via value= param
+        # (Streamlit ignores value= when session_state key already exists)
+        st.session_state["config_name_edit"] = current_cfg_name
+        st.session_state["config_name_input"] = current_cfg_name
+        for k in [
+            # Config Details panel widgets
+            "saved_config_name", "saved_src_db", "saved_src_tbl",
+            "config_detail_tgt_db", "config_detail_tgt_tbl",
+            # Config Metadata panel widgets
+            "metadata_src_db", "metadata_src_tbl",
+            "metadata_tgt_db_ro", "metadata_tgt_tbl_ro",
+        ]:
+            st.session_state.pop(k, None)
+
         # Restore VALUE_MAP and default_value params from config
         for m in loaded_config.get("mappings", []):
             src_col = m.get("source")

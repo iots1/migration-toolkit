@@ -211,7 +211,46 @@ The toolkit requires database-specific clients:
 
 ## 🚀 Installation
 
-### Option 1: Virtual Environment (Recommended)
+### 🎯 Quick Setup (Using Makefile) — Recommended
+
+The repository includes a **Makefile** to simplify setup and development.
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/yourusername/his-analyzer.git
+cd his-analyzer
+
+# 2. One-command setup (creates venv + installs dependencies)
+make setup
+
+# 3. Start developing with hot-reload
+make run
+
+# 4. View all available commands
+make help
+```
+
+**Available Makefile Commands:**
+
+```bash
+make setup              # Create venv + install dependencies (first time)
+make install           # Install dependencies only (venv must exist)
+make run               # Start app with hot-reload (default)
+make run-reload        # Start app with hot-reload (explicit)
+make run-no-reload     # Start app without hot-reload
+
+make test              # Run all unit tests (pytest discovers everything)
+make test-simple       # Run AI pattern detection tests only
+make test-column       # Run column analysis tests only
+make test-suite        # Run tests/ directory only
+
+make clean             # Remove venv and __pycache__
+make help              # Show all commands
+```
+
+---
+
+### Option 1: Manual Virtual Environment Setup
 
 Using a virtual environment prevents version conflicts with system Python packages.
 
@@ -230,6 +269,9 @@ source venv/bin/activate        # macOS/Linux
 # 4. Install dependencies
 pip install --upgrade pip
 pip install -r requirements.txt
+
+# 5. Start the app with hot-reload
+python3.11 -m streamlit run app.py --server.runOnSave true
 ```
 
 ### Option 2: System-Wide Installation
@@ -245,6 +287,9 @@ brew install jq
 brew install mysql-client
 brew install libpq
 brew tap microsoft/mssql-release && brew install mssql-tools18
+
+# Start the app
+streamlit run app.py
 ```
 
 ---
@@ -256,9 +301,10 @@ brew tap microsoft/mssql-release && brew install mssql-tools18
 On first run, the application automatically creates `migration_tool.db` SQLite database:
 
 ```bash
-# Start the Streamlit application
-streamlit run app.py
-# or hot reload
+# Using Makefile (recommended)
+make run
+
+# OR manually
 python3.11 -m streamlit run app.py --server.runOnSave true
 ```
 
@@ -1249,19 +1295,39 @@ Approximate analysis times (single table):
 
 ## 🧪 Testing
 
-The project uses **pytest** with a `tmp_dir` fixture for filesystem isolation.
-
-### Run All Tests
+### Using Makefile (Recommended)
 
 ```bash
-source venv/bin/activate
-python3.11 -m pytest tests/ -q
+# Run ALL unit tests (pytest auto-discovers everything)
+make test
+
+# Run specific test suite
+make test-simple        # AI pattern detection
+make test-column        # Column analysis
+make test-suite         # tests/ directory only
 ```
 
-### Run with Coverage
+### Manual Testing
+
+The project includes:
+
+- **test_analysis_simple.py** — AI pattern detection tests
+- **test_column_analysis.py** — Column analysis tests
+- **tests/** — pytest test suite with `tmp_dir` fixture for filesystem isolation
 
 ```bash
-python3.11 -m pytest tests/ --cov=services --cov=models --cov=utils --cov-report=term-missing -q
+# Activate venv first (or use: source venv/bin/activate)
+make install
+
+# Run standard tests
+python test_analysis_simple.py
+python test_column_analysis.py
+
+# Run pytest suite
+python -m pytest tests/ -v
+
+# Run pytest with coverage
+python -m pytest tests/ --cov=services --cov=models --cov=utils --cov-report=term-missing -v
 ```
 
 ### Run a Specific Module

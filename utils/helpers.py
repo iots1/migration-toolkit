@@ -35,3 +35,30 @@ def get_report_folders():
     folders = [f for f in glob.glob(os.path.join(MIGRATION_REPORT_DIR, "*")) if os.path.isdir(f)]
     folders.sort(reverse=True)
     return folders
+
+
+def format_row_count(n: int) -> str:
+    """Return a human-readable row count string e.g. 1234 → '1,234 rows'."""
+    return f"{n:,} rows"
+
+
+def safe_filename(name: str) -> str:
+    """Sanitise a string for use in file/directory names."""
+    return "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+
+
+def resolve_dbname(display_name: str, datasources_df) -> str:
+    """
+    Convert a datasource display name to its actual dbname.
+    Falls back to display_name if not found.
+
+    Args:
+        display_name: The human-readable name shown in the UI selectbox.
+        datasources_df: DataFrame with columns ['name', 'dbname', ...] from db.get_datasources().
+    """
+    if not display_name or datasources_df is None or datasources_df.empty:
+        return display_name
+    match = datasources_df[datasources_df["name"] == display_name]
+    if not match.empty:
+        return match.iloc[0].get("dbname", display_name)
+    return display_name

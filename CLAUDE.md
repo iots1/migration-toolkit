@@ -33,38 +33,72 @@ python test_analysis_simple.py   # AI pattern detection tests
 python test_column_analysis.py   # Column analysis tests
 ```
 
-## Architecture
+## Architecture Overview
 
-This is a Streamlit-based HIS (Hospital Information System) database migration toolkit. The pipeline has three phases:
+This is a Streamlit-based HIS (Hospital Information System) database migration toolkit with a three-phase pipeline:
 
-1. **Analysis** — `analysis_report/unified_db_analyzer.sh` profiles a source DB and outputs CSV/DDL reports
-2. **Mapping** — Streamlit UI (`views/schema_mapper.py`) for mapping source→target columns, optionally using AI-powered suggestions from `services/ml_mapper.py`
-3. **Migration** — Streamlit UI (`views/migration_engine.py`) executes the ETL: reads source in batches, applies transformers, inserts to target
+1. **Analysis** — `analysis_report/unified_db_analyzer.sh` profiles source DB and outputs CSV/DDL reports
+2. **Mapping** — Streamlit UI for mapping source→target columns with optional AI suggestions (`services/ml_mapper.py`)
+3. **Migration** — Streamlit UI executes ETL: reads source in batches, applies transformers, inserts to target
+
+### Directory Structure & MVC Pattern
+
+The codebase is transitioning to **strict MVC (Model-View-Controller)** architecture. See `CODE_OF_CONDUCT.md` for detailed conventions.
+
+```
+├── app.py                          # Router: delegates to controllers/views based on navigation
+├── config.py                       # Constants (transformers, validators, DB types)
+├── database.py                     # Data access layer (SQLite CRUD)
+├── models/                         # Domain models (dataclasses, NO streamlit imports)
+│   ├── datasource.py               # Datasource connection profile
+│   └── migration_config.py         # MigrationConfig & MappingItem
+├── services/                       # Business logic services (pure Python, NO streamlit imports)
+│   ├── db_connector.py             # SQLAlchemy engine factory
+│   ├── ml_mapper.py                # AI semantic column mapping
+│   ├── transformers.py             # Vectorized data transformations
+│   ├── checkpoint_manager.py       # Migration resumability
+│   └── ...
+├── utils/                          # Utilities (state management, helpers)
+│   ├── state_manager.py            # PageState class for session_state
+│   ├── ui_components.py            # Legacy CSS/dialogs (being migrated)
+│   └── ...
+├── controllers/                    # MVC Controllers (orchestrate state & logic)
+│   └── settings_controller.py      # [PoC] Settings page: owns state, fetches data, calls view
+├── views/                          # Streamlit rendering (DUMB — only receive data + callbacks)
+│   ├── settings_view.py            # [PoC] Pure rendering, delegates all logic to controller
+│   ├── schema_mapper.py            # [Legacy] To be refactored
+│   ├── migration_engine.py         # [Legacy] To be refactored
+│   └── components/                 # Reusable UI components
+│       └── shared/
+│           ├── dialogs.py          # Shared dialogs (generic_confirm_dialog, preview_config_dialog)
+│           └── styles.py           # Global CSS (inject_global_css)
+└── ...
+```
 
 ### Key Files
 
-| File | Role |
-|------|------|
-| `app.py` | Streamlit routing and sidebar navigation |
-| `config.py` | Constants: `TRANSFORMER_OPTIONS` (20 types), `VALIDATOR_OPTIONS` (10 types), `DB_TYPES` |
-| `database.py` | SQLite CRUD for `datasources`, `configs`, and `config_histories` tables |
-| `views/schema_mapper.py` | Column mapping UI + AI auto-mapping |
-| `views/migration_engine.py` | ETL execution with batch processing, checkpoints, streaming logs |
-| `views/settings.py` | Datasource management + config version history/rollback |
-| `services/db_connector.py` | SQLAlchemy engine factory for MySQL, PostgreSQL, MSSQL |
-| `services/ml_mapper.py` | `SmartMapper` class: HIS dictionary + sentence-transformer semantic matching |
-| `services/transformers.py` | `DataTransformer` class: vectorized Pandas transformations |
+| File | Role | Status |
+|------|------|--------|
+| `app.py` | Router: dispatches to controllers/views | ✅ MVC-ready |
+| `database.py` | SQLite CRUD ops | ✅ Pure data layer |
+| `config.py` | Constants | ✅ No changes needed |
+| `controllers/settings_controller.py` | [PoC] Manages state, fetches data, defines callbacks | ✅ MVC pattern |
+| `views/settings_view.py` | [PoC] Pure Streamlit rendering | ✅ MVC pattern |
+| `views/schema_mapper.py` | Schema mapping UI | 🚧 Legacy (to refactor) |
+| `views/migration_engine.py` | Migration execution UI | 🚧 Legacy (to refactor) |
+| `services/ml_mapper.py` | AI semantic mapping | ✅ Pure Python |
+| `services/transformers.py` | Data transformation | ✅ Pure Python |
 
 ### Data Flow
 
-- **Mapping configs** are saved as JSON blobs in SQLite (`migration_tool.db`), versioned in `config_histories`
-- **Migration** reads the saved config, streams source rows in batches through `DataTransformer`, then bulk-inserts to target
-- **Checkpoints** in `migration_checkpoints/` allow resuming interrupted migrations
-- **Logs** written to `migration_logs/migration_NAME_TIMESTAMP.log`
+- **Mapping configs** → saved as JSON blobs in SQLite (`migration_tool.db`), versioned in `config_histories`
+- **Migration engine** → reads config, streams source rows in batches through `DataTransformer`, bulk-inserts to target
+- **Checkpoints** → stored in `migration_checkpoints/` for resuming interrupted migrations
+- **Logs** → written to `migration_logs/migration_NAME_TIMESTAMP.log`
 
 ### Config JSON Structure
 
-The core data structure passed between Schema Mapper and Migration Engine:
+Core data structure passed between Schema Mapper and Migration Engine:
 ```json
 {
   "source": {"database": "<datasource_id or run_id_XXX>", "table": "<table>"},
@@ -77,6 +111,18 @@ The core data structure passed between Schema Mapper and Migration Engine:
 
 ### Healthcare Domain Notes
 
-- `ml_mapper.py` contains a Thai HIS dictionary with domain acronyms: `HN` (hospital number), `VN` (visit number), `CID` (citizen ID), etc.
-- Transformer `BUDDHIST_TO_ISO` converts Thai Buddhist calendar years (BE = CE + 543)
-- `mini_his/full_his_mockup.sql` is an 884KB PostgreSQL schema with mock patient/visit data for testing
+- `ml_mapper.py` — Thai HIS dictionary with acronyms: `HN` (hospital number), `VN` (visit number), `CID` (citizen ID), etc.
+- Transformer `BUDDHIST_TO_ISO` — converts Thai Buddhist years (BE = CE + 543)
+- `mini_his/full_his_mockup.sql` — 884KB PostgreSQL schema with mock patient/visit data for testing
+
+## Refactoring Roadmap (MVC Transition)
+
+The project is transitioning from mixed-logic views to strict MVC. Order of refactoring:
+
+1. ✅ **Settings** — `controllers/settings_controller.py` + `views/settings_view.py` (PoC complete)
+2. 🔜 **ER Diagram** — simple, no state
+3. 🔜 **File Explorer** — simple, minimal state
+4. 🔜 **Schema Mapper** — complex state management
+5. 🔜 **Migration Engine** — most complex (multi-step wizard)
+
+See `CODE_OF_CONDUCT.md` for strict MVC conventions and how to structure each new controller/view pair.

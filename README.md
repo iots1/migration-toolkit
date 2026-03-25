@@ -50,6 +50,7 @@ A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migratin
   - [Migration Engine](#migration-engine-v80)
   - [AI-Powered Column Mapping](#ai-powered-column-mapping-v80)
 - [Troubleshooting](#troubleshooting)
+- [Testing](#testing)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -57,70 +58,81 @@ A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migratin
 
 ## 🏗️ Architecture
 
+The codebase follows an MVC-inspired layered architecture where models, services, and views are strictly separated.
+
 ```
 his-analyzer/
-├── app.py                      # Main Streamlit Dashboard Application
-├── requirements.txt            # Python Dependencies
-├── README.md                   # Documentation
-├── migration_tool.db           # SQLite database (datasources, configs, config_histories)
+├── app.py                          # Streamlit routing + sidebar navigation
+├── config.py                       # Constants: TRANSFORMER_OPTIONS, VALIDATOR_OPTIONS, DB_TYPES
+├── database.py                     # SQLite CRUD (datasources, configs, config_histories)
 │
-├── views/                      # Streamlit Pages
-│   ├── schema_mapper.py            # Schema mapping interface (v8.0 enhanced)
-│   │                                # • AI auto-mapping with ML models
-│   │                                # • Dual-mode: Run ID or Live Datasource
-│   │                                # • Configuration save/load with versioning
-│   ├── migration_engine.py         # Migration execution engine (v8.0)
-│   │                                # • Batch processing with streaming
-│   │                                # • Data transformation pipeline
-│   │                                # • Real-time logging and progress tracking
-│   └── settings.py                 # Datasource & config management (v8.0)
-│                                    # • Datasource CRUD operations
-│                                    # • Configuration history viewer
-│                                    # • Version comparison and rollback
+├── models/                         # Data classes (pure Python, no I/O)
+│   ├── datasource.py               #   Datasource dataclass
+│   └── migration_config.py         #   MigrationConfig + MappingItem dataclasses
 │
-├── services/                   # Business Logic
-│   ├── db_connector.py             # Database connection pool (v8.0 refactored)
-│   │                                # • Singleton pattern for connection reuse
-│   │                                # • SQLAlchemy engine creation
-│   ├── transformers.py             # Data transformation functions (v8.0)
-│   │                                # • BUDDHIST_TO_ISO, TRIM, JSON parsing
-│   │                                # • Batch transformer application
-│   └── ml_mapper.py                # AI-powered mapping service (v8.0 NEW)
-│                                    # • Sentence Transformers ML model
-│                                    # • Healthcare domain dictionary
-│                                    # • Sample data pattern analysis
+├── services/                       # Business logic (no Streamlit imports)
+│   ├── datasource_repository.py    #   DatasourceRepository facade (test/connect/tables/cols)
+│   ├── db_connector.py             #   SQLAlchemy engine factory (MySQL, PG, MSSQL)
+│   ├── ml_mapper.py                #   SmartMapper: HIS dictionary + semantic matching
+│   ├── transformers.py             #   DataTransformer: vectorised Pandas transformations
+│   ├── checkpoint_manager.py       #   Checkpoint save/load/clear for resumable migrations
+│   ├── migration_logger.py         #   Per-run ETL log files with multi-encoding fallback
+│   ├── encoding_helper.py          #   clean_value / clean_dataframe for Thai legacy data
+│   └── query_builder.py            #   SELECT builder, batch transform, dtype map, bulk insert
 │
-├── database.py                 # SQLite operations (v8.0 enhanced)
-│   │                                # • Datasources CRUD
-│   │                                # • Configs CRUD with versioning
-│   │                                # • config_histories table management
-│   │                                # • Version comparison utilities
+├── views/                          # Streamlit page orchestrators (thin, delegate to components)
+│   ├── schema_mapper.py            #   Schema Mapper page (~120 lines)
+│   ├── migration_engine.py         #   Migration Engine page (~50 lines)
+│   └── settings.py                 #   Datasource & config history management
 │
-├── config.py                   # Application configuration
-├── utils/                      # Utility functions
-│   └── helpers.py                  # Common helper functions
+├── views/components/               # Reusable UI components
+│   ├── shared/
+│   │   └── dialogs.py              #   show_json_preview, show_diff_dialog (@st.dialog)
+│   ├── schema_mapper/
+│   │   ├── source_selector.py      #   Source mode tabs (Run ID / Datasource / Config / File)
+│   │   ├── metadata_editor.py      #   Config name, target DB/table selectors, batch size
+│   │   ├── mapping_editor.py       #   AgGrid mapping table + Quick Edit panel
+│   │   ├── config_actions.py       #   Validate / Preview JSON / Save buttons + JSON builder
+│   │   └── history_viewer.py       #   Config history panel + version comparison
+│   └── migration/
+│       ├── step_config.py          #   Step 1: load config from DB or upload JSON
+│       ├── step_connections.py     #   Step 2: source/target DB profile + charset selection
+│       ├── step_review.py          #   Step 3: review config, checkpoint resume, exec settings
+│       └── step_execution.py       #   Step 4: full ETL pipeline with streaming logs
 │
-├── analysis_report/            # Database Analysis Engine (Shell Script)
-│   ├── config.json                 # Database connection configuration
-│   ├── unified_db_analyzer.sh      # Core analysis script (Bash v7.1)
-│   │                                # • Multi-database support (MySQL, PG, MSSQL)
-│   │                                # • Smart sampling (NOT NULL, NOT EMPTY)
-│   │                                # • Deep analysis mode
-│   │                                # • Auto-dependency installation
-│   ├── csv_to_html.py              # HTML report generator
-│   └── migration_report/           # Analysis output directory
-│       └── YYYYMMDD_HHMM/          # Timestamped report folders
-│           ├── ddl_schema/             # DDL export (schema.sql)
-│           ├── data_profile/           # CSV and HTML reports
-│           └── process.log             # Execution logs
+├── utils/
+│   ├── helpers.py                  #   format_row_count, safe_filename, resolve_dbname, …
+│   └── state_manager.py            #   PageState: init defaults, trigger/flush deferred rerun
 │
-├── migration_logs/             # Migration execution logs (v8.0 NEW)
-│   └── migration_NAME_TIMESTAMP.log    # Timestamped ETL logs
+├── tests/                          # pytest test suite
+│   ├── conftest.py                 #   tmp_dir fixture
+│   ├── test_checkpoint_manager.py
+│   ├── test_encoding_helper.py
+│   ├── test_helpers.py
+│   ├── test_migration_logger.py
+│   ├── test_models.py
+│   └── test_query_builder.py
 │
-└── mini_his/                   # Mock Data Generator
-    ├── gen_mini_his.py             # Python data generator
-    └── full_his_mockup.sql         # Base SQL schema
+├── analysis_report/                # Database Analysis Engine (Shell Script)
+│   ├── config.json                 #   DB credentials
+│   ├── unified_db_analyzer.sh      #   Core Bash analyser (MySQL, PG, MSSQL)
+│   ├── csv_to_html.py              #   HTML report generator
+│   └── migration_report/           #   Output: YYYYMMDD_HHMM/{ddl_schema/, data_profile/}
+│
+├── migration_logs/                 # ETL execution logs (migration_NAME_TIMESTAMP.log)
+├── migration_checkpoints/          # Checkpoint JSON files for resumable migrations
+└── mini_his/                       # Mock HIS data (full_his_mockup.sql + generator)
 ```
+
+### Layer Responsibilities
+
+| Layer | Rule |
+|-------|------|
+| `models/` | Pure dataclasses — no I/O, no Streamlit |
+| `services/` | Business logic — no `st.*` calls |
+| `views/` | Thin orchestrators — call components, manage step flow |
+| `views/components/` | Reusable UI widgets — read/write `session_state`, render widgets |
+| `utils/` | Stateless pure helpers + `PageState` session abstraction |
 
 ### Data Flow Architecture (v8.0)
 
@@ -1232,6 +1244,59 @@ Approximate analysis times (single table):
 - Use `tables` filter to analyze specific tables only
 - Disable `deep_analysis` for initial exploration
 - Adjust `default_limit` for faster sampling
+
+---
+
+## 🧪 Testing
+
+The project uses **pytest** with a `tmp_dir` fixture for filesystem isolation.
+
+### Run All Tests
+
+```bash
+source venv/bin/activate
+python3.11 -m pytest tests/ -q
+```
+
+### Run with Coverage
+
+```bash
+python3.11 -m pytest tests/ --cov=services --cov=models --cov=utils --cov-report=term-missing -q
+```
+
+### Run a Specific Module
+
+```bash
+python3.11 -m pytest tests/test_query_builder.py -v
+python3.11 -m pytest tests/test_checkpoint_manager.py -v
+python3.11 -m pytest tests/test_encoding_helper.py -v
+python3.11 -m pytest tests/test_migration_logger.py -v
+python3.11 -m pytest tests/test_models.py -v
+python3.11 -m pytest tests/test_helpers.py -v
+```
+
+### Test Coverage (46 tests)
+
+| Test File | Module Under Test | Tests |
+|-----------|-------------------|-------|
+| `test_checkpoint_manager.py` | `services/checkpoint_manager.py` | 4 |
+| `test_encoding_helper.py` | `services/encoding_helper.py` | 8 |
+| `test_helpers.py` | `utils/helpers.py` | 14 |
+| `test_migration_logger.py` | `services/migration_logger.py` | 5 |
+| `test_models.py` | `models/` (MigrationConfig, Datasource) | 5 |
+| `test_query_builder.py` | `services/query_builder.py` | 10 |
+
+### Writing New Tests
+
+Use the `tmp_dir` fixture from `conftest.py` for any test that writes to disk:
+
+```python
+def test_something(tmp_dir):
+    # tmp_dir is a pathlib.Path pointing to a fresh temp directory
+    # automatically cleaned up after each test
+    path = tmp_dir / "output.json"
+    ...
+```
 
 ---
 

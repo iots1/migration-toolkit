@@ -2,8 +2,11 @@ import streamlit as st
 import os
 import database as db
 
-# Import Views
-from views import schema_mapper, migration_engine, file_explorer, settings, er_diagram
+# Import Views (legacy — to be migrated to controllers progressively)
+from views import schema_mapper, migration_engine, file_explorer, er_diagram
+
+# Import Controllers (MVC-refactored pages)
+from controllers import settings_controller
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="HIS Migration Toolkit", layout="wide", page_icon="🏥")
@@ -46,4 +49,4 @@ elif page == "📁 File Explorer":
     file_explorer.render_file_explorer_page(BASE_DIR)
     
 elif page == "⚙️ Datasource & Config":
-    settings.render_settings_page()
+    settings_controller.run()

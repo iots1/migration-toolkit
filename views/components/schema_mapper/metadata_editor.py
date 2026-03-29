@@ -1,5 +1,5 @@
 """
-Metadata Editor — Config name, source/target DB/table display, batch size,
+Metadata Editor — Config name, source DB/table display, batch size,
 and the Target Table Configuration expander (non-saved-config mode).
 
 Returns:
@@ -69,7 +69,7 @@ def render_target_selector(
             if target_table_input:
                 ok_c, cols = DSRepo.get_columns(target_db_input, target_table_input)
                 if ok_c:
-                    real_target_columns = [c["name"] for c in cols]
+                    real_target_columns = cols  # Keep full column info (name, type, is_nullable)
         else:
             target_table_input = c_tgt_2.text_input(
                 "Target Table", value="", placeholder="Please select datasource first",
@@ -93,7 +93,7 @@ def render_config_metadata(
     target_table_input: str | None,
 ) -> tuple[str, bool]:
     """
-    Renders Config Name, History/Compare toggles, Source/Target readonly fields, Batch Size.
+    Renders Config Name, History/Compare toggles, Source readonly fields, Batch Size.
 
     Returns:
         (current_config_name, is_edit_existing)
@@ -134,45 +134,6 @@ def render_config_metadata(
         src_tbl = loaded_config.get("source", {}).get("table", "") if loaded_config else source_table_name
         st.text_input("Source Table", value=src_tbl, disabled=True, key="metadata_src_tbl")
 
-    # Row 3: Target DB & Table
-    tgt_cols = st.columns(2)
-    with tgt_cols[0]:
-        if saved_config_mode:
-            st.text_input("Target Database", value=st.session_state.get("mapper_tgt_db", ""),
-                          disabled=True, key="metadata_tgt_db_ro",
-                          help="แก้ไขได้ใน Config Details ด้านบน")
-            selected_tgt_db = st.session_state.get("mapper_tgt_db", "")
-        else:
-            cur = st.session_state.get("mapper_tgt_db", target_db_input or "")
-            selected_tgt_db = st.selectbox(
-                "Target Database", datasource_names,
-                index=datasource_names.index(cur) if cur in datasource_names else 0,
-                key="config_tgt_db_meta",
-            )
-            st.session_state["mapper_tgt_db"] = selected_tgt_db
-
-    with tgt_cols[1]:
-        if saved_config_mode:
-            st.text_input("Target Table", value=st.session_state.get("mapper_tgt_tbl", ""),
-                          disabled=True, key="metadata_tgt_tbl_ro",
-                          help="แก้ไขได้ใน Config Details ด้านบน")
-        else:
-            cur_tbl = st.session_state.get("mapper_tgt_tbl", target_table_input or "")
-            tgt_tables = []
-            if selected_tgt_db and selected_tgt_db != "-- Select Datasource --":
-                ok, tables = DSRepo.get_tables(selected_tgt_db)
-                if ok:
-                    tgt_tables = tables
-            if tgt_tables:
-                sel_tbl = st.selectbox(
-                    "Target Table", tgt_tables,
-                    index=tgt_tables.index(cur_tbl) if cur_tbl in tgt_tables else 0,
-                    key="config_tgt_tbl_meta",
-                )
-                st.session_state["mapper_tgt_tbl"] = sel_tbl
-            else:
-                st.text_input("Target Table", value=cur_tbl, disabled=True,
-                              help="Select a Target Database first", key="metadata_tgt_tbl_disabled")
 
     # Row 4: Batch Size
     batch_size = st.number_input(

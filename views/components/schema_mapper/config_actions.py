@@ -20,6 +20,91 @@ from views.components.schema_mapper.mapping_editor import validate_mapping_in_ta
 # Bottom Controls
 # ---------------------------------------------------------------------------
 
+def check_unmapped_required_columns(
+    mappings_df: pd.DataFrame,
+    col_nullable_map: dict,
+    col_defaults_map: dict | None = None,
+) -> list:
+    """
+    Find required target columns (NOT NULL) that aren't mapped and have no default value.
+    Returns list of unmapped required column names without defaults.
+
+    Args:
+        mappings_df: Mapping DataFrame
+        col_nullable_map: Dict of column_name -> is_nullable
+        col_defaults_map: Dict of column_name -> has_default_value (optional)
+    """
+    if not col_nullable_map:
+        return []
+
+    col_defaults_map = col_defaults_map or {}
+
+    # Get mapped target columns (excluding ignored rows)
+    mapped_targets = set()
+    for _, row in mappings_df.iterrows():
+        if not row.get("Ignore", False) and row.get("Target Column"):
+            mapped_targets.add(row.get("Target Column"))
+
+    # Find required columns not in mapped set AND without default values
+    unmapped_required = []
+    for col_name, is_nullable in col_nullable_map.items():
+        if not is_nullable and col_name not in mapped_targets:
+            # Only add if no default value exists
+            has_default = col_defaults_map.get(col_name, False)
+            if not has_default:
+                unmapped_required.append(col_name)
+
+    return sorted(unmapped_required)
+
+
+def render_unmapped_required_check(
+    active_table: str,
+    col_nullable_map: dict,
+    col_defaults_map: dict | None = None,
+) -> bool:
+    """
+    Render validation for required columns (NOT NULL without defaults).
+    Shows error if unmapped required columns exist, success if all mapped.
+    Returns True if all required columns are mapped, False otherwise.
+
+    Args:
+        active_table: Active table name
+        col_nullable_map: Dict of column_name -> is_nullable
+        col_defaults_map: Dict of column_name -> has_default_value (optional)
+    """
+    if not col_nullable_map:
+        return True
+
+    mappings_df = st.session_state.get(f"df_{active_table}")
+    if mappings_df is None or mappings_df.empty:
+        return True
+
+    unmapped_required = check_unmapped_required_columns(mappings_df, col_nullable_map, col_defaults_map)
+
+    st.markdown("---")
+    st.markdown("### 🔒 Required Columns Validation")
+
+    with st.container(border=True):
+        if unmapped_required:
+            st.error(
+                f"🚨 {len(unmapped_required)} NOT NULL column(s) without default - NOT mapped yet!",
+                icon="❌"
+            )
+            st.markdown("**These columns need mapping (no default value):**")
+            for col in unmapped_required:
+                st.markdown(f"  - `{col}` 🔒")
+            return False
+        else:
+            required_cols = [col for col, is_nullable in col_nullable_map.items() if not is_nullable]
+            cols_with_defaults = len([col for col, has_def in (col_defaults_map or {}).items() if has_def and not col_nullable_map.get(col, True)])
+            st.success(
+                f"✅ All {len(required_cols)} NOT NULL column(s) are safe! "
+                f"({len(required_cols) - cols_with_defaults} mapped, {cols_with_defaults} have defaults)",
+                icon="✓"
+            )
+            return True
+
+
 def render_bottom_controls(
     active_table: str,
     target_db_input: str | None,
@@ -75,8 +160,8 @@ def _render_validate_button(active_table, target_db_input, target_table_input) -
         st.error(f"❌ Cannot fetch columns: {cols}")
         return
 
-    real_cols = [c["name"] for c in cols]
-    updated_df = validate_mapping_in_table(st.session_state[f"df_{active_table}"], real_cols)
+    real_cols = [c["name"] if isinstance(c, dict) else c for c in cols]
+    updated_df = validate_mapping_in_table(st.session_state[f"df_{active_table}"], cols, show_toast=True)
     st.session_state[f"df_{active_table}"] = updated_df
     import time
     st.session_state.mapper_editor_ver = time.time()

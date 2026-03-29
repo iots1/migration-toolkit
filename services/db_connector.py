@@ -253,22 +253,22 @@ def get_tables_from_datasource(db_type, host, port, db_name, user, password, sch
         return False, str(e)
 
 def get_columns_from_table(db_type, host, port, db_name, user, password, table_name, schema=None):
-    """Retrieves column information from a specific table."""
+    """Retrieves column information from a specific table, including nullable status."""
     try:
         _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
         safe_table = _safe_id(table_name)
 
         if db_type == "MySQL":
             cursor.execute(f"DESCRIBE `{safe_table}`")
-            columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
+            columns = [{"name": row[0], "type": row[1], "is_nullable": row[2].upper() == "YES", "column_default": row[4] if len(row) > 4 else None} for row in cursor.fetchall()]
         elif db_type == "Microsoft SQL Server":
             schema_filter = _safe_id(schema) if schema else 'dbo'
-            cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{safe_table}' AND TABLE_SCHEMA = '{schema_filter}' ORDER BY ORDINAL_POSITION")
-            columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
+            cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{safe_table}' AND TABLE_SCHEMA = '{schema_filter}' ORDER BY ORDINAL_POSITION")
+            columns = [{"name": row[0], "type": row[1], "is_nullable": row[2].upper() == "YES", "column_default": row[3]} for row in cursor.fetchall()]
         elif db_type == "PostgreSQL":
             schema_filter = _safe_id(schema) if schema else 'public'
-            cursor.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{safe_table}' AND table_schema = '{schema_filter}' ORDER BY ordinal_position")
-            columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
+            cursor.execute(f"SELECT column_name, data_type, is_nullable, column_default FROM information_schema.columns WHERE table_name = '{safe_table}' AND table_schema = '{schema_filter}' ORDER BY ordinal_position")
+            columns = [{"name": row[0], "type": row[1], "is_nullable": row[2].upper() == "YES", "column_default": row[3]} for row in cursor.fetchall()]
         else:
             cursor.close()
             return False, f"Unknown Database Type: {db_type}"

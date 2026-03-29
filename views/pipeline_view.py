@@ -407,12 +407,10 @@ def _render_step_execute(form_state, callbacks) -> None:
         if st.button("🛑 Force Mark as Failed", type="secondary"):
             callbacks["on_force_cancel"](run_id)
 
-    if is_running and not run_result:
-        st.info("⏳ Pipeline is running in the background…")
-
-    # Refresh button (UI polling — Challenge 3)
+    # Action buttons row
     c_refresh, c_cancel, c_new = st.columns([1, 1, 1])
-    if c_refresh.button("🔄 Refresh Status", use_container_width=True):
+
+    if c_refresh.button("🔄 Refresh Status", use_container_width=True, type="primary"):
         callbacks["on_poll_status"]()
 
     if is_running and run_id:
@@ -424,44 +422,57 @@ def _render_step_execute(form_state, callbacks) -> None:
 
     st.divider()
 
-    # Per-step status cards
-    if run_result:
-        overall_status = run_result.get("status", "unknown")
-        overall_icon = _STATUS_ICONS.get(overall_status, "❓")
-
-        st.markdown(f"**Overall Status:** {overall_icon} `{overall_status.upper()}`")
-
-        if run_result.get("error_message"):
-            st.error(f"Pipeline error: {run_result['error_message']}")
-
-        steps: dict = run_result.get("steps", {})
-        if steps:
-            st.markdown("#### Step Results")
-            for step_name, info in steps.items():
-                status = info.get("status", "pending")
-                icon = _STATUS_ICONS.get(status, "❓")
-                rows = info.get("rows_processed", 0)
-                duration = info.get("duration_seconds", 0.0)
-                err_msg = info.get("error_message", "")
-
-                with st.container(border=True):
-                    h1, h2, h3 = st.columns([3, 1, 1])
-                    h1.markdown(f"{icon} **{step_name}** — `{status}`")
-                    h2.metric("Rows", f"{rows:,}")
-                    h3.metric("Duration", f"{duration:.1f}s")
-                    if err_msg:
-                        st.error(err_msg)
-        else:
-            st.info("No step data yet — click Refresh Status.")
-
-        if is_completed:
-            st.divider()
-            total_rows = sum(
-                info.get("rows_processed", 0) for info in steps.values()
-            )
-            st.success(
-                f"Pipeline finished with status **{overall_status}**. "
-                f"Total rows migrated: **{total_rows:,}**"
-            )
-    elif not is_running:
+    # Status display — explicit state at every branch
+    if not run_id:
         st.info("Click 🚀 Start Pipeline on the Review step to begin.")
+        return
+
+    if is_running and not run_result:
+        st.info("⏳ Pipeline is running in the background… click **🔄 Refresh Status** to check progress.")
+        return
+
+    if not run_result:
+        st.info("No run data yet — click **🔄 Refresh Status**.")
+        return
+
+    # Show run result
+    overall_status = run_result.get("status", "unknown")
+    overall_icon = _STATUS_ICONS.get(overall_status, "❓")
+
+    st.markdown(f"**Overall Status:** {overall_icon} `{overall_status.upper()}`")
+
+    if run_result.get("error_message"):
+        st.error(f"Pipeline error: {run_result['error_message']}")
+
+    # get_latest_pipeline_run() already parses steps_json → dict under key "steps"
+    steps: dict = run_result.get("steps") or {}
+
+    if steps:
+        st.markdown("#### Step Results")
+        for step_name, info in steps.items():
+            status = info.get("status", "pending")
+            icon = _STATUS_ICONS.get(status, "❓")
+            rows = info.get("rows_processed", 0)
+            duration = info.get("duration_seconds", 0.0)
+            err_msg = info.get("error_message", "")
+
+            with st.container(border=True):
+                h1, h2, h3 = st.columns([3, 1, 1])
+                h1.markdown(f"{icon} **{step_name}** — `{status}`")
+                h2.metric("Rows", f"{rows:,}")
+                h3.metric("Duration", f"{duration:.1f}s")
+                if err_msg:
+                    st.error(err_msg)
+    else:
+        if is_running:
+            st.info("Run started — no step data yet. Click **🔄 Refresh Status** to check.")
+        else:
+            st.info("No step data available.")
+
+    if is_completed:
+        st.divider()
+        total_rows = sum(info.get("rows_processed", 0) for info in steps.values())
+        st.success(
+            f"Pipeline finished with status **{overall_status}**. "
+            f"Total rows migrated: **{total_rows:,}**"
+        )

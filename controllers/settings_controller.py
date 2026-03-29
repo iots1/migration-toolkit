@@ -137,9 +137,14 @@ def _on_delete_ds(ds_id: int) -> None:
     st.rerun()
 
 
-def _on_delete_config(config_name: str) -> tuple[bool, str]:
+def _on_delete_config(conf_name: str = None, config_name: str = None, **kwargs) -> tuple[bool, str]:
     """Delete a saved migration config. Reruns on success."""
-    success, msg = db.delete_config(config_name)
+    # Use the actual parameter name passed (either conf_name or config_name)
+    param_name = conf_name if conf_name is not None else config_name
+    if param_name is None:
+        return False, "No config name provided"
+
+    success, msg = db.delete_config(param_name)
     if success:
         st.rerun()
     return success, msg

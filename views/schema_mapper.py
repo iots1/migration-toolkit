@@ -20,7 +20,7 @@ from views.components.schema_mapper.source_selector import render_source_selecto
 from views.components.schema_mapper.metadata_editor import render_target_selector, render_config_metadata
 from views.components.schema_mapper.mapping_editor import init_editor_state, render_mapping_editor
 from views.components.schema_mapper.history_viewer import render_history_panel, render_compare_panel
-from views.components.schema_mapper.config_actions import render_bottom_controls
+from views.components.schema_mapper.config_actions import render_bottom_controls, render_unmapped_required_check
 
 _DEFAULTS: dict = {
     "mapper_focus_mode": False,
@@ -76,10 +76,18 @@ def render_schema_mapper_page() -> None:
         datasource_names, active_table, saved_config_mode,
     )
 
-    # === 4. Init mapping DataFrame ===
-    init_editor_state(active_df_raw, active_table, loaded_config)
+    # === 4. Build maps for Required auto-check and defaults ===
+    col_nullable_map = {}
+    col_defaults_map = {}
+    if real_target_columns and isinstance(real_target_columns[0], dict) if real_target_columns else False:
+        for col_info in real_target_columns:
+            col_nullable_map[col_info.get("name")] = col_info.get("is_nullable", True)
+            col_defaults_map[col_info.get("name")] = bool(col_info.get("column_default"))
 
-    # === 5. Config Metadata (name, source/target display, batch size) ===
+    # === 5. Init mapping DataFrame ===
+    init_editor_state(active_df_raw, active_table, loaded_config, real_target_columns, col_nullable_map)
+
+    # === 6. Config Metadata (name, source/target display, batch size) ===
     if not st.session_state.mapper_focus_mode:
         current_config_name, is_edit_existing = render_config_metadata(
             active_table=active_table,
@@ -98,10 +106,14 @@ def render_schema_mapper_page() -> None:
 
     default_config_name = current_config_name
 
-    # === 6. AgGrid + Quick Edit ===
-    render_mapping_editor(active_table, real_target_columns, active_df_raw)
+    # === 7. AgGrid + Quick Edit ===
+    render_mapping_editor(active_table, real_target_columns, active_df_raw, col_nullable_map, col_defaults_map)
 
-    # === 7. Bottom Controls (Validate / Preview / Save) ===
+    # === 8. Pre-save validation — Required columns check ===
+    if not st.session_state.mapper_focus_mode:
+        render_unmapped_required_check(active_table, col_nullable_map, col_defaults_map)
+
+    # === 9. Bottom Controls (Validate / Preview / Save) ===
     if not st.session_state.mapper_focus_mode:
         render_bottom_controls(
             active_table=active_table,
@@ -114,6 +126,6 @@ def render_schema_mapper_page() -> None:
             active_df_raw=active_df_raw,
         )
 
-    # === 8. History / Compare Panels ===
+    # === 10. History / Compare Panels ===
     render_history_panel(current_config_name)
     render_compare_panel(current_config_name)

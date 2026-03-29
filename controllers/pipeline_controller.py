@@ -313,13 +313,13 @@ def _on_poll_status() -> None:
     """Fetch latest run snapshot from DB and update session state."""
     pipeline_id = PageState.get("pipeline_current_id")
     if not pipeline_id:
+        st.warning("No pipeline loaded — save and start the pipeline first.")
         return
     latest = db.get_latest_pipeline_run(pipeline_id)
     PageState.set("pipeline_run_result", latest)
     if latest and latest["status"] not in ("running", "pending"):
         PageState.set("pipeline_running", False)
         PageState.set("pipeline_completed", True)
-    st.rerun()
 
 
 def _on_force_cancel(run_id: str) -> None:

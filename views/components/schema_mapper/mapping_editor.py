@@ -21,10 +21,17 @@ import utils.helpers as helpers
 # State Initialisation
 # ---------------------------------------------------------------------------
 
-def init_editor_state(df: pd.DataFrame, table_name: str, config_json: dict | None = None) -> None:
+def init_editor_state(df: pd.DataFrame, table_name: str, config_json: dict | None = None, real_target_columns: list | None = None, col_nullable_map: dict | None = None) -> None:
     """
     Populate session_state[f"df_{table_name}"] from raw profile df + optional config.
     No-op if the state key already exists (prevents overwrite on rerun).
+
+    Args:
+        df: Raw data profile
+        table_name: Active table name
+        config_json: Optional loaded config
+        real_target_columns: List of real target column names
+        col_nullable_map: Dict mapping column name to is_nullable boolean
     """
     state_key = f"df_{table_name}"
     if state_key in st.session_state:
@@ -44,6 +51,7 @@ def init_editor_state(df: pd.DataFrame, table_name: str, config_json: dict | Non
         transformers, validators = [], []
         ignore = False
         default_value = ""
+        required = False
 
         if src_col in mapping_dict:
             rule = mapping_dict[src_col]
@@ -52,9 +60,16 @@ def init_editor_state(df: pd.DataFrame, table_name: str, config_json: dict | Non
             default_value = rule.get("default_value", "")
             transformers = rule.get("transformers", [])
             validators = rule.get("validators", [])
+            required = rule.get("required", False)
         elif not config_json and "date" in str(dtype).lower():
             transformers.append("BUDDHIST_TO_ISO")
             validators.append("VALID_DATE")
+
+        # Auto-check Required if target column is NOT NULL
+        if not ignore and not required and target_col and col_nullable_map:
+            is_col_not_null = not col_nullable_map.get(target_col, True)
+            if is_col_not_null:
+                required = True
 
         rows.append({
             "Status": "",
@@ -64,17 +79,30 @@ def init_editor_state(df: pd.DataFrame, table_name: str, config_json: dict | Non
             "Transformers": ", ".join(transformers),
             "Validators": ", ".join(validators),
             "Default Value": default_value,
-            "Required": False,
+            "Required": required,
             "Ignore": ignore,
         })
 
     st.session_state[state_key] = pd.DataFrame(rows)
 
 
-def validate_mapping_in_table(df_mapping: pd.DataFrame, real_columns: list) -> pd.DataFrame:
-    """Mark each row Status ✅/❌/⚠️/⚪ vs the real target column list."""
+def validate_mapping_in_table(df_mapping: pd.DataFrame, real_columns: list, show_toast: bool = False) -> pd.DataFrame:
+    """
+    Mark each row Status ✅/❌/⚠️/⚪ vs the real target column list.
+
+    Args:
+        df_mapping: Mapping DataFrame
+        real_columns: List of real target columns (dicts or strings)
+        show_toast: Whether to show toast message (True for manual validation, False for real-time)
+    """
     if not real_columns:
         return df_mapping
+
+    # Extract column names (handle both list of dicts and list of strings)
+    if real_columns and isinstance(real_columns[0], dict):
+        col_names = [c.get("name") for c in real_columns]
+    else:
+        col_names = real_columns
 
     df_mapping["Status"] = df_mapping["Status"].astype(str)
     valid_count = invalid_count = 0
@@ -87,17 +115,18 @@ def validate_mapping_in_table(df_mapping: pd.DataFrame, real_columns: list) -> p
         if not tgt:
             df_mapping.at[idx, "Status"] = "⚠️ Empty"
             continue
-        if tgt in real_columns:
+        if tgt in col_names:
             df_mapping.at[idx, "Status"] = "✅ OK"
             valid_count += 1
         else:
             df_mapping.at[idx, "Status"] = "❌ Invalid"
             invalid_count += 1
 
-    if invalid_count > 0:
-        st.toast(f"Validation Finished: {invalid_count} errors found.", icon="❌")
-    else:
-        st.toast(f"Validation Finished: All {valid_count} columns valid.", icon="✅")
+    if show_toast:
+        if invalid_count > 0:
+            st.toast(f"Validation: {invalid_count} errors found.", icon="❌")
+        else:
+            st.toast(f"Validation: All {valid_count} columns valid.", icon="✅")
 
     return df_mapping
 
@@ -110,6 +139,8 @@ def render_mapping_editor(
     active_table: str,
     real_target_columns: list,
     active_df_raw: pd.DataFrame,
+    col_nullable_map: dict | None = None,
+    col_defaults_map: dict | None = None,
 ) -> None:
     """Renders the AgGrid column mapping table + Quick Edit panel."""
     if not st.session_state.mapper_focus_mode:
@@ -119,17 +150,60 @@ def render_mapping_editor(
         st.rerun()
 
     df_to_edit = st.session_state[f"df_{active_table}"].copy()
-    grid_response = _build_aggrid(df_to_edit, active_table, real_target_columns)
+
+    # Add Target Defaults column for display
+    if col_defaults_map and real_target_columns:
+        target_defaults = {}
+        if real_target_columns and isinstance(real_target_columns[0], dict):
+            for col_info in real_target_columns:
+                col_name = col_info.get("name")
+                col_default = col_info.get("column_default")
+                if col_default:
+                    target_defaults[col_name] = str(col_default)[:50]  # Truncate long defaults
+
+        # Add target default to each row
+        df_to_edit["Target Default"] = df_to_edit.apply(
+            lambda row: target_defaults.get(row.get("Target Column"), ""), axis=1
+        )
+
+    # Real-time updates: Auto-required + Status validation
+    if col_nullable_map:
+        for idx, row in df_to_edit.iterrows():
+            if row.get("Target Column") and not row.get("Ignore", False):
+                is_col_not_null = not col_nullable_map.get(row.get("Target Column"), True)
+                if is_col_not_null:
+                    df_to_edit.at[idx, "Required"] = True
+
+    # Always update Status if real columns available
+    if real_target_columns:
+        df_to_edit = validate_mapping_in_table(df_to_edit, real_target_columns, show_toast=False)
+
+    st.session_state[f"df_{active_table}"] = df_to_edit
+
+    grid_response = _build_aggrid(df_to_edit, active_table, real_target_columns, col_nullable_map)
 
     if grid_response["data"] is not None:
         updated_df = pd.DataFrame(grid_response["data"])
+        # Remove display-only columns
+        updated_df = updated_df.drop(columns=["Req", "Target Default"], errors="ignore")
+
         if not updated_df.equals(st.session_state[f"df_{active_table}"]):
+            # Apply auto-required logic
             for idx, row in updated_df.iterrows():
                 if row.get("Ignore", False):
                     updated_df.at[idx, "Required"] = False
+                elif col_nullable_map and row.get("Target Column"):
+                    is_col_not_null = not col_nullable_map.get(row.get("Target Column"), True)
+                    if is_col_not_null:
+                        updated_df.at[idx, "Required"] = True
+
+            # Real-time validation (silent)
+            if real_target_columns:
+                updated_df = validate_mapping_in_table(updated_df, real_target_columns, show_toast=False)
+
             st.session_state[f"df_{active_table}"] = updated_df
 
-    _render_quick_edit(active_table, real_target_columns, active_df_raw, grid_response)
+    _render_quick_edit(active_table, real_target_columns, active_df_raw, grid_response, col_nullable_map)
 
 
 # ---------------------------------------------------------------------------
@@ -179,19 +253,46 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
                     st.session_state["_mapper_needs_rerun"] = True
 
 
-def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_columns: list):
+def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_columns: list, col_nullable_map: dict | None = None):
     gb = GridOptionsBuilder.from_dataframe(df_to_edit)
     gb.configure_column("Status", editable=False, width=90, cellStyle={"textAlign": "center"})
     gb.configure_column("Source Column", editable=False, width=200)
     gb.configure_column("Type", editable=False, width=120)
     if real_target_columns:
+        # Extract column names (handle both list of dicts and list of strings)
+        if isinstance(real_target_columns[0], dict):
+            col_names = [c.get("name") for c in real_target_columns]
+        else:
+            col_names = real_target_columns
         gb.configure_column("Target Column", editable=True, width=250,
                             cellEditor="agSelectCellEditor",
-                            cellEditorParams={"values": real_target_columns})
+                            cellEditorParams={"values": col_names})
     else:
         gb.configure_column("Target Column", editable=True, width=250)
+
     gb.configure_column("Transformers", editable=False, width=200)
     gb.configure_column("Validators", editable=False, width=200)
+
+    # Show Target Default value (read-only)
+    if "Target Default" in df_to_edit.columns:
+        gb.configure_column("Target Default", editable=False, width=150)
+
+    # Replace Required checkbox with icon display
+    def required_icon(row):
+        if row.get("Ignore"):
+            return "⊘"  # Ignored
+        elif col_nullable_map:
+            target_col = row.get("Target Column")
+            if target_col and not col_nullable_map.get(target_col, True):
+                return "🔒"  # NOT NULL (required)
+        return "⚠️"  # Nullable
+
+    df_to_edit["Req"] = df_to_edit.apply(required_icon, axis=1)
+    gb.configure_column("Req", editable=False, width=50, cellStyle={"textAlign": "center"})
+
+    # Hide the Required column (we use Req icon instead)
+    gb.configure_column("Required", hide=True)
+
     gb.configure_column("Ignore", editable=True,
                         cellRenderer="agCheckboxCellRenderer",
                         cellEditor="agCheckboxCellEditor", width=80)
@@ -220,6 +321,7 @@ def _render_quick_edit(
     real_target_columns: list,
     active_df_raw: pd.DataFrame,
     grid_response,
+    col_nullable_map: dict | None = None,
 ) -> None:
     selected_rows = grid_response["selected_rows"]
     if selected_rows is None or len(selected_rows) == 0:
@@ -238,12 +340,36 @@ def _render_quick_edit(
         c1, c2, c3 = st.columns(3)
 
         current_tgt = sel_row.get("Target Column", "")
+        # Extract column names (handle both list of dicts and list of strings)
+        if real_target_columns and isinstance(real_target_columns[0], dict):
+            col_names = [c.get("name") for c in real_target_columns]
+        else:
+            col_names = real_target_columns if real_target_columns else []
         target_opts = list(dict.fromkeys(
-            [current_tgt] + [c for c in real_target_columns if c != current_tgt]
-        )) if real_target_columns else [current_tgt]
+            [current_tgt] + [c for c in col_names if c != current_tgt]
+        )) if col_names else [current_tgt]
 
         with c1:
             new_target = st.selectbox("Target Column", target_opts, index=0, key=f"sb_tgt_{src_col}")
+            # Show nullable status and default value
+            if new_target and col_nullable_map is not None:
+                is_nullable = col_nullable_map.get(new_target, True)
+                status_text = "⚠️ Nullable" if is_nullable else "🔒 NOT NULL"
+
+                # Find default value from real_target_columns
+                target_default = None
+                if real_target_columns and isinstance(real_target_columns[0], dict):
+                    for col_info in real_target_columns:
+                        if col_info.get("name") == new_target:
+                            target_default = col_info.get("column_default")
+                            break
+
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    st.caption(status_text)
+                with col2:
+                    if target_default:
+                        st.caption(f"📌 Default: `{str(target_default)[:30]}`")
 
         current_trans = sel_row.get("Transformers", "")
         def_trans = [t.strip() for t in str(current_trans).split(",") if t.strip() and t.strip() in TRANSFORMER_OPTIONS]
@@ -282,6 +408,11 @@ def _render_quick_edit(
             df_state.at[idx, "Default Value"] = st.session_state.get(dv_key, "")
             if is_ignored:
                 df_state.at[idx, "Required"] = False
+            elif col_nullable_map and new_target:
+                # Auto-check Required if target column is NOT NULL
+                is_col_not_null = not col_nullable_map.get(new_target, True)
+                if is_col_not_null:
+                    df_state.at[idx, "Required"] = True
             st.session_state[f"df_{active_table}"] = df_state
             st.session_state.mapper_editor_ver = time.time()
             st.rerun()

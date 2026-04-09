@@ -5,6 +5,8 @@ Responsibility (SRP): SQL generation + DataFrame transformation pipeline
 for migration batches. No Streamlit dependencies.
 """
 import pandas as pd
+from streamlit import config
+from urllib3 import add_stderr_logger
 from services.transformers import DataTransformer
 
 
@@ -60,52 +62,61 @@ def build_select_query(config: dict, source_table: str, db_type: str = "MySQL") 
 
 def transform_batch(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, list[str]]:
     """
-    Apply transformers, rename source→target columns, drop ignored columns.
+    Apply transformers, rename source→target columns, drop ignored source columns.
 
     Returns:
         (transformed DataFrame, list of BIT column names in target schema)
     """
     df = DataTransformer.apply_transformers_to_batch(df, config)
 
-    # Build rename map; skip columns already created by a transformer
     rename_map: dict[str, str] = {}
     transformer_created: list[str] = []
+    ignored_sources: list[str] = []
 
     for m in config.get("mappings", []):
-        if m.get("ignore", False) or "target" not in m:
+        src = m.get("source")
+        tgt = m.get("target")
+
+        if m.get("ignore", False):
+            if src and src in df.columns:
+                ignored_sources.append(src)
             continue
-        src, tgt = m["source"], m["target"]
+
+        if not src or not tgt:
+            continue
+
         if src not in df.columns or src == tgt:
             continue
+
         if tgt in df.columns:
-            transformer_created.append(src)  # transformer already wrote target col
+            transformer_created.append(src)
         else:
             rename_map[src] = tgt
 
     if transformer_created:
         df = df.drop(columns=transformer_created, errors="ignore")
+
+    if ignored_sources:
+        df = df.drop(columns=ignored_sources, errors="ignore")
+
     if rename_map:
-        df.rename(columns=rename_map, inplace=True)
+        df = df.rename(columns=rename_map)
 
-    # Drop ignored target columns
-    ignored = [m["target"] for m in config.get("mappings", []) if m.get("ignore", False)]
-    df = df.drop(columns=[c for c in ignored if c in df.columns], errors="ignore")
-
-    # Normalise column names (lowercase, deduplicate)
     df.columns = df.columns.str.lower()
     df = df.loc[:, ~df.columns.duplicated(keep="first")]
 
-    # Identify BIT columns and normalise their values to "0"/"1"
     bit_columns = [
         m.get("target", "").lower()
         for m in config.get("mappings", [])
         if "BIT_CAST" in m.get("transformers", []) and m.get("target")
     ]
+
     for col in bit_columns:
         if col in df.columns:
             df[col] = df[col].apply(
                 lambda x: "1" if x in (True, 1, "1") or str(x).lower() == "true" else "0"
             )
+
 
     return df, bit_columns
 

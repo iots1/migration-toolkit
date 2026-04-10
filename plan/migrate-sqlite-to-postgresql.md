@@ -22,6 +22,38 @@
 
 ---
 
+## Pre-Migration Checklist
+
+**Execute BEFORE starting Phase 1:**
+
+```markdown
+### Database Preparation
+- [ ] Install PostgreSQL 18+ (latest version)
+- [ ] Create database: `CREATE DATABASE his_analyzer;`
+- [ ] Create user with permissions: `CREATE USER his_user WITH PASSWORD 'secure_password';`
+- [ ] Grant privileges: `GRANT ALL PRIVILEGES ON DATABASE his_analyzer TO his_user;`
+- [ ] Test connection: `psql -h localhost -U his_user -d his_analyzer`
+
+### Documentation & Baseline
+- [ ] Document current SQLite schema: `sqlite3 migration_tool.db ".schema > schema_backup.sql"`
+- [ ] Record row counts per table for validation
+- [ ] Run full test suite on SQLite baseline: `pytest tests/ --baseline-sqlite`
+
+### Environment Setup
+- [ ] Create `.env` file from `.env.example`
+- [ ] Test `DATABASE_URL` connection locally
+- [ ] Verify `python-dotenv` loads correctly in `app.py`
+- [ ] Test PostgreSQL connection with simple query
+
+### Risk Assessment
+- [ ] Identify active pipeline runs (must not interrupt)
+- [ ] Document all checkpoint files in `migration_checkpoints/`
+- [ ] Plan maintenance window (if production)
+- [ ] Prepare rollback procedure
+```
+
+---
+
 ## Phase 1: PostgreSQL Migration — Config & Connection
 
 ### 1A. `config.py` — Replace `DB_FILE` with `DATABASE_URL`
@@ -81,6 +113,8 @@ def dispose_engine() -> None:
 
 ```env
 DATABASE_URL=postgresql://his_user:your_password@localhost:5432/his_analyzer
+HIS_ANALYTICS_ENV=development
+LOG_LEVEL=INFO
 ```
 
 Add `python-dotenv` to `requirements.txt`.
@@ -90,6 +124,64 @@ In `app.py`, add before `db.init_db()`:
 from dotenv import load_dotenv
 load_dotenv()
 ```
+
+### 1D. Thread-Safe Connection Pattern
+
+**Critical**: SQLAlchemy `Engine` is thread-safe, but `Connection` objects are NOT.
+
+```python
+# repositories/connection.py — Thread-safe wrapper
+from contextlib import contextmanager
+from sqlalchemy import Engine
+from typing import Generator, Any
+
+@contextmanager
+def get_connection() -> Generator[Any, None, None]:
+    """
+    Thread-safe connection context manager.
+
+    Usage:
+        with get_connection() as conn:
+            result = conn.execute(text("SELECT ..."))
+    """
+    engine = get_engine()
+    with engine.connect() as conn:
+        yield conn
+
+@contextmanager
+def get_transaction() -> Generator[Any, None, None]:
+    """
+    Thread-safe transaction context manager (auto-commit).
+
+    Usage:
+        with get_transaction() as conn:
+            conn.execute(text("INSERT ..."))
+            # Auto-commits on success, rolls back on exception
+    """
+    engine = get_engine()
+    with engine.begin() as conn:
+        yield conn
+```
+
+**Background Thread Safety** (for `pipeline_service.py`):
+
+```python
+# services/pipeline_service.py
+from repositories.connection import get_transaction
+
+class PipelineExecutor:
+    def execute_step(self, step: PipelineStep):
+        # Each thread gets its own connection
+        with get_transaction() as conn:
+            conn.execute(text("UPDATE pipeline_runs SET status = 'running' ..."))
+            # ... work ...
+        # Connection automatically closed after with block
+```
+
+**Why this matters:**
+- `pipeline_service.py` runs background threads via `threading.Thread`
+- Reusing connection objects across threads → race conditions + crashes
+- Each thread must get its own connection via `get_transaction()`
 
 ---
 
@@ -123,49 +215,60 @@ TABLES_DDL = [
         port VARCHAR(10),
         dbname VARCHAR(255),
         username VARCHAR(255),
-        password VARCHAR(255)
+        password VARCHAR(255),
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     )""",
     """CREATE TABLE IF NOT EXISTS configs (
-        id VARCHAR(36) PRIMARY KEY,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         config_name VARCHAR(255) UNIQUE NOT NULL,
         table_name VARCHAR(255),
         json_data TEXT,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     )""",
     """CREATE TABLE IF NOT EXISTS config_histories (
-        id VARCHAR(36) PRIMARY KEY,
-        config_id VARCHAR(36) NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        config_id UUID NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
         version INTEGER NOT NULL,
         json_data TEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     )""",
     """CREATE TABLE IF NOT EXISTS pipelines (
-        id VARCHAR(36) PRIMARY KEY,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         name VARCHAR(255) UNIQUE NOT NULL,
         description TEXT DEFAULT '',
         json_data TEXT,
         source_datasource_id INTEGER,
         target_datasource_id INTEGER,
         error_strategy VARCHAR(50) DEFAULT 'fail_fast',
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     )""",
     """CREATE TABLE IF NOT EXISTS pipeline_runs (
-        id VARCHAR(36) PRIMARY KEY,
-        pipeline_id VARCHAR(36) NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        pipeline_id UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
         status VARCHAR(50) DEFAULT 'pending',
-        started_at TIMESTAMP,
-        completed_at TIMESTAMP,
+        started_at TIMESTAMP WITH TIME ZONE,
+        completed_at TIMESTAMP WITH TIME ZONE,
         steps_json TEXT,
-        error_message TEXT
+        error_message TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
     )""",
 ]
 
 def init_db() -> None:
+    # Enable UUID extension if not available
     with get_engine().begin() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\""))
         for ddl in TABLES_DDL:
             conn.execute(text(ddl))
 ```
+
+**Key changes from SQLite:**
+- `VARCHAR(36)` → `UUID` with `gen_random_uuid()` default
+- `TIMESTAMP` → `TIMESTAMP WITH TIME ZONE` (timezone-aware)
+- Added `created_at` to `datasources` table for audit trail
+- Added `created_at` to `pipeline_runs` for better tracking
 
 ### 2C. `repositories/datasource_repo.py` — Example conversion
 
@@ -255,8 +358,14 @@ def delete(id) -> None:
 ### 2E. `repositories/config_repo.py` — Upsert pattern
 
 ```python
+import uuid
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from repositories.connection import get_engine
+
 def save(config_name, table_name, json_data) -> tuple[bool, str]:
-    config_id = str(uuid.uuid4())
+    # PostgreSQL's UUID type handles uuid.UUID objects natively via psycopg2
+    config_id = uuid.uuid4()  # Keep as UUID object, don't use str()
     with get_engine().begin() as conn:
         result = conn.execute(
             text("SELECT id FROM configs WHERE config_name = :name"),
@@ -265,7 +374,7 @@ def save(config_name, table_name, json_data) -> tuple[bool, str]:
         existing = result.fetchone()
 
         if existing:
-            config_id = existing[0]
+            config_id = existing[0]  # Returns UUID object
             conn.execute(text("""
                 UPDATE configs SET table_name=:table_name, json_data=:json_data,
                     updated_at=CURRENT_TIMESTAMP
@@ -273,10 +382,16 @@ def save(config_name, table_name, json_data) -> tuple[bool, str]:
             """), {"id": config_id, "table_name": table_name, "json_data": json_data})
         else:
             conn.execute(text("""
-                INSERT INTO configs (id, config_name, table_name, json_data, updated_at)
-                VALUES (:id, :config_name, :table_name, :json_data, CURRENT_TIMESTAMP)
-            """), {"id": config_id, "config_name": config_name,
+                INSERT INTO configs (config_name, table_name, json_data, updated_at)
+                VALUES (:config_name, :table_name, :json_data, CURRENT_TIMESTAMP)
+            """), {"config_name": config_name,  # Let DB gen UUID via DEFAULT
                    "table_name": table_name, "json_data": json_data})
+            # Get the generated UUID
+            result = conn.execute(
+                text("SELECT id FROM configs WHERE config_name = :name"),
+                {"name": config_name}
+            )
+            config_id = result.scalar()
 
         # Version history
         ver_result = conn.execute(
@@ -285,35 +400,45 @@ def save(config_name, table_name, json_data) -> tuple[bool, str]:
         )
         next_version = ver_result.scalar() + 1
         conn.execute(text("""
-            INSERT INTO config_histories (id, config_id, version, json_data, created_at)
-            VALUES (:id, :config_id, :version, :json_data, CURRENT_TIMESTAMP)
-        """), {"id": str(uuid.uuid4()), "config_id": config_id,
+            INSERT INTO config_histories (config_id, version, json_data, created_at)
+            VALUES (:config_id, :version, :json_data, CURRENT_TIMESTAMP)
+        """), {"config_id": config_id,  # UUID object passed directly
                "version": next_version, "json_data": json_data})
 
     return True, f"✅ บันทึก config '{config_name}' สำเร็จ (version {next_version})"
 ```
 
+**UUID handling notes:**
+- `psycopg2` automatically converts Python `uuid.UUID` ↔ PostgreSQL `UUID` type
+- Let PostgreSQL generate UUID via `DEFAULT gen_random_uuid()` when possible
+- No need for `str(uuid.uuid4())` anymore — keeps types consistent
+- For manual UUID generation, use `uuid.uuid4()` (returns `UUID` object)
+
 ### 2F. `repositories/pipeline_repo.py` — Upsert with ON CONFLICT
 
 ```python
+import uuid
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
+from repositories.connection import get_engine
+
 def save(name, description, json_data, source_ds_id, target_ds_id, error_strategy) -> tuple[bool, str]:
-    pipeline_id = str(uuid.uuid4())
     try:
         with get_engine().begin() as conn:
             conn.execute(text("""
-                INSERT INTO pipelines (id, name, description, json_data,
+                INSERT INTO pipelines (name, description, json_data,
                     source_datasource_id, target_datasource_id, error_strategy, updated_at)
-                VALUES (:id, :name, :description, :json_data,
+                VALUES (:name, :description, :json_data,
                     :src_ds, :tgt_ds, :strategy, CURRENT_TIMESTAMP)
                 ON CONFLICT (name) DO UPDATE SET
-                    id = EXCLUDED.id,
+                    name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     json_data = EXCLUDED.json_data,
                     source_datasource_id = EXCLUDED.source_datasource_id,
                     target_datasource_id = EXCLUDED.target_datasource_id,
                     error_strategy = EXCLUDED.error_strategy,
                     updated_at = CURRENT_TIMESTAMP
-            """), {"id": pipeline_id, "name": name, "description": description,
+            """), {"name": name, "description": description,
                    "json_data": json_data, "src_ds": source_ds_id,
                    "tgt_ds": target_ds_id, "strategy": error_strategy})
         return True, f"✅ Pipeline '{name}' บันทึกสำเร็จ"
@@ -321,20 +446,29 @@ def save(name, description, json_data, source_ds_id, target_ds_id, error_strateg
         return False, f"❌ Pipeline '{name}' มีอยู่แล้ว"
 ```
 
+**Note:** Removed explicit `id` parameter — let PostgreSQL generate via `gen_random_uuid()` default.
+
 ### 2G. `repositories/pipeline_run_repo.py` — Thread-safe writes
 
 ```python
-def save(pipeline_id, status, steps_json) -> str:
-    run_id = str(uuid.uuid4())
+import uuid
+from sqlalchemy import text
+from repositories.connection import get_engine
+
+def save(pipeline_id: uuid.UUID, status: str, steps_json: str) -> uuid.UUID:
+    """Save a new pipeline run. Returns generated run_id as UUID."""
     with get_engine().begin() as conn:
         conn.execute(text("""
-            INSERT INTO pipeline_runs (id, pipeline_id, status, started_at, steps_json)
-            VALUES (:id, :pipeline_id, :status, CURRENT_TIMESTAMP, :steps_json)
-        """), {"id": run_id, "pipeline_id": pipeline_id,
+            INSERT INTO pipeline_runs (pipeline_id, status, started_at, steps_json)
+            VALUES (:pipeline_id, :status, CURRENT_TIMESTAMP, :steps_json)
+            RETURNING id
+        """), {"pipeline_id": pipeline_id,  # UUID object
                "status": status, "steps_json": steps_json})
-    return run_id
+        result = conn.execute(text("SELECT lastval()"))  # Get generated UUID
+        return result.scalar()
 
-def update(run_id, status, steps_json=None, error_message=None) -> None:
+def update(run_id: uuid.UUID, status: str, steps_json: str = None, error_message: str = None) -> None:
+    """Update pipeline run status. Thread-safe."""
     with get_engine().begin() as conn:
         conn.execute(text("""
             UPDATE pipeline_runs
@@ -344,15 +478,128 @@ def update(run_id, status, steps_json=None, error_message=None) -> None:
                 completed_at = CASE WHEN :status IN ('completed','failed','partial')
                     THEN CURRENT_TIMESTAMP ELSE completed_at END
             WHERE id = :id
-        """), {"id": run_id, "status": status,
+        """), {"id": run_id,  # UUID object
+               "status": status,
                "steps_json": steps_json, "error_message": error_message})
 ```
 
-**Key change:** PostgreSQL's `CASE WHEN` replaces SQLite's `CASE WHEN ? THEN ? ELSE` positional params with named `:status` — cleaner and less error-prone.
+**Key changes:**
+- Return types use `uuid.UUID` instead of `str`
+- `RETURNING id` clause to get generated UUID
+- Thread-safe: each call gets its own transaction via `get_engine().begin()`
 
 ### 2H. Delete `database.py`
 
 After all repos are verified, delete `database.py` entirely. All 15 importers will point to new repos (see Phase 7).
+
+### 2I. Checkpoint Handling Strategy
+
+**Critical Issue**: `services/checkpoint_manager.py` saves pipeline state to disk via `pickle.dumps()`. Checkpoint files created during SQLite era will be **incompatible** after PostgreSQL migration due to:
+
+1. UUID type changes (TEXT → native UUID)
+2. Schema changes (new columns, different defaults)
+
+**Solution: Versioned Checkpoint Format**
+
+```python
+# services/checkpoint_manager.py
+import pickle
+from pathlib import Path
+from typing import Any
+import uuid
+
+CHECKPOINT_VERSION = 2  # v1 = SQLite era, v2 = PostgreSQL era
+
+class CheckpointManager:
+    CHECKPOINT_DIR = Path("migration_checkpoints")
+
+    def save_checkpoint(self, pipeline_id: uuid.UUID, data: dict) -> str:
+        """Save checkpoint with version metadata."""
+        self.CHECKPOINT_DIR.mkdir(exist_ok=True)
+        filename = f"{pipeline_id}_checkpoint_v{CHECKPOINT_VERSION}.pkl"
+
+        checkpoint = {
+            "version": CHECKPOINT_VERSION,
+            "pipeline_id": str(pipeline_id),  # Always store as string
+            "timestamp": datetime.now().isoformat(),
+            "data": data
+        }
+
+        filepath = self.CHECKPOINT_DIR / filename
+        with open(filepath, "wb") as f:
+            pickle.dump(checkpoint, f)
+
+        return str(filepath)
+
+    def load_checkpoint(self, pipeline_id: uuid.UUID) -> dict | None:
+        """Load checkpoint, handling legacy v1 (SQLite) and v2 (PostgreSQL)."""
+        # Try v2 first
+        filepath_v2 = self.CHECKPOINT_DIR / f"{pipeline_id}_checkpoint_v2.pkl"
+        if filepath_v2.exists():
+            with open(filepath_v2, "rb") as f:
+                checkpoint = pickle.load(f)
+            if checkpoint["version"] == 2:
+                return checkpoint["data"]
+
+        # Fallback to v1 (SQLite era)
+        filepath_v1 = self.CHECKPOINT_DIR / f"{pipeline_id}_checkpoint.pkl"
+        if filepath_v1.exists():
+            with open(filepath_v1, "rb") as f:
+                checkpoint = pickle.load(f)
+            # v1 has no version field; entire dict is the data
+            return self._migrate_v1_to_v2(checkpoint)
+
+        return None
+
+    def _migrate_v1_to_v2(self, v1_data: dict) -> dict:
+        """Migrate v1 checkpoint to v2 format."""
+        # Convert string IDs back to UUID if needed
+        if "pipeline_id" in v1_data:
+            v1_data["pipeline_id"] = uuid.UUID(v1_data["pipeline_id"])
+        if "run_id" in v1_data:
+            v1_data["run_id"] = uuid.UUID(v1_data["run_id"])
+        return v1_data
+
+    def clear_legacy_checkpoints(self) -> int:
+        """Remove v1 checkpoint files after successful migration."""
+        count = 0
+        for filepath in self.CHECKPOINT_DIR.glob("*_checkpoint.pkl"):
+            # Skip v2 files
+            if "_checkpoint_v2.pkl" not in filepath.name:
+                filepath.unlink()
+                count += 1
+        return count
+```
+
+**Migration Strategy**:
+
+```python
+# scripts/migrate_checkpoints.py — One-time migration script
+def migrate_all_checkpoints():
+    """Convert all v1 checkpoints to v2 format."""
+    from services.checkpoint_manager import CheckpointManager
+
+    mgr = CheckpointManager()
+    checkpoint_dir = mgr.CHECKPOINT_DIR
+
+    for filepath in checkpoint_dir.glob("*_checkpoint.pkl"):
+        if "_checkpoint_v2.pkl" in filepath.name:
+            continue
+
+        # Load v1
+        with open(filepath, "rb") as f:
+            v1_data = pickle.load(f)
+
+        # Extract pipeline_id from filename
+        pipeline_id = filepath.name.replace("_checkpoint.pkl", "")
+
+        # Save as v2
+        mgr.save_checkpoint(uuid.UUID(pipeline_id), v1_data)
+
+        # Remove v1
+        filepath.unlink()
+        print(f"Migrated checkpoint: {pipeline_id}")
+```
 
 ---
 
@@ -920,7 +1167,7 @@ def _on_start_pipeline(self):
 ### 10A. `scripts/migrate_sqlite_to_pg.py`
 
 ```python
-"""One-time migration: SQLite → PostgreSQL
+"""One-time migration: SQLite → PostgreSQL with validation
 
 Usage:
     DATABASE_URL=postgresql://user:pass@localhost:5432/his_analyzer \
@@ -929,16 +1176,155 @@ Usage:
 import sqlite3
 import os
 import sys
+import uuid
+import pandas as pd
 from sqlalchemy import text
+from repositories.connection import get_engine
+from repositories.base import init_db
+
+def get_row_counts(conn, table: str) -> int:
+    """Get row count for a table."""
+    result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+    return result.scalar()
+
+def validate_migration(sqlite_counts: dict, pg_counts: dict) -> bool:
+    """Validate that all rows were migrated."""
+    all_valid = True
+    for table, sqlite_count in sqlite_counts.items():
+        pg_count = pg_counts.get(table, 0)
+        if sqlite_count != pg_count:
+            print(f"❌ Row count mismatch in {table}: SQLite={sqlite_count}, PG={pg_count}")
+            all_valid = False
+        else:
+            print(f"✅ {table}: {sqlite_count} rows migrated")
+    return all_valid
+
+def migrate_table(source_conn, table_name: str, columns: list[str], id_column: str = "id"):
+    """Migrate a single table from SQLite to PostgreSQL."""
+    # Read from SQLite
+    df = pd.read_sql_query(f"SELECT {', '.join(columns)} FROM {table_name}", source_conn)
+
+    # Convert UUID strings to UUID objects for relevant tables
+    if table_name in ["configs", "config_histories", "pipelines", "pipeline_runs"]:
+        for col in ["id", "config_id", "pipeline_id"]:
+            if col in df.columns:
+                df[col] = df[col].apply(lambda x: uuid.UUID(x) if pd.notna(x) and x else None)
+
+    # Write to PostgreSQL
+    with get_engine().begin() as conn:
+        for _, row in df.iterrows():
+            # Build column names and placeholders
+            cols = row.index.tolist()
+            placeholders = [f":{col}" for col in cols]
+
+            # Build INSERT query
+            query = f"""
+                INSERT INTO {table_name} ({', '.join(cols)})
+                VALUES ({', '.join(placeholders)})
+                ON CONFLICT ({id_column}) DO NOTHING
+            """
+
+            # Convert row to dict, handling NaN/None
+            row_dict = {col: (None if pd.isna(val) else val) for col, val in row.items()}
+            conn.execute(text(query), row_dict)
+
+    return len(df)
 
 def migrate():
+    print("🚀 Starting SQLite → PostgreSQL migration...")
+
+    # Connect to source
     sqlite_path = os.path.join(os.path.dirname(__file__), '..', 'migration_tool.db')
     if not os.path.exists(sqlite_path):
-        print("No migration_tool.db found — nothing to migrate")
-        return
+        print("❌ No migration_tool.db found — nothing to migrate")
+        sys.exit(1)
 
     source = sqlite3.connect(sqlite_path)
-    # ... read from SQLite, insert to PG via repositories ...
+
+    # Record source row counts
+    print("\n📊 Recording source row counts...")
+    sqlite_counts = {}
+    tables = ["datasources", "configs", "config_histories", "pipelines", "pipeline_runs"]
+    for table in tables:
+        try:
+            count = pd.read_sql_query(f"SELECT COUNT(*) FROM {table}", source).iloc[0, 0]
+            sqlite_counts[table] = count
+        except Exception as e:
+            print(f"⚠️  Warning: Could not count {table}: {e}")
+            sqlite_counts[table] = 0
+
+    # Initialize PostgreSQL schema
+    print("\n🔧 Initializing PostgreSQL schema...")
+    init_db()
+
+    # Migrate each table
+    print("\n📦 Migrating data...")
+    migrated_counts = {}
+
+    # datasources (simple migration)
+    count = migrate_table(
+        source,
+        "datasources",
+        ["id", "name", "db_type", "host", "port", "dbname", "username", "password"],
+        "name"  # unique constraint on name
+    )
+    migrated_counts["datasources"] = count
+
+    # configs (with UUID handling)
+    count = migrate_table(
+        source,
+        "configs",
+        ["id", "config_name", "table_name", "json_data", "updated_at"],
+        "config_name"
+    )
+    migrated_counts["configs"] = count
+
+    # config_histories
+    count = migrate_table(
+        source,
+        "config_histories",
+        ["id", "config_id", "version", "json_data", "created_at"],
+        "id"
+    )
+    migrated_counts["config_histories"] = count
+
+    # pipelines
+    count = migrate_table(
+        source,
+        "pipelines",
+        ["id", "name", "description", "json_data", "source_datasource_id",
+         "target_datasource_id", "error_strategy", "created_at", "updated_at"],
+        "name"
+    )
+    migrated_counts["pipelines"] = count
+
+    # pipeline_runs
+    count = migrate_table(
+        source,
+        "pipeline_runs",
+        ["id", "pipeline_id", "status", "started_at", "completed_at", "steps_json", "error_message"],
+        "id"
+    )
+    migrated_counts["pipeline_runs"] = count
+
+    # Verify migration
+    print("\n✅ Validating migration...")
+    pg_counts = {}
+    with get_engine().connect() as conn:
+        for table in tables:
+            pg_counts[table] = get_row_counts(conn, table)
+
+    all_valid = validate_migration(sqlite_counts, pg_counts)
+
+    if all_valid:
+        print("\n🎉 Migration completed successfully!")
+        print(f"   Total rows migrated: {sum(migrated_counts.values())}")
+        print("\n⚠️  IMPORTANT: Keep migration_tool.db for backup until validation is complete")
+    else:
+        print("\n❌ Migration validation failed! Please review errors above.")
+        sys.exit(1)
+
+    source.close()
 
 if __name__ == "__main__":
     migrate()
@@ -951,6 +1337,8 @@ Remove:
 migration_tool.db
 migration_tool.db.backup
 ```
+
+**Note**: Keep `migration_tool.db` archived externally until PostgreSQL is fully validated in production.
 
 ### 10C. `services/db_connector.py` cleanup
 
@@ -1189,3 +1577,169 @@ his-analyzer/
 - [ ] `database.py` deleted with no remaining imports
 - [ ] `.gitignore` updated
 - [ ] Full E2E: every Streamlit page functional
+
+---
+
+## Post-Migration Verification
+
+**Execute AFTER Phase 10 completes:**
+
+```markdown
+### Data Integrity Validation
+- [ ] Row count validation per table
+  ```python
+  # scripts/validate_migration.py
+  source_counts = {"datasources": 5, "configs": 12, "pipelines": 3, ...}
+  target_counts = get_postgres_counts()
+  assert source_counts == target_counts
+  ```
+- [ ] Sample data comparison (random 10 rows per table)
+- [ ] UUID format validation (all IDs valid UUIDs)
+- [ ] Timestamp validation (all `created_at`/`updated_at` populated)
+- [ ] Foreign key integrity (all references valid)
+
+### Functional Testing
+- [ ] Create new datasource via UI → verify in PostgreSQL
+- [ ] Create new config → verify version history works
+- [ ] Create new pipeline → execute → verify pipeline_runs table
+- [ ] Load existing config → verify JSON data intact
+- [ ] Test checkpoint save/load → verify v2 format
+
+### Performance Baseline
+- [ ] Measure query times: `SELECT * FROM configs`, `SELECT * FROM datasources`
+- [ ] Compare with SQLite baseline (should be similar or faster)
+- [ ] Test connection pooling under load (10 concurrent connections)
+
+### Checkpoint Migration
+- [ ] Run `scripts/migrate_checkpoints.py`
+- [ ] Verify all v1 checkpoints converted to v2
+- [ ] Test resume from migrated checkpoint
+- [ ] Clear v1 files after confirmation
+
+---
+
+## Rollback Strategy
+
+| PR | Rollback Trigger | Rollback Action | Recovery Time |
+|----|-----------------|-----------------|---------------|
+| **PR 1** | Repositories not working | Revert code; switch `DATABASE_URL` back to SQLite | 5 min |
+| **PR 2** | Dialect registry broken | Revert code; falls back to hardcoded if/elif | 10 min |
+| **PR 3** | Transformers not found | Revert code; `transformers/__init__.py` re-exports old class | 5 min |
+| **PR 4** | DI injection fails | Revert code; services import concrete repos again | 15 min |
+| **PR 5** | Views not rendering | Revert code; restore legacy view files | 20 min |
+| **PR 6** | Data migration corrupted | Restore PostgreSQL from pre-migration dump; rerun script | 30 min |
+
+**Emergency Rollback Procedure** (if entire migration fails):
+
+```bash
+# 1. Stop application
+pkill -f streamlit
+
+# 2. Revert all PRs
+git revert <PR6-hash>..<PR1-hash>
+
+# 3. Switch back to SQLite
+export DATABASE_URL=""  # Clear to trigger fallback
+# Or update .env to point to SQLite
+
+# 4. Restart application
+streamlit run app.py
+
+# 5. Verify all pages functional
+```
+
+---
+
+## Integration Test Strategy
+
+### New Test Suite: `tests/integration/`
+
+```python
+# tests/integration/test_repository_migration.py
+import pytest
+import uuid
+from repositories.datasource_repo import DatasourceRepository
+from repositories.config_repo import ConfigRepository
+from repositories.connection import get_engine
+
+@pytest.fixture(scope="module")
+def test_engine():
+    """Setup PostgreSQL test database."""
+    # Use test database URL
+    os.environ["DATABASE_URL"] = "postgresql://test_user@localhost:5432/his_analyzer_test"
+    engine = get_engine()
+    yield engine
+    # Cleanup after all tests
+    dispose_engine()
+
+def test_datasource_crud_postgresql(test_engine):
+    """Test datasource CRUD with PostgreSQL."""
+    repo = DatasourceRepository()
+
+    # Create
+    ok, msg = repo.save("test_ds", "MySQL", "localhost", "3306", "testdb", "user", "pass")
+    assert ok
+
+    # Read
+    df = repo.get_all()
+    assert len(df) > 0
+    assert "test_ds" in df["name"].values
+
+    # Update
+    row = df[df["name"] == "test_ds"].iloc[0]
+    ds_id = row["id"]
+    ok, msg = repo.update(ds_id, "test_ds_updated", "PostgreSQL", ...)
+    assert ok
+
+    # Delete
+    repo.delete(ds_id)
+    df_after = repo.get_all()
+    assert "test_ds" not in df_after["name"].values
+
+def test_config_versioning_postgresql(test_engine):
+    """Test config version history with PostgreSQL."""
+    repo = ConfigRepository()
+
+    # First save
+    repo.save("test_config", "test_table", '{"mappings": []}')
+
+    # Update (should create v2)
+    repo.save("test_config", "test_table", '{"mappings": [{"src": "a", "tgt": "b"}]}')
+
+    # Verify versions
+    history = repo.get_history("test_config")
+    assert len(history) == 2
+    assert history.iloc[0]["version"] == 2
+    assert history.iloc[1]["version"] == 1
+
+def test_uuid_types_postgresql(test_engine):
+    """Verify UUID type handling."""
+    from repositories.config_repo import ConfigRepository
+
+    repo = ConfigRepository()
+    repo.save("uuid_test", "table1", '{"data": "value"}')
+
+    # Get content should return UUID object, not string
+    content = repo.get_content("uuid_test")
+    assert "id" in content
+    # Verify it's a UUID (or string representation)
+    import uuid
+    try:
+        uuid.UUID(content["id"])  # Will raise if invalid
+    except ValueError:
+        pytest.fail("Config ID is not a valid UUID")
+```
+
+### Test Execution
+
+```bash
+# Run integration tests only
+pytest tests/integration/ -v
+
+# Run with coverage
+pytest tests/integration/ --cov=repositories --cov-report=html
+
+# Run against test database
+DATABASE_URL=postgresql://test_user@localhost:5432/his_analyzer_test \
+    pytest tests/integration/ -v
+```

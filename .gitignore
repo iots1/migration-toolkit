@@ -12,8 +12,10 @@ mini_his/full_his_mockup.sql
 
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
+**/*.pyc
 *.so
 .Python
 build/

@@ -1,7 +1,7 @@
 .PHONY: help setup install run run-reload run-no-reload clean test test-simple test-column test-suite
 
 # Default Python version
-PYTHON := python3.12
+PYTHON := python3.11
 VENV := venv
 BIN := $(VENV)/bin
 

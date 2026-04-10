@@ -254,23 +254,32 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
 
 
 def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_columns: list, col_nullable_map: dict | None = None):
-    # Convert ALL string-like columns to plain numpy object dtype
-    # pd.api.types.is_string_dtype covers both object and pd.StringDtype (LargeUtf8)
-    import numpy as np
-    for col in df_to_edit.columns:
-        if pd.api.types.is_string_dtype(df_to_edit[col]):
-            df_to_edit[col] = np.array(df_to_edit[col].fillna("").tolist(), dtype=object)
+    # 0. สร้าง Copy เสมอเพื่อความปลอดภัยของ State
+    df_safe = df_to_edit.copy()
 
-    gb = GridOptionsBuilder.from_dataframe(df_to_edit)
+    # 1. ไม่ต้องใช้ Numpy Object Hack แล้ว! แค่ทำเป็น String ธรรมดาก็พอ
+    for col in df_safe.columns:
+        if pd.api.types.is_string_dtype(df_safe[col]):
+            df_safe[col] = df_safe[col].fillna("").astype(str)
+
+    # 2. ป้องกันค่า NaN ในคอลัมน์ Boolean (Arrow จะพังถ้ามี NaN ใน Boolean)
+    if "Ignore" in df_safe.columns:
+        df_safe["Ignore"] = df_safe["Ignore"].fillna(False).astype(bool)
+    if "Required" in df_safe.columns:
+        df_safe["Required"] = df_safe["Required"].fillna(False).astype(bool)
+
+    gb = GridOptionsBuilder.from_dataframe(df_safe)
     gb.configure_column("Status", editable=False, width=90, cellStyle={"textAlign": "center"})
     gb.configure_column("Source Column", editable=False, width=200)
     gb.configure_column("Type", editable=False, width=120)
+    
     if real_target_columns:
-        # Extract column names (handle both list of dicts and list of strings)
+        # ป้องกันค่า None ใน Dropdown
         if isinstance(real_target_columns[0], dict):
-            col_names = [c.get("name") for c in real_target_columns]
+            col_names = [str(c.get("name", "")) for c in real_target_columns if c.get("name")]
         else:
-            col_names = real_target_columns
+            col_names = [str(c) for c in real_target_columns if c]
+            
         gb.configure_column("Target Column", editable=True, width=250,
                             cellEditor="agSelectCellEditor",
                             cellEditorParams={"values": col_names})
@@ -281,23 +290,20 @@ def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_colum
     gb.configure_column("Validators", editable=False, width=200)
 
     # Show Target Default value (read-only)
-    if "Target Default" in df_to_edit.columns:
+    if "Target Default" in df_safe.columns:
         gb.configure_column("Target Default", editable=False, width=150)
 
-    # Replace Required checkbox with icon display
     def required_icon(row):
         if row.get("Ignore"):
-            return "⊘"  # Ignored
+            return "⊘"  
         elif col_nullable_map:
             target_col = row.get("Target Column")
             if target_col and not col_nullable_map.get(target_col, True):
-                return "🔒"  # NOT NULL (required)
-        return "⚠️"  # Nullable
+                return "🔒"  
+        return "⚠️"  
 
-    df_to_edit["Req"] = df_to_edit.apply(required_icon, axis=1)
+    df_safe["Req"] = df_safe.apply(required_icon, axis=1)
     gb.configure_column("Req", editable=False, width=50, cellStyle={"textAlign": "center"})
-
-    # Hide the Required column (we use Req icon instead)
     gb.configure_column("Required", hide=True)
 
     gb.configure_column("Ignore", editable=True,
@@ -306,16 +312,23 @@ def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_colum
     gb.configure_selection("single")
     gb.configure_grid_options(suppressColumnVirtualisation=True)
 
-    grid_height = 500 if st.session_state.mapper_focus_mode else 400
+    grid_height = 500 if st.session_state.get("mapper_focus_mode") else 400
     editor_ver = st.session_state.get("mapper_editor_ver", "v1")
     source_ctx = st.session_state.get("mapper_source_db", "unknown")
     unique_key = f"aggrid_{source_ctx}_{active_table}_{editor_ver}"
 
+    # 3. บังคับ theme="streamlit" ป้องกันตารางล่องหน
     return AgGrid(
-        df_to_edit, gridOptions=gb.build(), height=grid_height, width="100%",
+        df_safe, 
+        gridOptions=gb.build(), 
+        height=grid_height, 
+        width="100%",
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_mode=GridUpdateMode.MODEL_CHANGED,
-        fit_columns_on_grid_load=False, allow_unsafe_jscode=True, key=unique_key,
+        fit_columns_on_grid_load=False, 
+        allow_unsafe_jscode=True, 
+        key=unique_key,
+        theme="streamlit"  
     )
 
 

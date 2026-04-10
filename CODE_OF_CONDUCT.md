@@ -8,11 +8,11 @@ This document establishes strict MVC (Model-View-Controller) architectural conve
 
 ## Quick Reference: The Three Layers
 
-| Layer | Location | What It Does | What It CANNOT Do |
-|-------|----------|--------------|------------------|
-| **Model** | `models/`, `repositories/`, `services/`, `protocols/` | Pure Python: data structures, business logic, DB queries via repositories | ❌ NO `import streamlit` |
-| **View** | `views/`, `views/components/` | Streamlit rendering ONLY: `st.button`, `st.text_input`, etc. | ❌ NO `import database`, `import services.*`, direct `st.session_state` manipulation |
-| **Controller** | `controllers/` | Orchestrate: init state, fetch data via repositories, define callbacks, call view | ✅ CAN import repositories, services, models, CAN manipulate `st.session_state` |
+| Layer          | Location                                              | What It Does                                                                      | What It CANNOT Do                                                                    |
+| -------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| **Model**      | `models/`, `repositories/`, `services/`, `protocols/` | Pure Python: data structures, business logic, DB queries via repositories         | ❌ NO `import streamlit`                                                             |
+| **View**       | `views/`, `views/components/`                         | Streamlit rendering ONLY: `st.button`, `st.text_input`, etc.                      | ❌ NO `import database`, `import services.*`, direct `st.session_state` manipulation |
+| **Controller** | `controllers/`                                        | Orchestrate: init state, fetch data via repositories, define callbacks, call view | ✅ CAN import repositories, services, models, CAN manipulate `st.session_state`      |
 
 ---
 
@@ -41,6 +41,7 @@ Controller (Orchestration)
 ## Layer 1: Models, Repositories & Services (Pure Python)
 
 ### Rule 1.1: NO Streamlit Imports
+
 **Files in `models/`, `repositories/`, `services/`, `protocols/` MUST NEVER import `streamlit`.**
 
 ```python
@@ -53,6 +54,7 @@ from services.transformers import DataTransformer
 ```
 
 ### Rule 1.2: Use Repositories for Data Access
+
 **Controllers import from `repositories/`, NOT from `database.py` (legacy facade being removed).**
 
 ```python
@@ -67,6 +69,7 @@ datasources = db.get_datasources()
 ```
 
 ### Rule 1.3: Repository Functions Return Tuples for Mutations
+
 **Save/update/delete functions return `(success: bool, message: str)`**
 
 ```python
@@ -85,6 +88,7 @@ def save_datasource(...):
 ```
 
 ### Rule 1.4: Use Protocol Interfaces for DI (Dependency Inversion)
+
 **Services accept protocol interfaces, not concrete implementations.**
 
 ```python
@@ -101,6 +105,7 @@ class MyService:
 ```
 
 ### Rule 1.5: Services Are Pure Functions & Classes
+
 **Services handle business logic without side effects. All I/O is explicit.**
 
 ```python
@@ -116,6 +121,7 @@ def fetch_and_display_results():
 ```
 
 ### Rule 1.6: Use Registry Patterns for Extensibility (OCP)
+
 **Add new transformers/validators/dialects via decorators, not by modifying existing code.**
 
 ```python
@@ -136,6 +142,7 @@ def my_transformer(series, params=None):
 ## Layer 2: Views (Dumb Rendering)
 
 ### Rule 2.1: Views Are Pure Streamlit Renderers
+
 **Views MUST ONLY contain `st.*` calls. No business logic, no repository imports.**
 
 ```python
@@ -154,6 +161,7 @@ def render_settings_page():
 ```
 
 ### Rule 2.2: Views Receive All Data as Arguments
+
 **Views must be 100% determined by their arguments. No global state, no assumptions.**
 
 ```python
@@ -170,6 +178,7 @@ def render_datasource_tab():
 ```
 
 ### Rule 2.3: Views Accept Callbacks for All Actions
+
 **Button clicks, form submissions, etc. delegate to callbacks provided by the controller.**
 
 ```python
@@ -188,6 +197,7 @@ if st.button("Save Changes", type="primary"):
 ```
 
 ### Rule 2.4: Views Are Private Functions (Prefix with `_`)
+
 **Private render functions prevent accidental direct imports.**
 
 ```python
@@ -217,6 +227,7 @@ ds_name = st.text_input("Name", key="some_random_key_12345")
 ## Layer 3: Controllers (Orchestration)
 
 ### Rule 3.1: Controllers Own All Session State for Their Feature
+
 **Controllers initialize, read, and modify session state for their page.**
 
 ```python
@@ -237,6 +248,7 @@ def run() -> None:
 ```
 
 ### Rule 3.2: Controllers Fetch All Data via Repositories
+
 **Controllers call `repositories/` to gather data before rendering.**
 
 ```python
@@ -266,6 +278,7 @@ datasources_df = db.get_datasources()
 ```
 
 ### Rule 3.3: Controllers Define All Action Callbacks
+
 **Every button click, form submission, or data mutation flows through a callback defined in the controller.**
 
 ```python
@@ -296,6 +309,7 @@ def _on_save_new(name: str, host: str, ...) -> tuple[bool, str]:
 ```
 
 ### Rule 3.4: Controllers Call the View's Public Render Function
+
 **The view is called exactly once, at the end of the controller.**
 
 ```python
@@ -314,6 +328,7 @@ def run() -> None:
 ```
 
 ### Rule 3.5: Controllers Manage State Mutations, Not Views
+
 **Only controllers can call `PageState.set()`. Views never touch session state.**
 
 ```python
@@ -332,6 +347,7 @@ def render_form(...):
 ## File Structure & Naming Conventions
 
 ### Naming Pattern (PostgreSQL Architecture)
+
 ```
 feature/
   models/feature_model.py              (if needed, contains @dataclass)
@@ -344,6 +360,7 @@ feature/
 ```
 
 ### Completed Controllers (6/6)
+
 ```
 ✅ controllers/settings_controller.py      + views/settings_view.py
 ✅ controllers/pipeline_controller.py      + views/pipeline_view.py
@@ -358,6 +375,7 @@ feature/
 ## Shared Components (Views)
 
 ### Rule 4.1: Dialogs Live in `views/components/shared/dialogs.py`
+
 **All `@st.dialog` components should be reusable and receive pre-fetched data.**
 
 ```python
@@ -383,6 +401,7 @@ def preview_config_dialog(config_name: str) -> None:
 ```
 
 ### Rule 4.2: Shared CSS Goes in `views/components/shared/styles.py`
+
 **Global CSS that affects multiple pages should be centralized.**
 
 ```python
@@ -400,6 +419,7 @@ inject_global_css()
 ## PostgreSQL-Specific Rules
 
 ### Rule 5.1: Use Thread-Safe Connection Managers
+
 **For background threads (pipeline_service.py), use `get_transaction()` context manager.**
 
 ```python
@@ -419,6 +439,7 @@ conn = engine.connect()  # Don't share connections across threads
 ```
 
 ### Rule 5.2: Handle UUID Types Correctly
+
 **PostgreSQL uses native UUID type. Pass `uuid.UUID` objects, not strings.**
 
 ```python
@@ -434,6 +455,7 @@ pipeline_id = str(uuid.uuid4())  # Don't convert to string
 ```
 
 ### Rule 5.3: Use Repository Functions, Not Raw SQL
+
 **Let repositories handle all SQL. Controllers shouldn't write queries.**
 
 ```python
@@ -453,6 +475,7 @@ with engine.connect() as conn:
 ## Testing & Validation
 
 ### Unit Test Pattern: Repositories
+
 ```python
 # tests/test_datasource_repo.py
 def test_save_and_get_datasource():
@@ -472,6 +495,7 @@ def test_save_and_get_datasource():
 ```
 
 ### Unit Test Pattern: Services
+
 ```python
 # tests/test_transformer.py
 def test_data_transformer():
@@ -484,6 +508,7 @@ def test_data_transformer():
 ```
 
 ### Integration Test Pattern: Controllers
+
 ```python
 # Tests should verify:
 # 1. Controller initializes state correctly
@@ -499,25 +524,29 @@ def test_data_transformer():
 Before merging any code, verify:
 
 ### Architecture
+
 - [ ] **Model Layer**: No `import streamlit` in `models/`, `repositories/`, `services/`, `protocols/`
 - [ ] **Repository Layer**: All DB access via `repositories/`, NOT `database.py` facade
 - [ ] **View Layer**: No repository imports, no `PageState.set()`, pure rendering only
 - [ ] **Controller Layer**: All state mutations happen here, all data fetches via repositories
 
 ### MVC Pattern
+
 - [ ] **Naming**: Functions prefixed with `_render`, `_on_*`, `run()`, etc.
 - [ ] **Callbacks**: All callbacks defined in controller, not hardcoded in view
 - [ ] **Session State**: Only controller initializes and mutates session state
 - [ ] **App.py**: Routes to `controller.run()` not `view.render_*()`
 
 ### PostgreSQL
+
 - [ ] **UUID Handling**: Using `uuid.UUID` objects, not strings
 - [ ] **Thread Safety**: Background threads use `get_transaction()` context manager
 - [ ] **Connection Pool**: Using SQLAlchemy Engine singleton, not creating raw connections
 
 ### Documentation
+
 - [ ] **Docstrings**: Public functions have docstrings explaining their contract
-- [ ] **Type Hints**: Using `from __future__ import annotations` for Python 3.12 compatibility
+- [ ] **Type Hints**: Using `from __future__ import annotations` for Python 3.11 compatibility
 
 ---
 
@@ -594,7 +623,7 @@ The three rules of MVC here:
 2. **Views** — Only Streamlit rendering, receive all data + callbacks as arguments, NEVER fetch data
 3. **Controllers** — Orchestrate everything: init state, fetch data via repositories, define callbacks, call view once
 
-**When in doubt**: *"If it's data or business logic, it belongs in the controller. If it's a button or text input, it belongs in the view. If it's a pure function or DB access, it belongs in repositories/services."*
+**When in doubt**: _"If it's data or business logic, it belongs in the controller. If it's a button or text input, it belongs in the view. If it's a pure function or DB access, it belongs in repositories/services."_
 
 ---
 

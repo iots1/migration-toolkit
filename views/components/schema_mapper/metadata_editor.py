@@ -5,6 +5,7 @@ and the Target Table Configuration expander (non-saved-config mode).
 Returns:
     (current_config_name: str, is_edit_existing: bool)
 """
+
 from __future__ import annotations  # Enable modern type hints
 
 import streamlit as st
@@ -44,9 +45,14 @@ def render_target_selector(
         c_tgt_1, c_tgt_2 = st.columns(2)
 
         default_tgt_db = st.session_state.get("mapper_tgt_db")
-        tgt_idx = datasource_names.index(default_tgt_db) if default_tgt_db in datasource_names else 0
-        target_db_input = c_tgt_1.selectbox("Target Datasource", datasource_names,
-                                             index=tgt_idx, key="tgt_ds")
+        tgt_idx = (
+            datasource_names.index(default_tgt_db)
+            if default_tgt_db in datasource_names
+            else 0
+        )
+        target_db_input = c_tgt_1.selectbox(
+            "Target Datasource", datasource_names, index=tgt_idx, key="tgt_ds"
+        )
 
         target_table_input = None
         real_target_columns = []
@@ -56,11 +62,13 @@ def render_target_selector(
             ok, tables = DSRepo.get_tables(target_db_input)
             if ok:
                 def_idx = (
-                    tables.index(default_tgt_tbl) if (default_tgt_tbl and default_tgt_tbl in tables)
+                    tables.index(default_tgt_tbl)
+                    if (default_tgt_tbl and default_tgt_tbl in tables)
                     else (tables.index(active_table) if active_table in tables else 0)
                 )
-                target_table_input = c_tgt_2.selectbox("Target Table", tables,
-                                                       index=def_idx, key="tgt_tbl_cfg_sel")
+                target_table_input = c_tgt_2.selectbox(
+                    "Target Table", tables, index=def_idx, key="tgt_tbl_cfg_sel"
+                )
             else:
                 target_table_input = c_tgt_2.text_input(
                     "Target Table",
@@ -71,11 +79,16 @@ def render_target_selector(
             if target_table_input:
                 ok_c, cols = DSRepo.get_columns(target_db_input, target_table_input)
                 if ok_c:
-                    real_target_columns = cols  # Keep full column info (name, type, is_nullable)
+                    real_target_columns = (
+                        cols  # Keep full column info (name, type, is_nullable)
+                    )
         else:
             target_table_input = c_tgt_2.text_input(
-                "Target Table", value="", placeholder="Please select datasource first",
-                disabled=True, key="tgt_tbl_cfg_disabled",
+                "Target Table",
+                value="",
+                placeholder="Please select datasource first",
+                disabled=True,
+                key="tgt_tbl_cfg_disabled",
             )
 
     st.session_state.mapper_tgt_db = target_db_input
@@ -114,33 +127,32 @@ def render_config_metadata(
     c1, c2, c3 = st.columns([3, 1, 1])
     with c1:
         key = "config_name_edit" if is_edit_existing else "config_name_input"
-        current_config_name = st.text_input("Config Name", value=default_config_name, key=key)
+        current_config_name = st.text_input(
+            "Config Name", value=default_config_name, key=key
+        )
         st.session_state.mapper_config_name = current_config_name
     with c2:
         st.write("")
         st.write("")
         if st.button("📜 Show History", use_container_width=True):
-            st.session_state.mapper_show_history = not st.session_state.mapper_show_history
+            st.session_state.mapper_show_history = (
+                not st.session_state.mapper_show_history
+            )
     with c3:
         st.write("")
         st.write("")
         if st.button("🔄 Compare Versions", use_container_width=True):
-            st.session_state.mapper_show_compare = not st.session_state.mapper_show_compare
+            st.session_state.mapper_show_compare = (
+                not st.session_state.mapper_show_compare
+            )
 
-    # Row 2: Source DB & Table (readonly)
-    src_cols = st.columns(2)
-    with src_cols[0]:
-        src_db = loaded_config.get("source", {}).get("database", "") if loaded_config else source_db_input
-        st.text_input("Source Database", value=src_db, disabled=True, key="metadata_src_db")
-    with src_cols[1]:
-        src_tbl = loaded_config.get("source", {}).get("table", "") if loaded_config else source_table_name
-        st.text_input("Source Table", value=src_tbl, disabled=True, key="metadata_src_tbl")
-
-
-    # Row 4: Batch Size
+    # Row 2: Batch Size
     batch_size = st.number_input(
         "Batch Size (records per batch)",
-        min_value=10, max_value=10000, value=1000, step=10,
+        min_value=10,
+        max_value=10000,
+        value=1000,
+        step=10,
         help="Number of records to process in each batch during migration",
     )
     st.session_state.mapper_batch_size = batch_size

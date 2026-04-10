@@ -7,6 +7,7 @@ Responsibilities:
   - init_editor_state()     — initialize the mapping DataFrame in session_state
   - validate_mapping_in_table() — mark columns ✅/❌ vs real target columns
 """
+
 import time
 import pandas as pd
 import streamlit as st
@@ -21,7 +22,14 @@ import utils.helpers as helpers
 # State Initialisation
 # ---------------------------------------------------------------------------
 
-def init_editor_state(df: pd.DataFrame, table_name: str, config_json: dict | None = None, real_target_columns: list | None = None, col_nullable_map: dict | None = None) -> None:
+
+def init_editor_state(
+    df: pd.DataFrame,
+    table_name: str,
+    config_json: dict | None = None,
+    real_target_columns: list | None = None,
+    col_nullable_map: dict | None = None,
+) -> None:
     """
     Populate session_state[f"df_{table_name}"] from raw profile df + optional config.
     No-op if the state key already exists (prevents overwrite on rerun).
@@ -71,22 +79,26 @@ def init_editor_state(df: pd.DataFrame, table_name: str, config_json: dict | Non
             if is_col_not_null:
                 required = True
 
-        rows.append({
-            "Status": "",
-            "Source Column": src_col,
-            "Type": dtype,
-            "Target Column": target_col,
-            "Transformers": ", ".join(transformers),
-            "Validators": ", ".join(validators),
-            "Default Value": default_value,
-            "Required": required,
-            "Ignore": ignore,
-        })
+        rows.append(
+            {
+                "Status": "",
+                "Source Column": src_col,
+                "Type": dtype,
+                "Target Column": target_col,
+                "Transformers": ", ".join(transformers),
+                "Validators": ", ".join(validators),
+                "Default Value": default_value,
+                "Required": required,
+                "Ignore": ignore,
+            }
+        )
 
     st.session_state[state_key] = pd.DataFrame(rows)
 
 
-def validate_mapping_in_table(df_mapping: pd.DataFrame, real_columns: list, show_toast: bool = False) -> pd.DataFrame:
+def validate_mapping_in_table(
+    df_mapping: pd.DataFrame, real_columns: list, show_toast: bool = False
+) -> pd.DataFrame:
     """
     Mark each row Status ✅/❌/⚠️/⚪ vs the real target column list.
 
@@ -135,6 +147,7 @@ def validate_mapping_in_table(df_mapping: pd.DataFrame, real_columns: list, show
 # AgGrid Table
 # ---------------------------------------------------------------------------
 
+
 def render_mapping_editor(
     active_table: str,
     real_target_columns: list,
@@ -159,7 +172,9 @@ def render_mapping_editor(
                 col_name = col_info.get("name")
                 col_default = col_info.get("column_default")
                 if col_default:
-                    target_defaults[col_name] = str(col_default)[:50]  # Truncate long defaults
+                    target_defaults[col_name] = str(col_default)[
+                        :50
+                    ]  # Truncate long defaults
 
         # Add target default to each row
         df_to_edit["Target Default"] = df_to_edit.apply(
@@ -170,17 +185,23 @@ def render_mapping_editor(
     if col_nullable_map:
         for idx, row in df_to_edit.iterrows():
             if row.get("Target Column") and not row.get("Ignore", False):
-                is_col_not_null = not col_nullable_map.get(row.get("Target Column"), True)
+                is_col_not_null = not col_nullable_map.get(
+                    row.get("Target Column"), True
+                )
                 if is_col_not_null:
                     df_to_edit.at[idx, "Required"] = True
 
     # Always update Status if real columns available
     if real_target_columns:
-        df_to_edit = validate_mapping_in_table(df_to_edit, real_target_columns, show_toast=False)
+        df_to_edit = validate_mapping_in_table(
+            df_to_edit, real_target_columns, show_toast=False
+        )
 
     st.session_state[f"df_{active_table}"] = df_to_edit
 
-    grid_response = _build_aggrid(df_to_edit, active_table, real_target_columns, col_nullable_map)
+    grid_response = _build_aggrid(
+        df_to_edit, active_table, real_target_columns, col_nullable_map
+    )
 
     if grid_response["data"] is not None:
         updated_df = pd.DataFrame(grid_response["data"])
@@ -193,22 +214,33 @@ def render_mapping_editor(
                 if row.get("Ignore", False):
                     updated_df.at[idx, "Required"] = False
                 elif col_nullable_map and row.get("Target Column"):
-                    is_col_not_null = not col_nullable_map.get(row.get("Target Column"), True)
+                    is_col_not_null = not col_nullable_map.get(
+                        row.get("Target Column"), True
+                    )
                     if is_col_not_null:
                         updated_df.at[idx, "Required"] = True
 
             # Real-time validation (silent)
             if real_target_columns:
-                updated_df = validate_mapping_in_table(updated_df, real_target_columns, show_toast=False)
+                updated_df = validate_mapping_in_table(
+                    updated_df, real_target_columns, show_toast=False
+                )
 
             st.session_state[f"df_{active_table}"] = updated_df
 
-    _render_quick_edit(active_table, real_target_columns, active_df_raw, grid_response, col_nullable_map)
+    _render_quick_edit(
+        active_table,
+        real_target_columns,
+        active_df_raw,
+        grid_response,
+        col_nullable_map,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Private — AgGrid
 # ---------------------------------------------------------------------------
+
 
 def _render_table_header(active_table: str, real_target_columns: list) -> None:
     c_head, c_ai, c_ignore = st.columns([1.5, 1, 1.5])
@@ -238,8 +270,16 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
         if real_target_columns:
             if st.button("🤖 AI Auto-Map", type="primary", use_container_width=True):
                 with st.spinner("🤖 AI is analyzing column meanings..."):
-                    source_cols = st.session_state[f"df_{active_table}"]["Source Column"].tolist()
-                    suggestions = ml_mapper.suggest_mapping(source_cols, real_target_columns)
+                    source_cols = st.session_state[f"df_{active_table}"][
+                        "Source Column"
+                    ].tolist()
+                    if real_target_columns and isinstance(real_target_columns[0], dict):
+                        target_col_names = [c["name"] for c in real_target_columns]
+                    else:
+                        target_col_names = real_target_columns
+                    suggestions = ml_mapper.suggest_mapping(
+                        source_cols, target_col_names
+                    )
                     df = st.session_state[f"df_{active_table}"]
                     count = 0
                     for idx, row in df.iterrows():
@@ -253,36 +293,49 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
                     st.session_state["_mapper_needs_rerun"] = True
 
 
-def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_columns: list, col_nullable_map: dict | None = None):
-    # 0. สร้าง Copy เสมอเพื่อความปลอดภัยของ State
+def _build_aggrid(
+    df_to_edit: pd.DataFrame,
+    active_table: str,
+    real_target_columns: list,
+    col_nullable_map: dict | None = None,
+):
+    # Always copy to keep session state safe
     df_safe = df_to_edit.copy()
 
-    # 1. ไม่ต้องใช้ Numpy Object Hack แล้ว! แค่ทำเป็น String ธรรมดาก็พอ
+    # Convert string columns to plain string (no numpy object dtype)
     for col in df_safe.columns:
         if pd.api.types.is_string_dtype(df_safe[col]):
             df_safe[col] = df_safe[col].fillna("").astype(str)
 
-    # 2. ป้องกันค่า NaN ในคอลัมน์ Boolean (Arrow จะพังถ้ามี NaN ใน Boolean)
+    # Prevent NaN in boolean columns (Arrow breaks with NaN in bool)
     if "Ignore" in df_safe.columns:
         df_safe["Ignore"] = df_safe["Ignore"].fillna(False).astype(bool)
     if "Required" in df_safe.columns:
         df_safe["Required"] = df_safe["Required"].fillna(False).astype(bool)
 
     gb = GridOptionsBuilder.from_dataframe(df_safe)
-    gb.configure_column("Status", editable=False, width=90, cellStyle={"textAlign": "center"})
+    gb.configure_column(
+        "Status", editable=False, width=90, cellStyle={"textAlign": "center"}
+    )
     gb.configure_column("Source Column", editable=False, width=200)
     gb.configure_column("Type", editable=False, width=120)
-    
+
     if real_target_columns:
-        # ป้องกันค่า None ใน Dropdown
+        # Prevent None values in dropdown
         if isinstance(real_target_columns[0], dict):
-            col_names = [str(c.get("name", "")) for c in real_target_columns if c.get("name")]
+            col_names = [
+                str(c.get("name", "")) for c in real_target_columns if c.get("name")
+            ]
         else:
             col_names = [str(c) for c in real_target_columns if c]
-            
-        gb.configure_column("Target Column", editable=True, width=250,
-                            cellEditor="agSelectCellEditor",
-                            cellEditorParams={"values": col_names})
+
+        gb.configure_column(
+            "Target Column",
+            editable=True,
+            width=250,
+            cellEditor="agSelectCellEditor",
+            cellEditorParams={"values": col_names},
+        )
     else:
         gb.configure_column("Target Column", editable=True, width=250)
 
@@ -295,20 +348,26 @@ def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_colum
 
     def required_icon(row):
         if row.get("Ignore"):
-            return "⊘"  
+            return "⊘"
         elif col_nullable_map:
             target_col = row.get("Target Column")
             if target_col and not col_nullable_map.get(target_col, True):
-                return "🔒"  
-        return "⚠️"  
+                return "🔒"
+        return "⚠️"
 
     df_safe["Req"] = df_safe.apply(required_icon, axis=1)
-    gb.configure_column("Req", editable=False, width=50, cellStyle={"textAlign": "center"})
+    gb.configure_column(
+        "Req", editable=False, width=50, cellStyle={"textAlign": "center"}
+    )
     gb.configure_column("Required", hide=True)
 
-    gb.configure_column("Ignore", editable=True,
-                        cellRenderer="agCheckboxCellRenderer",
-                        cellEditor="agCheckboxCellEditor", width=80)
+    gb.configure_column(
+        "Ignore",
+        editable=True,
+        cellRenderer="agCheckboxCellRenderer",
+        cellEditor="agCheckboxCellEditor",
+        width=80,
+    )
     gb.configure_selection("single")
     gb.configure_grid_options(suppressColumnVirtualisation=True)
 
@@ -317,24 +376,25 @@ def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_colum
     source_ctx = st.session_state.get("mapper_source_db", "unknown")
     unique_key = f"aggrid_{source_ctx}_{active_table}_{editor_ver}"
 
-    # 3. บังคับ theme="streamlit" ป้องกันตารางล่องหน
+    # Force theme="streamlit" to prevent invisible table headers
     return AgGrid(
-        df_safe, 
-        gridOptions=gb.build(), 
-        height=grid_height, 
+        df_safe,
+        gridOptions=gb.build(),
+        height=grid_height,
         width="100%",
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_mode=GridUpdateMode.MODEL_CHANGED,
-        fit_columns_on_grid_load=False, 
-        allow_unsafe_jscode=True, 
+        fit_columns_on_grid_load=False,
+        allow_unsafe_jscode=True,
         key=unique_key,
-        theme="streamlit"  
+        theme="streamlit",
     )
 
 
 # ---------------------------------------------------------------------------
 # Private — Quick Edit Panel
 # ---------------------------------------------------------------------------
+
 
 def _render_quick_edit(
     active_table: str,
@@ -347,7 +407,11 @@ def _render_quick_edit(
     if selected_rows is None or len(selected_rows) == 0:
         return
 
-    sel_row = selected_rows.iloc[0].to_dict() if isinstance(selected_rows, pd.DataFrame) else selected_rows[0]
+    sel_row = (
+        selected_rows.iloc[0].to_dict()
+        if isinstance(selected_rows, pd.DataFrame)
+        else selected_rows[0]
+    )
     src_col = sel_row.get("Source Column")
     df_state = st.session_state[f"df_{active_table}"]
     row_idx_list = df_state.index[df_state["Source Column"] == src_col].tolist()
@@ -365,12 +429,20 @@ def _render_quick_edit(
             col_names = [c.get("name") for c in real_target_columns]
         else:
             col_names = real_target_columns if real_target_columns else []
-        target_opts = list(dict.fromkeys(
-            [current_tgt] + [c for c in col_names if c != current_tgt]
-        )) if col_names else [current_tgt]
+        target_opts = (
+            list(
+                dict.fromkeys(
+                    [current_tgt] + [c for c in col_names if c != current_tgt]
+                )
+            )
+            if col_names
+            else [current_tgt]
+        )
 
         with c1:
-            new_target = st.selectbox("Target Column", target_opts, index=0, key=f"sb_tgt_{src_col}")
+            new_target = st.selectbox(
+                "Target Column", target_opts, index=0, key=f"sb_tgt_{src_col}"
+            )
             # Show nullable status and default value
             if new_target and col_nullable_map is not None:
                 is_nullable = col_nullable_map.get(new_target, True)
@@ -392,14 +464,32 @@ def _render_quick_edit(
                         st.caption(f"📌 Default: `{str(target_default)[:30]}`")
 
         current_trans = sel_row.get("Transformers", "")
-        def_trans = [t.strip() for t in str(current_trans).split(",") if t.strip() and t.strip() in TRANSFORMER_OPTIONS]
+        def_trans = [
+            t.strip()
+            for t in str(current_trans).split(",")
+            if t.strip() and t.strip() in TRANSFORMER_OPTIONS
+        ]
         with c2:
-            new_trans = st.multiselect("Transformers", TRANSFORMER_OPTIONS, default=def_trans, key=f"ms_tf_{src_col}")
+            new_trans = st.multiselect(
+                "Transformers",
+                TRANSFORMER_OPTIONS,
+                default=def_trans,
+                key=f"ms_tf_{src_col}",
+            )
 
         current_val = sel_row.get("Validators", "")
-        def_vals = [v.strip() for v in str(current_val).split(",") if v.strip() and v.strip() in VALIDATOR_OPTIONS]
+        def_vals = [
+            v.strip()
+            for v in str(current_val).split(",")
+            if v.strip() and v.strip() in VALIDATOR_OPTIONS
+        ]
         with c3:
-            new_vals = st.multiselect("Validators", VALIDATOR_OPTIONS, default=def_vals, key=f"ms_vd_{src_col}")
+            new_vals = st.multiselect(
+                "Validators",
+                VALIDATOR_OPTIONS,
+                default=def_vals,
+                key=f"ms_vd_{src_col}",
+            )
 
         is_ignored = sel_row.get("Ignore", False)
 
@@ -408,9 +498,9 @@ def _render_quick_edit(
         if dv_key not in st.session_state:
             st.session_state[dv_key] = str(sel_row.get("Default Value", "") or "")
         st.text_input(
-            "Default Value (ใส่ค่าสำรองเมื่อ transform แล้วได้ null เช่น `1900-01-01`)",
+            "Default Value (fallback when transform results in null, e.g. `1900-01-01`)",
             key=dv_key,
-            placeholder="ว่าง = ไม่ใช้ default",
+            placeholder="Empty = no default",
         )
 
         # GENERATE_HN options
@@ -439,17 +529,17 @@ def _render_quick_edit(
 
 
 def _render_generate_hn(src_col: str) -> None:
-    st.markdown("**GENERATE_HN Options** — ตั้งค่า HN Counter")
+    st.markdown("**GENERATE_HN Options** — HN Counter Settings")
     ghn_key = f"ghn_auto_detect_{src_col}"
     ghn_start_key = f"ghn_start_from_{src_col}"
     auto_detect = st.checkbox(
-        "Auto-detect Max HN from Target DB (แนะนำ)",
+        "Auto-detect Max HN from Target DB (recommended)",
         value=st.session_state.get(ghn_key, True),
         key=ghn_key,
     )
     if not auto_detect:
         st.number_input(
-            "Start From (ตั้งค่า HN counter เริ่มต้น)",
+            "Start From (set initial HN counter value)",
             min_value=0,
             value=int(st.session_state.get(ghn_start_key, 0)),
             step=1,
@@ -458,29 +548,46 @@ def _render_generate_hn(src_col: str) -> None:
 
 
 def _render_value_map(src_col: str, sel_row: dict, active_df_raw: pd.DataFrame) -> None:
-    st.markdown("**VALUE_MAP Rules** — ค่าไหน → เปลี่ยนเป็นอะไร")
+    st.markdown("**VALUE_MAP Rules** — value → replacement mapping")
     vmap_key = f"vmap_rules_{src_col}"
     vmap_default_key = f"vmap_default_{src_col}"
 
     if vmap_key not in st.session_state:
-        existing_rules = sel_row.get("transformer_params", {}).get("VALUE_MAP", {}).get("rules", [])
+        existing_rules = (
+            sel_row.get("transformer_params", {}).get("VALUE_MAP", {}).get("rules", [])
+        )
         if existing_rules:
             rows = []
             for rule in existing_rules:
                 for col, val in rule.get("when", {}).items():
-                    rows.append({"condition_column": col, "condition_value": str(val), "output": str(rule.get("then", ""))})
+                    rows.append(
+                        {
+                            "condition_column": col,
+                            "condition_value": str(val),
+                            "output": str(rule.get("then", "")),
+                        }
+                    )
             st.session_state[vmap_key] = pd.DataFrame(rows)
         else:
-            st.session_state[vmap_key] = pd.DataFrame(columns=["condition_column", "condition_value", "output"])
+            st.session_state[vmap_key] = pd.DataFrame(
+                columns=["condition_column", "condition_value", "output"]
+            )
 
-    available_cols = list(active_df_raw["Column"]) if active_df_raw is not None else [src_col]
-    rules_df = st.session_state.get(vmap_key, pd.DataFrame(columns=["condition_column", "condition_value", "output"]))
+    available_cols = (
+        list(active_df_raw["Column"]) if active_df_raw is not None else [src_col]
+    )
+    rules_df = st.session_state.get(
+        vmap_key,
+        pd.DataFrame(columns=["condition_column", "condition_value", "output"]),
+    )
 
     edited = st.data_editor(
         rules_df,
         num_rows="dynamic",
         column_config={
-            "condition_column": st.column_config.SelectboxColumn("Column", options=available_cols, required=True),
+            "condition_column": st.column_config.SelectboxColumn(
+                "Column", options=available_cols, required=True
+            ),
             "condition_value": st.column_config.TextColumn("Value (=)", width="medium"),
             "output": st.column_config.TextColumn("→ Output", width="medium"),
         },
@@ -491,7 +598,7 @@ def _render_value_map(src_col: str, sel_row: dict, active_df_raw: pd.DataFrame) 
     st.session_state[vmap_key] = edited
 
     st.text_input(
-        "Default (ไม่ match ใช้ค่านี้ หรือว่างไว้ = คง original)",
+        "Default (used when no rule matches; leave empty to keep original)",
         value=st.session_state.get(vmap_default_key, ""),
         key=vmap_default_key,
     )

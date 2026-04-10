@@ -10,6 +10,8 @@ Responsibilities:
 
 Must NOT contain any st.* rendering calls (no st.button, st.text_input, etc.).
 """
+from __future__ import annotations  # Enable modern type hints
+
 import streamlit as st
 
 import database as db

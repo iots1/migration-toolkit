@@ -1,7 +1,14 @@
 import pandas as pd
-from sentence_transformers import SentenceTransformer, util
 import numpy as np
 import re
+
+# Import HuggingFace transformers library first (avoid conflict with local transformers/)
+try:
+    from sentence_transformers import SentenceTransformer, util
+except ImportError:
+    # Fallback if sentence-transformers not installed
+    SentenceTransformer = None
+    util = None
 
 class SmartMapper:
     """

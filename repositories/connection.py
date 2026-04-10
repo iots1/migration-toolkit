@@ -16,6 +16,8 @@ Usage:
         conn.execute(text("INSERT INTO datasources ..."))
         # Commits on success, rolls back on exception
 """
+from __future__ import annotations  # Enable modern type hints
+
 from contextlib import contextmanager
 from typing import Generator, Any
 from sqlalchemy import create_engine, Engine, text

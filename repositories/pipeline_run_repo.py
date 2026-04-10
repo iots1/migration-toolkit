@@ -7,6 +7,8 @@ This module handles pipeline execution tracking with:
 - Status tracking (pending, running, completed, failed, partial)
 - Automatic timestamp management
 """
+from __future__ import annotations  # Enable modern type hints
+
 import uuid
 import pandas as pd
 from sqlalchemy import text

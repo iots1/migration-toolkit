@@ -1,7 +1,7 @@
 """Text transformers - String manipulation transformations."""
 import pandas as pd
 import re
-from transformers.registry import register_transformer
+from data_transformers.registry import register_transformer
 
 
 @register_transformer("TRIM", "Trim", "Remove leading/trailing whitespace")

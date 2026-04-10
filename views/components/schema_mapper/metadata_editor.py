@@ -5,6 +5,8 @@ and the Target Table Configuration expander (non-saved-config mode).
 Returns:
     (current_config_name: str, is_edit_existing: bool)
 """
+from __future__ import annotations  # Enable modern type hints
+
 import streamlit as st
 from services.datasource_repository import DatasourceRepository as DSRepo
 

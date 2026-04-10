@@ -2,10 +2,13 @@
 migration_report/
 migration_logs/
 migration_checkpoints/
-migration_tool.db
-migration_tool.db.backup
 config.json
 mini_his/full_his_mockup.sql
+
+# SQLite database (migrated to PostgreSQL)
+# Kept for backup reference only - not used in production
+# migration_tool.db
+# migration_tool.db.backup
 
 # Python
 __pycache__/

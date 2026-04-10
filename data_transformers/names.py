@@ -1,6 +1,6 @@
 """Name transformers - Name parsing and formatting."""
 import pandas as pd
-from transformers.registry import register_transformer
+from data_transformers.registry import register_transformer
 
 
 @register_transformer("REMOVE_PREFIX", "Remove Prefix", "Remove name prefixes (Mr., Ms., etc.)", has_params=True)

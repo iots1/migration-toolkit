@@ -31,7 +31,7 @@ def get_database_url() -> str:
 # --- OPTIONS (Dynamic - loaded from registries) ---
 def get_transformer_options() -> list[dict]:
     """Get transformer options from registry."""
-    from transformers.registry import get_transformer_options
+    from data_transformers.registry import get_transformer_options
     return get_transformer_options()
 
 

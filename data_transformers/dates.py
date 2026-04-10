@@ -1,6 +1,6 @@
 """Date transformers - Date format conversions."""
 import pandas as pd
-from transformers.registry import register_transformer
+from data_transformers.registry import register_transformer
 
 
 @register_transformer("BUDDHIST_TO_ISO", "Buddhist to ISO", "Convert Thai BE years to CE", has_params=True)

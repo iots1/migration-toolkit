@@ -4,8 +4,11 @@ Base transformer class - Core data transformation logic.
 This module provides the DataTransformer class which is used by
 controllers to apply transformations.
 """
+from __future__ import annotations  # Enable modern type hints
+from typing import Optional
+
 import pandas as pd
-from transformers.registry import transform_batch
+from data_transformers.registry import transform_batch
 
 
 class DataTransformer:
@@ -24,7 +27,7 @@ class DataTransformer:
         self,
         series: pd.Series,
         transformer_names: list[str],
-        params: dict | None = None
+        params: Optional[dict] = None
     ) -> pd.Series:
         """
         Apply one or more transformers to a series.

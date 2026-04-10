@@ -4,6 +4,8 @@ Datasource repository - CRUD operations for datasources table.
 This module handles all database operations for datasource entities.
 Thread-safe: each function gets its own connection/transaction.
 """
+from __future__ import annotations  # Enable modern type hints
+
 import uuid
 import pandas as pd
 from sqlalchemy import text

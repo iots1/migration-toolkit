@@ -3,7 +3,8 @@ Transformer registry - Central registry for data transformers.
 
 Provides decorator-based registration pattern for transformers.
 """
-from typing import Dict, Callable, Any
+from __future__ import annotations  # Enable modern type hints
+from typing import Dict, Callable, Any, Optional
 import pandas as pd
 
 # Internal transformer storage
@@ -33,7 +34,7 @@ def register_transformer(
         ... def trim(series, params=None):
         ...     return series.astype(str).str.strip()
     """
-    def decorator(fn: Callable[[Any, Any | None], Any]) -> Callable[[Any, Any | None], Any]:
+    def decorator(fn: Callable[[Any, Optional[Any]], Any]) -> Callable[[Any, Optional[Any]], Any]:
         _transformers[name] = fn
         _labels[name] = label
         _descriptions[name] = description
@@ -92,7 +93,7 @@ def get_transformer_options() -> list[Dict]:
     ]
 
 
-def transform_batch(series: pd.Series, transformer_names: list[str], params_dict: Dict[str, Any] | None = None) -> pd.Series:
+def transform_batch(series: pd.Series, transformer_names: list[str], params_dict: Optional[Dict[str, Any]] = None) -> pd.Series:
     """
     Apply multiple transformers to a series in batch.
 

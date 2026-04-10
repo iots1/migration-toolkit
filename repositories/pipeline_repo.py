@@ -6,6 +6,8 @@ This module handles pipeline definitions with:
 - UUID primary keys
 - Foreign key references to datasources
 """
+from __future__ import annotations  # Enable modern type hints
+
 import uuid
 import pandas as pd
 from sqlalchemy import text

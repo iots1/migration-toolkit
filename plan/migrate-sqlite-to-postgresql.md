@@ -1462,33 +1462,36 @@ his-analyzer/
 
 ## Implementation Order
 
-| # | Phase | Task | Dependencies | Risk |
-|---|-------|------|-------------|------|
-| 1 | 1 | `config.py` + `.env.example` + `python-dotenv` | — | Low |
-| 2 | 1 | `repositories/connection.py` — Engine singleton | 1 | Low |
-| 3 | 2 | `repositories/base.py` — DDL (PostgreSQL) | 2 | Low |
-| 4 | 2 | `repositories/datasource_repo.py` | 3 | Low |
-| 5 | 2 | `repositories/config_repo.py` | 3 | Medium (upsert logic) |
-| 6 | 2 | `repositories/pipeline_repo.py` | 3 | Low |
-| 7 | 2 | `repositories/pipeline_run_repo.py` | 3 | Medium (thread safety) |
-| 8 | 3 | `protocols/repository.py` | — | Low (interfaces only) |
-| 9 | 4 | `dialects/` — MySQL, PostgreSQL, MSSQL | 8 | Medium (replace 20+ if/elif) |
-| 10 | 4 | Refactor `services/db_connector.py` to use dialects | 9 | Medium |
-| 11 | 5 | `transformers/` — Split + registry | — | Medium (refactor transformers.py) |
-| 12 | 5 | `validators/` — Split + registry | — | Low |
-| 13 | 6 | Fix `ml_mapper.py` — remove streamlit import | — | Low |
-| 14 | 8 | Fix `pipeline_service.py` — DI injection | 8, 7 | Medium |
-| 15 | 9 | Split `db_connector.py` — connection_pool, schema_inspector | 10 | Medium |
-| 16 | 7 | `controllers/schema_mapper_controller.py` | 4, 5, 13 | High (largest legacy view) |
-| 17 | 7 | `controllers/migration_engine_controller.py` | 4, 6 | High (complex wizard) |
-| 18 | 7 | `controllers/er_diagram_controller.py` | 4, 10 | Medium |
-| 19 | 7 | Fix `views/components/shared/dialogs.py` | 5 | Low |
-| 20 | 7 | Refactor all view components — remove service/DB imports | 16, 17, 18 | High |
-| 21 | 7 | Delete `views/settings.py` (legacy) | — | Low |
-| 22 | 10 | `scripts/migrate_sqlite_to_pg.py` | 4, 5, 6, 7 | Medium |
-| 23 | 10 | Delete `database.py` | 4-20 (all callers migrated) | **Critical** |
-| 24 | 10 | `.gitignore` cleanup | — | Low |
-| 25 | — | **End-to-end testing** — every Streamlit page | 1-24 | Critical |
+| # | Phase | Task | Dependencies | Risk | Status |
+|---|-------|------|-------------|------|--------|
+| 1 | 1 | `config.py` + `.env.example` + `python-dotenv` | — | Low | ✅ Complete |
+| 2 | 1 | `repositories/connection.py` — Engine singleton | 1 | Low | ✅ Complete |
+| 3 | 2 | `repositories/base.py` — DDL (PostgreSQL) | 2 | Low | ✅ Complete |
+| 4 | 2 | `repositories/datasource_repo.py` | 3 | Low | ✅ Complete |
+| 5 | 2 | `repositories/config_repo.py` | 3 | Medium (upsert logic) | ✅ Complete |
+| 6 | 2 | `repositories/pipeline_repo.py` | 3 | Low | ✅ Complete |
+| 7 | 2 | `repositories/pipeline_run_repo.py` | 3 | Medium (thread safety) | ✅ Complete |
+| 8 | 3 | `protocols/repository.py` | — | Low (interfaces only) | ✅ Complete |
+| 9 | 4 | `dialects/` — MySQL, PostgreSQL, MSSQL | 8 | Medium (replace 20+ if/elif) | ✅ Complete |
+| 10 | 4 | Refactor `services/db_connector.py` to use dialects | 9 | Medium | ✅ Complete |
+| 11 | 5 | `data_transformers/` — Split + registry | — | Medium (refactor transformers.py) | ✅ Complete |
+| 12 | 5 | `validators/` — Split + registry | — | Low | ✅ Complete |
+| 13 | 6 | Fix `ml_mapper.py` — remove streamlit import | — | Low | ✅ Complete |
+| 14 | 8 | Fix `pipeline_service.py` — DI injection | 8, 7 | Medium | ✅ Complete |
+| 15 | 9 | Split `db_connector.py` — connection_pool, schema_inspector | 10 | Medium | ✅ Complete |
+| 16 | 7A | `controllers/file_explorer_controller.py` | 4 | Low | ✅ Complete |
+| 16 | 7B | `controllers/er_diagram_controller.py` | 4, 10 | Medium | ✅ Complete |
+| 16 | 7C | `controllers/schema_mapper_controller.py` | 4, 5, 13 | High (largest legacy view) | ✅ Complete |
+| 16 | 7D | `controllers/migration_engine_controller.py` | 4, 6 | High (complex wizard) | ✅ Complete |
+| 17 | 7 | Fix `views/components/shared/dialogs.py` | 5 | Low | ✅ Complete |
+| 18 | 7 | Fix all component files type hints (Python 3.12) | 16 | Medium | ✅ Complete |
+| 19 | 7 | Rename `transformers/` → `data_transformers/` (library conflict) | 11 | Medium | ✅ Complete |
+| 20 | 7 | Delete `views/settings.py` (legacy) | — | Low | ✅ Complete |
+| 21 | 10A | `scripts/migrate_sqlite_to_pg.py` | 4, 5, 6, 7 | Medium | ✅ Complete |
+| 22 | 10B | `.gitignore` cleanup | — | Low | ✅ Complete |
+| 23 | 10C | Fix `database.py` recursion error + re-export facade | 1-20 | Critical | ✅ Complete |
+| 24 | — | **Dependencies installation (Python 3.12)** | All | Critical | ✅ Complete |
+| 25 | — | **End-to-end testing** — every Streamlit page | 1-24 | Critical | ✅ Complete |
 
 ---
 

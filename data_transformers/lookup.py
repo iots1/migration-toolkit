@@ -1,6 +1,6 @@
 """Lookup transformers - Value lookup and replacement."""
 import pandas as pd
-from transformers.registry import register_transformer
+from data_transformers.registry import register_transformer
 
 
 @register_transformer("LOOKUP_REPLACE", "Lookup Replace", "Replace values using lookup table", has_params=True)

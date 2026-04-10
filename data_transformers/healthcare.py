@@ -1,7 +1,7 @@
 """Healthcare transformers - Healthcare-specific transformations."""
 import pandas as pd
 import random
-from transformers.registry import register_transformer
+from data_transformers.registry import register_transformer
 
 
 @register_transformer("GENERATE_HN", "Generate HN", "Generate hospital number", has_params=True)

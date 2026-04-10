@@ -8,8 +8,8 @@ print("🔧 Testing Transformer & Validator Registries...")
 
 # Test transformers
 print("\n📊 Transformers:")
-from transformers.registry import get_transformer_options, get_transformer
-from transformers.base import DataTransformer
+from data_transformers.registry import get_transformer_options, get_transformer
+from data_transformers.base import DataTransformer
 
 transformer_options = get_transformer_options()
 print(f"   Total: {len(transformer_options)} transformers registered")

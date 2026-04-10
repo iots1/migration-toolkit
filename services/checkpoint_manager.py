@@ -3,6 +3,9 @@ Checkpoint Manager — saves/loads/clears migration resume state.
 
 Responsibility (SRP): filesystem persistence for migration checkpoints only.
 """
+from __future__ import annotations  # Enable modern type hints
+from typing import Optional
+
 import json
 import os
 from datetime import datetime
@@ -31,7 +34,7 @@ def save_checkpoint(config_name: str, batch_num: int, rows_processed: int) -> No
         json.dump(data, f)
 
 
-def load_checkpoint(config_name: str) -> dict | None:
+def load_checkpoint(config_name: str) -> Optional[dict]:
     """Return checkpoint dict if one exists, else None."""
     path = _checkpoint_path(config_name)
     if os.path.exists(path):
@@ -80,7 +83,7 @@ def save_pipeline_checkpoint(pipeline_name: str, steps_state: dict) -> None:
         json.dump(data, f, indent=2)
 
 
-def load_pipeline_checkpoint(pipeline_name: str) -> dict | None:
+def load_pipeline_checkpoint(pipeline_name: str) -> Optional[dict]:
     """Return the pipeline checkpoint dict if one exists, else None."""
     path = _pipeline_checkpoint_path(pipeline_name)
     if os.path.exists(path):

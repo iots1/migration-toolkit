@@ -5,6 +5,8 @@ Also owns:
     generate_json_config(params, mappings_df) -> dict
     load_data_profile(report_folder) -> DataFrame | None
 """
+from __future__ import annotations  # Enable modern type hints
+
 import os
 import json
 import pandas as pd

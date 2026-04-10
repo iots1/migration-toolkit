@@ -7,6 +7,8 @@ Components:
     show_json_preview(json_data)
     show_diff_dialog(config_name, version1, version2, diff_data)
 """
+from __future__ import annotations  # Enable modern type hints
+
 import json
 import streamlit as st
 import database as db

@@ -1,563 +1,190 @@
-import sqlite3
+"""
+Database Module — Re-export Facade (Transition Layer).
+
+This file provides backward compatibility by re-exporting functions from the new
+PostgreSQL repositories. This facade will be removed once all callers are migrated
+to use the repositories directly.
+
+TODO: Remove this file after all imports are updated to use repositories directly.
+"""
+from __future__ import annotations  # Enable modern type hints
+
 import pandas as pd
-import json
-from datetime import datetime
-from config import DB_FILE
 import uuid
+from typing import Any
+
+# Import the new PostgreSQL repositories
+from repositories.datasource_repo import (
+    get_all as _get_datasources,
+    get_by_id as _get_ds_by_id,
+    get_by_name as _get_ds_by_name,
+    save as _save_ds,
+    update as _update_ds,
+    delete as _delete_ds,
+)
+from repositories.config_repo import (
+    save as _save_config,
+    get_list as _get_configs_list,
+    get_content as _get_config_content,
+    delete as _delete_config,
+    get_history as _get_config_history,
+    get_version as _get_config_version,
+    compare_versions as _compare_config_versions,
+)
+from repositories.pipeline_repo import (
+    save as _save_pipeline,
+    get_list as _get_pipelines_list,
+    get_by_name as _get_pipeline_by_name,
+    delete as _delete_pipeline,
+)
+from repositories.pipeline_run_repo import (
+    save as _save_pipeline_run,
+    update as _update_pipeline_run,
+    get_list as _get_pipeline_runs_list,
+    get_latest as _get_latest_pipeline_run,
+)
+from repositories.base import init_db
+
+
+# ---------------------------------------------------------------------------
+# Datasource Functions (re-exported from repositories/datasource_repo.py)
+# ---------------------------------------------------------------------------
+
+def get_datasources() -> pd.DataFrame:
+    """Get all datasources as DataFrame."""
+    return _get_datasources()
+
+
+def get_datasource_by_id(ds_id: int) -> dict | None:
+    """Get datasource by ID."""
+    return _get_ds_by_id(ds_id)
+
+
+def get_datasource_by_name(name: str) -> dict | None:
+    """Get datasource by name."""
+    return _get_datasource_by_name(name)
+
+
+def save_datasource(name: str, db_type: str, host: str, port: str,
+                   dbname: str, username: str, password: str) -> tuple[bool, str]:
+    """Save a new datasource."""
+    return _save_ds(name, db_type, host, port, dbname, username, password)
+
+
+def update_datasource(ds_id: int, name: str, db_type: str, host: str,
+                     port: str, dbname: str, username: str, password: str) -> tuple[bool, str]:
+    """Update an existing datasource."""
+    return _update_ds(ds_id, name, db_type, host, port, dbname, username, password)
+
+
+def delete_datasource(ds_id: int) -> None:
+    """Delete a datasource."""
+    _delete_ds(ds_id)
+
+
+# ---------------------------------------------------------------------------
+# Config Functions (re-exported from repositories/config_repo.py)
+# ---------------------------------------------------------------------------
+
+def get_configs_list() -> pd.DataFrame:
+    """Get all configs as DataFrame."""
+    return _get_configs_list()
+
+
+def get_config_content(config_name: str) -> dict | None:
+    """Get config content by name."""
+    return _get_config_content(config_name)
+
+
+def save_config_to_db(config_name: str, table_name: str, json_data: str) -> tuple[bool, str]:
+    """Save or update a config to the database."""
+    return _save(config_name, table_name, json_data)
+
+
+def delete_config(config_name: str) -> tuple[bool, str]:
+    """Delete a config."""
+    return _delete(config_name)
+
+
+def get_config_history(config_name: str) -> pd.DataFrame:
+    """Get version history for a config."""
+    return _get_config_history(config_name)
+
+
+def get_config_version(config_name: str, version: int) -> dict | None:
+    """Get specific version of a config."""
+    return _get_config_version(config_name, version)
+
+
+def compare_config_versions(config_name: str, v1: int, v2: int) -> dict | None:
+    """Compare two versions of a config."""
+    return _compare_config_versions(config_name, v1, v2)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Functions (re-exported from repositories/pipeline_repo.py)
+# ---------------------------------------------------------------------------
+
+def get_pipelines() -> pd.DataFrame:
+    """Get all pipelines as DataFrame."""
+    return _get_pipelines_list()
+
+
+def get_pipeline_by_name(name: str) -> dict | None:
+    """Get pipeline by name."""
+    return _get_pipeline_by_name(name)
+
+
+def save_pipeline(name: str, description: str, json_data: str,
+                 source_ds_id: int, target_ds_id: int, error_strategy: str) -> tuple[bool, str]:
+    """Save a new pipeline."""
+    return _save(name, description, json_data, source_ds_id, target_ds_id, error_strategy)
+
+
+def delete_pipeline(name: str) -> tuple[bool, str]:
+    """Delete a pipeline."""
+    return _delete_pipeline(name)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Run Functions (re-exported from repositories/pipeline_run_repo.py)
+# ---------------------------------------------------------------------------
+
+def get_pipeline_runs(pipeline_id: str) -> pd.DataFrame:
+    """Get runs for a pipeline."""
+    return _get_pipeline_runs_list(pipeline_id)
+
+
+def get_latest_run(pipeline_id: str) -> dict | None:
+    """Get latest run for a pipeline."""
+    return _get_latest_pipeline_run(pipeline_id)
+
+
+# ---------------------------------------------------------------------------
+# Database Initialization
+# ---------------------------------------------------------------------------
+
+def init_db() -> None:
+    """Initialize database schema."""
+    from repositories.base import init_db as _init_db
+    _init_db()
+
+
+# ---------------------------------------------------------------------------
+# Legacy Compatibility Functions (deprecated)
+# ---------------------------------------------------------------------------
+
+# These functions may have been used in old code but are now deprecated
+# They are kept here for backward compatibility during migration
 
 def get_connection():
-    """Creates a database connection to the SQLite database specified by DB_FILE."""
-    return sqlite3.connect(DB_FILE)
+    """Deprecated: Use repositories.connection.get_engine() instead."""
+    raise NotImplementedError(
+        "get_connection() is deprecated. "
+        "Use repositories.connection.get_engine() for SQLAlchemy connections."
+    )
+
 
 def ensure_config_histories_table():
-    """Ensures config_histories table exists with correct schema."""
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        # Check if old table exists and migrate
-        c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='config_history'")
-        old_exists = c.fetchone()
-
-        if old_exists:
-            # Migrate old data to new table
-            try:
-                c.execute("ALTER TABLE config_history RENAME TO config_histories")
-            except:
-                # If rename fails, just drop old table
-                c.execute("DROP TABLE IF EXISTS config_history")
-
-        # Create table with correct schema
-        c.execute('''CREATE TABLE IF NOT EXISTS config_histories
-                     (id TEXT PRIMARY KEY,
-                      config_id TEXT,
-                      version INTEGER,
-                      json_data TEXT,
-                      created_at TIMESTAMP,
-                      FOREIGN KEY(config_id) REFERENCES configs(id) ON DELETE CASCADE)''')
-        conn.commit()
-    except Exception as e:
-        print(f"Error ensuring config_histories table: {e}")
-    finally:
-        conn.close()
-
-def init_db():
-    """Initializes the database tables if they do not exist."""
-    conn = get_connection()
-    c = conn.cursor()
-    
-    # Table: Datasources
-    c.execute('''CREATE TABLE IF NOT EXISTS datasources
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  name TEXT UNIQUE,
-                  db_type TEXT,
-                  host TEXT,
-                  port TEXT,
-                  dbname TEXT,
-                  username TEXT,
-                  password TEXT)''')
-    
-    # Table: Configs
-    c.execute('''CREATE TABLE IF NOT EXISTS configs
-                 (id TEXT PRIMARY KEY,
-                  config_name TEXT UNIQUE,
-                  table_name TEXT,
-                  json_data TEXT,
-                  updated_at TIMESTAMP)''')
-
-    # Table: Config Histories (renamed from config_history)
-    c.execute('''CREATE TABLE IF NOT EXISTS config_histories
-                 (id TEXT PRIMARY KEY,
-                  config_id TEXT,
-                  version INTEGER,
-                  json_data TEXT,
-                  created_at TIMESTAMP,
-                  FOREIGN KEY(config_id) REFERENCES configs(id) ON DELETE CASCADE)''')
-
-    # Table: Pipelines
-    c.execute('''CREATE TABLE IF NOT EXISTS pipelines
-                 (id TEXT PRIMARY KEY,
-                  name TEXT UNIQUE NOT NULL,
-                  description TEXT DEFAULT '',
-                  json_data TEXT,
-                  source_datasource_id INTEGER,
-                  target_datasource_id INTEGER,
-                  error_strategy TEXT DEFAULT 'fail_fast',
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-
-    # Table: Pipeline Runs — written by background thread, polled by UI
-    c.execute('''CREATE TABLE IF NOT EXISTS pipeline_runs
-                 (id TEXT PRIMARY KEY,
-                  pipeline_id TEXT NOT NULL,
-                  status TEXT DEFAULT 'pending',
-                  started_at TIMESTAMP,
-                  completed_at TIMESTAMP,
-                  steps_json TEXT,
-                  error_message TEXT,
-                  FOREIGN KEY(pipeline_id) REFERENCES pipelines(id) ON DELETE CASCADE)''')
-
-    conn.commit()
-    conn.close()
-
-# --- Datasource CRUD Operations ---
-
-def get_datasources():
-    """Retrieves all datasources from the database."""
-    conn = get_connection()
-    try:
-        # Select specific columns to display in the UI
-        df = pd.read_sql_query("SELECT id, name, db_type, host, dbname, username FROM datasources", conn)
-    except:
-        df = pd.DataFrame()
-    finally:
-        conn.close()
-    return df
-
-def get_datasource_by_id(id):
-    """Retrieves a specific datasource by its ID."""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM datasources WHERE id=?", (id,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0], "name": row[1], "db_type": row[2], 
-            "host": row[3], "port": row[4], "dbname": row[5], 
-            "username": row[6], "password": row[7]
-        }
-    return None
-
-def get_datasource_by_name(name):
-    """Retrieves a specific datasource by its unique name."""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT * FROM datasources WHERE name=?", (name,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0], "name": row[1], "db_type": row[2], 
-            "host": row[3], "port": row[4], "dbname": row[5], 
-            "username": row[6], "password": row[7]
-        }
-    return None
-
-def save_datasource(name, db_type, host, port, dbname, username, password):
-    """Saves a new datasource to the database."""
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute('''INSERT INTO datasources (name, db_type, host, port, dbname, username, password)
-                     VALUES (?, ?, ?, ?, ?, ?, ?)''', 
-                  (name, db_type, host, port, dbname, username, password))
-        conn.commit()
-        return True, "Saved successfully"
-    except sqlite3.IntegrityError:
-        return False, f"Datasource name '{name}' already exists."
-    except Exception as e:
-        return False, str(e)
-    finally:
-        conn.close()
-
-def update_datasource(id, name, db_type, host, port, dbname, username, password):
-    """Updates an existing datasource in the database."""
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute('''UPDATE datasources 
-                     SET name=?, db_type=?, host=?, port=?, dbname=?, username=?, password=?
-                     WHERE id=?''', 
-                  (name, db_type, host, port, dbname, username, password, id))
-        conn.commit()
-        return True, "Updated successfully"
-    except sqlite3.IntegrityError:
-        return False, f"Datasource name '{name}' already exists."
-    except Exception as e:
-        return False, str(e)
-    finally:
-        conn.close()
-
-def delete_datasource(id):
-    """Deletes a datasource from the database by ID."""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM datasources WHERE id=?", (id,))
-    conn.commit()
-    conn.close()
-
-# --- Config CRUD Operations ---
-
-def save_config_to_db(config_name, table_name, json_data):
-    """Saves or updates a JSON configuration in the database and tracks history."""
-    # Ensure config_histories table exists with correct schema
-    ensure_config_histories_table()
-
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        json_str = json.dumps(json_data)
-
-        # Check if config already exists
-        c.execute("SELECT id FROM configs WHERE config_name=?", (config_name,))
-        existing = c.fetchone()
-        config_id = existing[0] if existing else str(uuid.uuid4())
-
-        # Get next version number
-        c.execute("SELECT MAX(version) FROM config_histories WHERE config_id=?", (config_id,))
-        max_version = c.fetchone()[0]
-        next_version = (max_version + 1) if max_version else 1
-
-        # Save to configs table (INSERT OR REPLACE)
-        c.execute('''INSERT OR REPLACE INTO configs (id, config_name, table_name, json_data, updated_at)
-                     VALUES (?, ?, ?, ?, ?)''',
-                  (config_id, config_name, table_name, json_str, datetime.now()))
-
-        # Save to config_histories table
-        history_id = str(uuid.uuid4())
-        c.execute('''INSERT INTO config_histories (id, config_id, version, json_data, created_at)
-                     VALUES (?, ?, ?, ?, ?)''',
-                  (history_id, config_id, next_version, json_str, datetime.now()))
-
-        conn.commit()
-        return True, "Config saved!"
-    except Exception as e:
-        return False, str(e)
-    finally:
-        conn.close()
-
-def get_configs_list():
-    """Retrieves a list of saved configurations, sorted by update time."""
-    conn = get_connection()
-    try:
-        # Fetch json_data to extract target table info
-        df = pd.read_sql_query("SELECT config_name, table_name, json_data, updated_at FROM configs ORDER BY updated_at DESC", conn)
-        
-        # Helper to extract target table from JSON string
-        def extract_target(json_str):
-            try:
-                data = json.loads(json_str)
-                return data.get('target', {}).get('table', '-')
-            except:
-                return '-'
-
-        if not df.empty:
-            df['destination_table'] = df['json_data'].apply(extract_target)
-            # Remove json_data column to keep DF lightweight for UI
-            df = df.drop(columns=['json_data'])
-            
-            # Rename for clarity
-            df = df.rename(columns={'table_name': 'source_table'})
-            
-    except Exception as e:
-        # Return empty DF with expected columns if error
-        df = pd.DataFrame(columns=['config_name', 'source_table', 'destination_table', 'updated_at'])
-    finally:
-        conn.close()
-    return df
-
-def get_config_content(config_name):
-    """Retrieves the JSON content of a specific configuration."""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT json_data FROM configs WHERE config_name=?", (config_name,))
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return json.loads(row[0])
-    return None
-
-def delete_config(config_name):
-    """Deletes a configuration from the database by name."""
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("DELETE FROM configs WHERE config_name=?", (config_name,))
-        conn.commit()
-        return True, "Config deleted successfully"
-    except Exception as e:
-        return False, str(e)
-    finally:
-        conn.close()
-
-def get_config_history(config_name):
-    """Retrieves all versions of a configuration."""
-    # Ensure config_histories table exists with correct schema
-    ensure_config_histories_table()
-
-    conn = get_connection()
-    try:
-        # Get config_id from config_name first
-        c = conn.cursor()
-        c.execute("SELECT id FROM configs WHERE config_name=?", (config_name,))
-        result = c.fetchone()
-
-        if result:
-            config_id = result[0]
-            df = pd.read_sql_query(
-                "SELECT id, version, created_at FROM config_histories WHERE config_id=? ORDER BY version DESC",
-                conn,
-                params=(config_id,)
-            )
-        else:
-            df = pd.DataFrame(columns=['id', 'version', 'created_at'])
-    except:
-        df = pd.DataFrame(columns=['id', 'version', 'created_at'])
-    finally:
-        conn.close()
-    return df
-
-def get_config_version(config_name, version):
-    """Retrieves a specific version of a configuration."""
-    # Ensure config_histories table exists with correct schema
-    ensure_config_histories_table()
-
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        # Get config_id first
-        c.execute("SELECT id FROM configs WHERE config_name=?", (config_name,))
-        result = c.fetchone()
-
-        if result:
-            config_id = result[0]
-            c.execute("SELECT json_data FROM config_histories WHERE config_id=? AND version=?", (config_id, version))
-            row = c.fetchone()
-            if row:
-                return json.loads(row[0])
-        return None
-    except:
-        return None
-    finally:
-        conn.close()
-
-# --- Pipeline CRUD Operations ---
-
-def save_pipeline(name, description, json_data, source_ds_id, target_ds_id, error_strategy):
-    """Save (insert or overwrite) a pipeline. Preserves id on update."""
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        json_str = json.dumps(json_data) if isinstance(json_data, dict) else json_data
-
-        # Reuse existing id so foreign keys in pipeline_runs stay intact
-        c.execute("SELECT id FROM pipelines WHERE name=?", (name,))
-        existing = c.fetchone()
-        if existing:
-            pipeline_id = existing[0]
-        else:
-            # Prefer the id embedded in json_data (from PipelineConfig.to_dict)
-            pipeline_id = (json_data.get("id") if isinstance(json_data, dict) else None) or str(uuid.uuid4())
-
-        c.execute(
-            '''INSERT OR REPLACE INTO pipelines
-               (id, name, description, json_data, source_datasource_id,
-                target_datasource_id, error_strategy, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-            (pipeline_id, name, description, json_str,
-             source_ds_id, target_ds_id, error_strategy, datetime.now()),
-        )
-        conn.commit()
-        return True, "Pipeline saved!"
-    except sqlite3.IntegrityError:
-        return False, f"Pipeline name '{name}' already exists."
-    except Exception as e:
-        return False, str(e)
-    finally:
-        conn.close()
-
-
-def get_pipelines_list():
-    """Return a lightweight DataFrame for the pipeline list UI."""
-    conn = get_connection()
-    try:
-        df = pd.read_sql_query(
-            '''SELECT id, name, description, error_strategy,
-                      source_datasource_id, target_datasource_id,
-                      created_at, updated_at
-               FROM pipelines ORDER BY updated_at DESC''',
-            conn,
-        )
-    except Exception:
-        df = pd.DataFrame(columns=[
-            "id", "name", "description", "error_strategy",
-            "source_datasource_id", "target_datasource_id",
-            "created_at", "updated_at",
-        ])
-    finally:
-        conn.close()
-    return df
-
-
-def get_pipeline_by_name(name):
-    """Return full pipeline record including parsed json_data, or None."""
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute(
-        '''SELECT id, name, description, json_data, source_datasource_id,
-                  target_datasource_id, error_strategy, created_at, updated_at
-           FROM pipelines WHERE name=?''',
-        (name,),
-    )
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "name": row[1],
-            "description": row[2],
-            "json_data": json.loads(row[3]) if row[3] else {},
-            "source_datasource_id": row[4],
-            "target_datasource_id": row[5],
-            "error_strategy": row[6],
-            "created_at": row[7],
-            "updated_at": row[8],
-        }
-    return None
-
-
-def delete_pipeline(name):
-    """Delete a pipeline and its runs (CASCADE)."""
-    conn = get_connection()
-    c = conn.cursor()
-    try:
-        c.execute("DELETE FROM pipelines WHERE name=?", (name,))
-        conn.commit()
-        return True, "Pipeline deleted successfully"
-    except Exception as e:
-        return False, str(e)
-    finally:
-        conn.close()
-
-
-# --- Pipeline Runs CRUD ---
-# All functions open their own connection so they are safe to call from a
-# background thread (SQLite objects must not cross thread boundaries).
-
-def save_pipeline_run(pipeline_id, status, steps_json):
-    """Insert a new run record. Returns the new run_id (UUID string)."""
-    conn = get_connection()
-    c = conn.cursor()
-    run_id = str(uuid.uuid4())
-    try:
-        c.execute(
-            '''INSERT INTO pipeline_runs
-               (id, pipeline_id, status, started_at, steps_json)
-               VALUES (?, ?, ?, ?, ?)''',
-            (run_id, pipeline_id, status, datetime.now(), steps_json),
-        )
-        conn.commit()
-        return run_id
-    except Exception as e:
-        print(f"save_pipeline_run error: {e}")
-        return run_id
-    finally:
-        conn.close()
-
-
-def update_pipeline_run(run_id, status, steps_json, error_message=None):
-    """Update an existing run's status and step snapshot.
-
-    Sets completed_at for any terminal status (not 'running'/'pending').
-    Safe to call from a background thread — opens its own connection.
-    """
-    conn = get_connection()
-    c = conn.cursor()
-    terminal = status not in ("running", "pending")
-    try:
-        c.execute(
-            '''UPDATE pipeline_runs
-               SET status=?, steps_json=?, error_message=?,
-                   completed_at=CASE WHEN ? THEN ? ELSE completed_at END
-               WHERE id=?''',
-            (status, steps_json, error_message,
-             terminal, datetime.now().isoformat(),
-             run_id),
-        )
-        conn.commit()
-    except Exception as e:
-        print(f"update_pipeline_run error: {e}")
-    finally:
-        conn.close()
-
-
-def get_pipeline_runs(pipeline_id):
-    """Return all runs for a pipeline as a DataFrame, newest first."""
-    conn = get_connection()
-    try:
-        df = pd.read_sql_query(
-            '''SELECT id, status, started_at, completed_at, error_message
-               FROM pipeline_runs WHERE pipeline_id=?
-               ORDER BY started_at DESC''',
-            conn,
-            params=(pipeline_id,),
-        )
-    except Exception:
-        df = pd.DataFrame(columns=["id", "status", "started_at", "completed_at", "error_message"])
-    finally:
-        conn.close()
-    return df
-
-
-def get_latest_pipeline_run(pipeline_id):
-    """Return the most recent run record for a pipeline, or None.
-
-    Used by the UI to poll background thread progress.
-    steps_json is parsed back to a dict for convenience.
-    """
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute(
-        '''SELECT id, status, started_at, completed_at, steps_json, error_message
-           FROM pipeline_runs WHERE pipeline_id=?
-           ORDER BY started_at DESC LIMIT 1''',
-        (pipeline_id,),
-    )
-    row = c.fetchone()
-    conn.close()
-    if row:
-        return {
-            "id": row[0],
-            "status": row[1],
-            "started_at": row[2],
-            "completed_at": row[3],
-            "steps": json.loads(row[4]) if row[4] else {},
-            "error_message": row[5],
-        }
-    return None
-
-
-def compare_config_versions(config_name, version1, version2):
-    """Compares two versions of a configuration and returns the differences."""
-    config_v1 = get_config_version(config_name, version1)
-    config_v2 = get_config_version(config_name, version2)
-
-    if not config_v1 or not config_v2:
-        return None
-
-    diff = {
-        'mappings_added': [],
-        'mappings_removed': [],
-        'mappings_modified': []
-    }
-
-    mappings_v1 = {m['source']: m for m in config_v1.get('mappings', [])}
-    mappings_v2 = {m['source']: m for m in config_v2.get('mappings', [])}
-
-    # Find added and modified mappings
-    for source, mapping_v2 in mappings_v2.items():
-        if source not in mappings_v1:
-            diff['mappings_added'].append(mapping_v2)
-        elif mappings_v1[source] != mapping_v2:
-            diff['mappings_modified'].append({
-                'source': source,
-                'old': mappings_v1[source],
-                'new': mapping_v2
-            })
-
-    # Find removed mappings
-    for source, mapping_v1 in mappings_v1.items():
-        if source not in mappings_v2:
-            diff['mappings_removed'].append(mapping_v1)
-
-    return diff
+    """Deprecated: Table schemas are now managed by repositories/base.py."""
+    pass  # No-op, schema is created by init_db()

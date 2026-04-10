@@ -1,7 +1,7 @@
 """Data type transformers - Type conversions and null handling."""
 import pandas as pd
 import numpy as np
-from transformers.registry import register_transformer
+from data_transformers.registry import register_transformer
 
 
 @register_transformer("TO_NUMBER", "To Number", "Convert to numeric", has_params=True)

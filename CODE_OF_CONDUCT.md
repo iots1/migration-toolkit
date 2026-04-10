@@ -2,22 +2,46 @@
 
 This document establishes strict MVC (Model-View-Controller) architectural conventions for the HIS Migration Toolkit. **All code contributions must adhere to these rules.** This is not optional — it ensures consistency, testability, and maintainability.
 
+**Architecture Status**: ✅ **Complete** — All 6 pages refactored to strict MVC pattern
+
 ---
 
 ## Quick Reference: The Three Layers
 
 | Layer | Location | What It Does | What It CANNOT Do |
 |-------|----------|--------------|------------------|
-| **Model** | `models/`, `services/` | Pure Python: data structures, business logic, DB queries | ❌ NO `import streamlit` |
-| **View** | `views/`, `views/components/` | Streamlit rendering ONLY: `st.button`, `st.text_input`, etc. | ❌ NO `import database`, `import services`, direct `st.session_state` manipulation |
-| **Controller** | `controllers/` | Orchestrate: init state, fetch data, define callbacks, call view | ✅ CAN import models/services/database, CAN manipulate `st.session_state` |
+| **Model** | `models/`, `repositories/`, `services/`, `protocols/` | Pure Python: data structures, business logic, DB queries via repositories | ❌ NO `import streamlit` |
+| **View** | `views/`, `views/components/` | Streamlit rendering ONLY: `st.button`, `st.text_input`, etc. | ❌ NO `import database`, `import services.*`, direct `st.session_state` manipulation |
+| **Controller** | `controllers/` | Orchestrate: init state, fetch data via repositories, define callbacks, call view | ✅ CAN import repositories, services, models, CAN manipulate `st.session_state` |
 
 ---
 
-## Layer 1: Models & Services (Pure Python)
+## Architecture Overview (PostgreSQL + SOLID)
+
+**Database**: PostgreSQL with UUID primary keys, timezone-aware timestamps
+**Connection Pool**: Thread-safe SQLAlchemy Engine singleton
+**Pattern**: Repository + Protocol interfaces (DIP), Registry patterns (OCP)
+**MVC**: Strict separation for all 6 pages
+
+```
+User Request
+    ↓
+app.py (Router)
+    ↓
+Controller (Orchestration)
+    ├─→ Repositories (Data Access)
+    ├─→ Services (Business Logic)
+    └─→ View (Pure Rendering)
+         ↓
+    Streamlit UI
+```
+
+---
+
+## Layer 1: Models, Repositories & Services (Pure Python)
 
 ### Rule 1.1: NO Streamlit Imports
-**Files in `models/` and `services/` MUST NEVER import `streamlit`.**
+**Files in `models/`, `repositories/`, `services/`, `protocols/` MUST NEVER import `streamlit`.**
 
 ```python
 # ❌ WRONG
@@ -28,59 +52,83 @@ from services.transformers import DataTransformer
 from services.transformers import DataTransformer
 ```
 
-### Rule 1.2: Services Are Pure Functions & Classes
-Services handle business logic without side effects. All I/O (database, APIs) is explicit.
+### Rule 1.2: Use Repositories for Data Access
+**Controllers import from `repositories/`, NOT from `database.py` (legacy facade being removed).**
+
+```python
+# ✅ CORRECT - Direct repository imports
+from repositories.datasource_repo import get_all, get_by_id, save
+from repositories.config_repo import get_list, get_content, save as config_save
+from repositories.pipeline_repo import get_list, get_by_name, save as pipeline_save
+
+# ❌ WRONG - Legacy facade (being removed)
+import database as db
+datasources = db.get_datasources()
+```
+
+### Rule 1.3: Repository Functions Return Tuples for Mutations
+**Save/update/delete functions return `(success: bool, message: str)`**
+
+```python
+# ✅ GOOD - Repository pattern
+from repositories.datasource_repo import save
+
+ok, msg = save("MyDB", "MySQL", "localhost", "3306", "mydb", "user", "pass")
+if ok:
+    print("Success!")
+else:
+    print(f"Error: {msg}")
+
+# ❌ WRONG - Direct DB calls in service
+def save_datasource(...):
+    conn.execute(...)  # Services shouldn't touch DB directly
+```
+
+### Rule 1.4: Use Protocol Interfaces for DI (Dependency Inversion)
+**Services accept protocol interfaces, not concrete implementations.**
+
+```python
+# ✅ GOOD - Protocol-based DI
+from typing import Protocol
+
+class ConfigRepository(Protocol):
+    def get_content(self, config_name: str) -> dict | None: ...
+    def save(self, config_name: str, table_name: str, json_data: str) -> tuple[bool, str]: ...
+
+class MyService:
+    def __init__(self, config_repo: ConfigRepository):
+        self.config_repo = config_repo  # Can be any implementation
+```
+
+### Rule 1.5: Services Are Pure Functions & Classes
+**Services handle business logic without side effects. All I/O is explicit.**
 
 ```python
 # ✅ GOOD
 class DataTransformer:
-    def apply_trim(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df.apply(lambda x: x.str.strip() if isinstance(x, str) else x)
+    def apply_trim(self, series: pd.Series) -> pd.Series:
+        return series.str.strip()
 
-# ❌ BAD (no side effects, but this pollutes the service layer)
+# ❌ BAD
 def fetch_and_display_results():
-    results = db.query(...)
+    results = repository.get_all()
     st.dataframe(results)  # Rendering code in service layer
 ```
 
-### Rule 1.3: Models Are Dataclasses With Optional Conversion Methods
+### Rule 1.6: Use Registry Patterns for Extensibility (OCP)
+**Add new transformers/validators/dialects via decorators, not by modifying existing code.**
 
 ```python
-# ✅ GOOD
-@dataclass
-class MigrationConfig:
-    config_name: str
-    source_database: str
-    mappings: list[MappingItem] = field(default_factory=list)
+# ✅ GOOD - Open/Closed Principle
+from data_transformers.registry import register
 
-    @classmethod
-    def from_dict(cls, d: dict) -> "MigrationConfig":
-        return cls(
-            config_name=d.get("config_name"),
-            source_database=d.get("source_database"),
-            mappings=[MappingItem.from_dict(m) for m in d.get("mappings", [])]
-        )
+@register("MY_TRANSFORMER", "My Transformer", "Description")
+def my_transformer(series, params=None):
+    return series.astype(str).str.upper()
 
-    def to_dict(self) -> dict:
-        return {
-            "config_name": self.config_name,
-            "source_database": self.source_database,
-            "mappings": [m.to_dict() for m in self.mappings]
-        }
-```
-
-### Rule 1.4: Database Access Is Handled by `database.py` or Repository Services
-
-The controller imports from `database.py` — services do NOT call database directly (except `services/datasource_repository.py` which is a query helper).
-
-```python
-# ✅ CONTROLLER imports database
-import database as db
-datasources = db.get_datasources()
-
-# ❌ SERVICE should NOT import database
-# services/my_service.py
-import database as db  # DON'T DO THIS
+# ❌ WRONG - Modifying core code
+# In transformers.py:
+# TRANSFORMER_OPTIONS.append({"name": "MY_TRANSFORMER", ...})
 ```
 
 ---
@@ -88,24 +136,25 @@ import database as db  # DON'T DO THIS
 ## Layer 2: Views (Dumb Rendering)
 
 ### Rule 2.1: Views Are Pure Streamlit Renderers
-Views MUST ONLY contain `st.*` calls. No business logic, no database imports.
+**Views MUST ONLY contain `st.*` calls. No business logic, no repository imports.**
 
 ```python
 # ✅ GOOD
-def render_settings_page(datasources_df, form_state: dict, callbacks: dict) -> None:
+def render_settings_page(datasources_df, configs_df, form_state: dict, callbacks: dict) -> None:
     st.subheader("Settings")
     if st.button("Save", type="primary"):
         callbacks["on_save"]()
 
 # ❌ BAD (business logic in view)
 def render_settings_page():
-    datasources = db.get_datasources()  # Business logic
-    if len(datasources) > 10:  # Decision logic
+    from repositories.datasource_repo import get_all  # NO!
+    datasources = get_all()
+    if len(datasources) > 10:
         st.warning("Too many datasources")
 ```
 
 ### Rule 2.2: Views Receive All Data as Arguments
-Views must be 100% determined by their arguments. No global state, no assumptions.
+**Views must be 100% determined by their arguments. No global state, no assumptions.**
 
 ```python
 # ✅ GOOD
@@ -121,7 +170,7 @@ def render_datasource_tab():
 ```
 
 ### Rule 2.3: Views Accept Callbacks for All Actions
-Button clicks, form submissions, etc. delegate to callbacks provided by the controller.
+**Button clicks, form submissions, etc. delegate to callbacks provided by the controller.**
 
 ```python
 # ✅ GOOD
@@ -131,20 +180,23 @@ if st.button("Save Changes", type="primary", use_container_width=True):
         if not ok:
             st.error(msg)
 
-# ❌ BAD (view doing the database call)
+# ❌ BAD (view doing the repository call)
 if st.button("Save Changes", type="primary"):
-    db.update_datasource(...)  # NO! Controller should do this
+    from repositories.datasource_repo import save  # NO!
+    save(...)  # Controller should do this
     st.success("Updated!")
 ```
 
 ### Rule 2.4: Views Are Private Functions (Prefix with `_`)
-Private render functions prevent accidental direct imports.
+**Private render functions prevent accidental direct imports.**
 
 ```python
 # views/settings_view.py
 
 def render_settings_page(...) -> None:
     """Public entry point called by controller."""
+    _render_datasource_tab(...)
+    _render_config_tab(...)
 
 def _render_datasource_tab(...) -> None:
     """Private helper, called only by render_settings_page."""
@@ -157,7 +209,7 @@ def _render_datasource_tab(...) -> None:
 ds_name = st.text_input("Name", key="new_ds_name")
 
 # ❌ BAD (hardcoded keys outside session_state management)
-ds_name = st.text_input("Name", key="some_random_key")
+ds_name = st.text_input("Name", key="some_random_key_12345")
 ```
 
 ---
@@ -165,7 +217,7 @@ ds_name = st.text_input("Name", key="some_random_key")
 ## Layer 3: Controllers (Orchestration)
 
 ### Rule 3.1: Controllers Own All Session State for Their Feature
-Controllers initialize, read, and modify session state for their page.
+**Controllers initialize, read, and modify session state for their page.**
 
 ```python
 # controllers/settings_controller.py
@@ -184,16 +236,20 @@ def run() -> None:
     is_edit_mode = PageState.get("is_edit_mode")
 ```
 
-### Rule 3.2: Controllers Fetch All Data
-Controllers call `database.py`, `services/`, and `models/` to gather data before rendering.
+### Rule 3.2: Controllers Fetch All Data via Repositories
+**Controllers call `repositories/` to gather data before rendering.**
 
 ```python
+# ✅ CORRECT - Use repositories directly
+from repositories.datasource_repo import get_all
+from repositories.config_repo import get_list
+
 def run() -> None:
     PageState.init(_DEFAULTS)
 
     # Fetch data
-    datasources_df = db.get_datasources()
-    configs_df = db.get_configs_list()
+    datasources_df = get_all()
+    configs_df = get_list()
 
     # Assemble state snapshot
     form_state = {
@@ -203,12 +259,17 @@ def run() -> None:
 
     # Pass to view
     render_settings_page(datasources_df, configs_df, form_state, callbacks)
+
+# ❌ WRONG - Using legacy facade
+import database as db  # Don't use this anymore
+datasources_df = db.get_datasources()
 ```
 
 ### Rule 3.3: Controllers Define All Action Callbacks
-Every button click, form submission, or data mutation flows through a callback defined in the controller.
+**Every button click, form submission, or data mutation flows through a callback defined in the controller.**
 
 ```python
+# ✅ GOOD - All callbacks in controller
 callbacks = {
     "on_row_select": _on_row_select,
     "on_save_new": _on_save_new,
@@ -219,13 +280,15 @@ callbacks = {
 }
 
 def _on_row_select(ds_id: int) -> None:
-    full_data = db.get_datasource_by_id(ds_id)
+    from repositories.datasource_repo import get_by_id
+    full_data = get_by_id(ds_id)
     PageState.set("is_edit_mode", True)
     PageState.set("edit_ds_id", ds_id)
     st.rerun()
 
 def _on_save_new(name: str, host: str, ...) -> tuple[bool, str]:
-    ok, msg = db.save_datasource(name, host, ...)
+    from repositories.datasource_repo import save
+    ok, msg = save(name, "MySQL", host, "3306", ...)
     if ok:
         PageState.set("trigger_reset", True)
         st.rerun()
@@ -233,19 +296,25 @@ def _on_save_new(name: str, host: str, ...) -> tuple[bool, str]:
 ```
 
 ### Rule 3.4: Controllers Call the View's Public Render Function
-The view is called exactly once, at the end of the controller.
+**The view is called exactly once, at the end of the controller.**
 
 ```python
 def run() -> None:
     PageState.init(_DEFAULTS)
 
-    # ... fetch data, define callbacks ...
+    # Fetch data
+    datasources_df = get_all()
+    configs_df = get_list()
 
+    # Define callbacks
+    callbacks = {...}
+
+    # Call view ONCE
     render_settings_page(datasources_df, configs_df, form_state, callbacks)  # ← ONLY HERE
 ```
 
 ### Rule 3.5: Controllers Manage State Mutations, Not Views
-Only controllers can call `PageState.set()`. Views never touch session state.
+**Only controllers can call `PageState.set()`. Views never touch session state.**
 
 ```python
 # ✅ CONTROLLER
@@ -262,23 +331,26 @@ def render_form(...):
 
 ## File Structure & Naming Conventions
 
-### Naming Pattern
+### Naming Pattern (PostgreSQL Architecture)
 ```
 feature/
   models/feature_model.py              (if needed, contains @dataclass)
+  repositories/feature_repo.py         (PostgreSQL CRUD)
   services/feature_service.py          (if needed, contains logic)
-  controllers/feature_controller.py    (owns state, fetches data, calls view)
+  controllers/feature_controller.py    (owns state, fetches data via repos, calls view)
   views/feature_view.py                (pure rendering)
   views/components/feature/
     sub_component.py                   (reusable sub-components)
 ```
 
-### Example: Settings Feature (PoC)
+### Completed Controllers (6/6)
 ```
-✅ controllers/settings_controller.py
-✅ views/settings_view.py
-✅ views/components/shared/dialogs.py  (reusable dialog components)
-✅ views/components/shared/styles.py   (reusable CSS)
+✅ controllers/settings_controller.py      + views/settings_view.py
+✅ controllers/pipeline_controller.py      + views/pipeline_view.py
+✅ controllers/file_explorer_controller.py + views/file_explorer.py
+✅ controllers/er_diagram_controller.py    + views/er_diagram.py
+✅ controllers/schema_mapper_controller.py + views/schema_mapper.py
+✅ controllers/migration_engine_controller.py + views/migration_engine.py
 ```
 
 ---
@@ -286,7 +358,7 @@ feature/
 ## Shared Components (Views)
 
 ### Rule 4.1: Dialogs Live in `views/components/shared/dialogs.py`
-All `@st.dialog` components should be reusable and receive pre-fetched data.
+**All `@st.dialog` components should be reusable and receive pre-fetched data.**
 
 ```python
 # ✅ GOOD: Controller fetches, dialog renders
@@ -298,17 +370,20 @@ def preview_config_dialog(config_name: str, content: dict | None) -> None:
         st.error("Could not load configuration.")
 
 # In controller:
-content = db.get_config_content(config_name)
+from repositories.config_repo import get_content
+content = get_content(config_name)
 preview_config_dialog(config_name, content)
 
 # ❌ BAD: Dialog fetches data itself
 @st.dialog("Preview Configuration")
 def preview_config_dialog(config_name: str) -> None:
-    content = db.get_config_content(config_name)  # Dialog shouldn't fetch
+    from repositories.config_repo import get_content  # Dialog shouldn't fetch
+    content = get_content(config_name)
+    st.json(content)
 ```
 
 ### Rule 4.2: Shared CSS Goes in `views/components/shared/styles.py`
-Global CSS that affects multiple pages should be centralized.
+**Global CSS that affects multiple pages should be centralized.**
 
 ```python
 # views/components/shared/styles.py
@@ -322,157 +397,191 @@ inject_global_css()
 
 ---
 
-## Migration Rules: Refactoring Legacy Code
+## PostgreSQL-Specific Rules
 
-When refactoring a legacy page (e.g., `schema_mapper.py`), follow this checklist:
+### Rule 5.1: Use Thread-Safe Connection Managers
+**For background threads (pipeline_service.py), use `get_transaction()` context manager.**
 
-### Pre-Refactoring
-- [ ] Read the entire view file to understand all state keys
-- [ ] Identify all database calls (`db.*`, `database.*`)
-- [ ] Identify all helper functions (these become controller actions)
-- [ ] List all buttons/form interactions (these become callbacks)
+```python
+# ✅ GOOD - Thread-safe
+from repositories.connection import get_transaction
 
-### During Refactoring
-- [ ] Create `controllers/feature_controller.py` with:
-  - `_DEFAULTS: dict` (all session state keys)
-  - `run()` function (entry point)
-  - Private action callbacks (`_on_*` functions)
-- [ ] Create `views/feature_view.py` with:
-  - Public `render_feature_page(data, form_state, callbacks)` function
-  - Private `_render_*` helper functions
-  - ZERO database imports
-  - ZERO business logic
-- [ ] Update `app.py` to import controller and call `controller.run()`
+def my_background_task():
+    with get_transaction() as conn:
+        result = conn.execute(text("SELECT ..."))
+    # Connection automatically closed after with block
 
-### Post-Refactoring
-- [ ] View should have NO `db.` calls
-- [ ] View should have NO `PageState.set()` calls (reads only via `form_state` dict)
-- [ ] View should have NO conditional logic beyond "is field empty?"
-- [ ] Test all CRUD operations (create, read, update, delete)
-- [ ] Test all edge cases (empty data, invalid input, etc.)
+# ❌ BAD - Not thread-safe
+from repositories.connection import get_engine
+
+engine = get_engine()
+conn = engine.connect()  # Don't share connections across threads
+```
+
+### Rule 5.2: Handle UUID Types Correctly
+**PostgreSQL uses native UUID type. Pass `uuid.UUID` objects, not strings.**
+
+```python
+# ✅ GOOD
+import uuid
+from repositories.pipeline_repo import save
+
+pipeline_id = uuid.uuid4()  # UUID object
+save("MyPipeline", "Desc", json_data, src_id, tgt_id, "fail_fast")
+
+# ❌ BAD
+pipeline_id = str(uuid.uuid4())  # Don't convert to string
+```
+
+### Rule 5.3: Use Repository Functions, Not Raw SQL
+**Let repositories handle all SQL. Controllers shouldn't write queries.**
+
+```python
+# ✅ GOOD - Use repository
+from repositories.config_repo import get_content
+content = get_content("my_config")
+
+# ❌ BAD - Raw SQL in controller
+from repositories.connection import get_engine
+engine = get_engine()
+with engine.connect() as conn:
+    result = conn.execute(text("SELECT * FROM configs WHERE ..."))
+```
 
 ---
 
 ## Testing & Validation
 
-### Unit Test Pattern: Services First
+### Unit Test Pattern: Repositories
 ```python
-# tests/test_my_service.py
-def test_data_transformer():
-    transformer = DataTransformer()
-    df = pd.DataFrame({"name": [" Alice ", " Bob "]})
-    result = transformer.apply_trim(df)
-    assert result["name"].tolist() == ["Alice", "Bob"]  # Pure Python test
+# tests/test_datasource_repo.py
+def test_save_and_get_datasource():
+    from repositories.datasource_repo import save, get_all, get_by_name
+
+    # Save
+    ok, msg = save("test_ds", "MySQL", "localhost", "3306", "testdb", "user", "pass")
+    assert ok
+
+    # Get all
+    df = get_all()
+    assert "test_ds" in df["name"].values
+
+    # Get by name
+    ds = get_by_name("test_ds")
+    assert ds["db_type"] == "MySQL"
 ```
 
-### Integration Test Pattern: Controller + View
+### Unit Test Pattern: Services
+```python
+# tests/test_transformer.py
+def test_data_transformer():
+    from data_transformers.text import trim
+    import pandas as pd
+
+    df = pd.DataFrame({"name": [" Alice ", " Bob "]})
+    result = trim(df)
+    assert result["name"].tolist() == ["Alice", "Bob"]
+```
+
+### Integration Test Pattern: Controllers
 ```python
 # Tests should verify:
 # 1. Controller initializes state correctly
-# 2. Controller fetches data correctly
+# 2. Controller fetches data via repositories correctly
 # 3. Callbacks modify state and trigger rerun correctly
 # 4. View renders with provided data and callbacks
-
-# Note: Full E2E Streamlit testing is complex — focus on service/controller unit tests
 ```
 
 ---
 
 ## Code Review Checklist
 
-Before merging any controller/view refactor, verify:
+Before merging any code, verify:
 
-- [ ] **Model Layer**: No `import streamlit` in `models/` or `services/`
-- [ ] **View Layer**: No `import database`, `db.*` calls, or `PageState.set()`
-- [ ] **Controller Layer**: All state mutations happen here, all data fetches happen here
+### Architecture
+- [ ] **Model Layer**: No `import streamlit` in `models/`, `repositories/`, `services/`, `protocols/`
+- [ ] **Repository Layer**: All DB access via `repositories/`, NOT `database.py` facade
+- [ ] **View Layer**: No repository imports, no `PageState.set()`, pure rendering only
+- [ ] **Controller Layer**: All state mutations happen here, all data fetches via repositories
+
+### MVC Pattern
 - [ ] **Naming**: Functions prefixed with `_render`, `_on_*`, `run()`, etc.
 - [ ] **Callbacks**: All callbacks defined in controller, not hardcoded in view
 - [ ] **Session State**: Only controller initializes and mutates session state
 - [ ] **App.py**: Routes to `controller.run()` not `view.render_*()`
-- [ ] **Comments**: Docstrings on public functions explaining the contract (what data/callbacks they expect)
+
+### PostgreSQL
+- [ ] **UUID Handling**: Using `uuid.UUID` objects, not strings
+- [ ] **Thread Safety**: Background threads use `get_transaction()` context manager
+- [ ] **Connection Pool**: Using SQLAlchemy Engine singleton, not creating raw connections
+
+### Documentation
+- [ ] **Docstrings**: Public functions have docstrings explaining their contract
+- [ ] **Type Hints**: Using `from __future__ import annotations` for Python 3.12 compatibility
 
 ---
 
 ## Examples & Anti-Patterns
 
-### ✅ Good: Dialog with Pre-Fetched Data
+### ✅ Good: Controller Using Repositories
 
 ```python
 # controllers/settings_controller.py
-def _on_preview_config(config_name: str) -> None:
-    content = db.get_config_content(config_name)
+from repositories.datasource_repo import get_all, save, update, delete
+from repositories.config_repo import get_list
+
+def run() -> None:
+    PageState.init(_DEFAULTS)
+
+    # Fetch via repositories
+    datasources_df = get_all()
+    configs_df = get_list()
+
+    # Define callbacks that use repositories
+    def _on_save_new(...) -> tuple[bool, str]:
+        ok, msg = save(name, db_type, host, port, ...)
+        return ok, msg
+```
+
+### ❌ Bad: Controller Using Legacy Facade
+
+```python
+# ❌ WRONG: Using database.py facade
+import database as db
+
+def run():
+    datasources = db.get_datasources()  # Don't use this
+```
+
+### ✅ Good: Dialog with Pre-Fetched Data
+
+```python
+# Controller
+from repositories.config_repo import get_content
+
+def _on_preview_config(config_name: str):
+    content = get_content(config_name)
     preview_config_dialog(config_name, content)
 
-# views/settings_view.py
+# View
 if st.button("Preview"):
     callbacks["on_preview_config"](config_name)
 
-# views/components/shared/dialogs.py
+# Dialog
 @st.dialog("Preview")
-def preview_config_dialog(config_name: str, content: dict | None) -> None:
-    st.json(content)  # Just render
+def preview_config_dialog(config_name: str, content: dict | None):
+    st.json(content)
 ```
 
 ### ❌ Bad: Dialog Fetching Data
 
 ```python
-# ❌ WRONG: Dialog is fetching data
+# ❌ WRONG: Dialog fetching data
 @st.dialog("Preview")
-def preview_config_dialog(config_name: str) -> None:
-    content = db.get_config_content(config_name)  # NO!
+def preview_config_dialog(config_name: str):
+    from repositories.config_repo import get_content  # NO!
+    content = get_content(config_name)
     st.json(content)
-```
-
-### ✅ Good: Callback Returns Data to View
-
-```python
-# views/settings_view.py
-if st.button("Save"):
-    ok, msg = callbacks["on_save"](form_data)
-    if not ok:
-        st.error(msg)
-
-# controllers/settings_controller.py
-def _on_save(...) -> tuple[bool, str]:
-    ok, msg = db.save_datasource(...)
-    if ok:
-        PageState.set("trigger_reset", True)
-        st.rerun()
-    return ok, msg  # View gets result
-```
-
-### ❌ Bad: View Showing Success/Error without Callback Return
-
-```python
-# ❌ WRONG: View assumes success
-if st.button("Save"):
-    callbacks["on_save"](form_data)
-    st.success("Saved!")  # What if save failed?
-```
-
-### ✅ Good: State Snapshot in Form State Dict
-
-```python
-# controllers/settings_controller.py
-form_state = {
-    "is_edit_mode": PageState.get("is_edit_mode"),
-    "edit_ds_id": PageState.get("edit_ds_id"),
-}
-render_settings_page(..., form_state, ...)
-
-# views/settings_view.py
-def render_settings_page(..., form_state: dict, ...) -> None:
-    if form_state["is_edit_mode"]:
-        st.write("Edit mode")
-```
-
-### ❌ Bad: View Accessing Session State Directly
-
-```python
-# ❌ WRONG: View shouldn't touch session_state
-def render_settings_page(...) -> None:
-    if st.session_state.is_edit_mode:  # NO!
-        st.write("Edit mode")
 ```
 
 ---
@@ -481,13 +590,15 @@ def render_settings_page(...) -> None:
 
 The three rules of MVC here:
 
-1. **Models/Services** — Pure Python, zero Streamlit, zero side effects
+1. **Models/Repositories/Services** — Pure Python, zero Streamlit, use repositories for DB access
 2. **Views** — Only Streamlit rendering, receive all data + callbacks as arguments, NEVER fetch data
-3. **Controllers** — Orchestrate everything: init state, fetch data, define callbacks, call view once
+3. **Controllers** — Orchestrate everything: init state, fetch data via repositories, define callbacks, call view once
 
-When in doubt: **"If it's data or business logic, it belongs in the controller. If it's a button or text input, it belongs in the view. If it's a pure function, it belongs in services."**
+**When in doubt**: *"If it's data or business logic, it belongs in the controller. If it's a button or text input, it belongs in the view. If it's a pure function or DB access, it belongs in repositories/services."*
 
 ---
 
-**Last Updated**: 2026-03-25
+**Last Updated**: 2026-04-10
 **Status**: ✅ Active — enforced on all new code
+**Architecture**: PostgreSQL + Clean Architecture + SOLID + MVC
+**Migration**: All 10 phases complete

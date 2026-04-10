@@ -6,17 +6,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### Setup
 ```bash
-python3.11 -m venv venv
+python3.12 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip
 pip install -r requirements.txt
+```
+
+### Database Setup
+```bash
+# Create PostgreSQL database
+createdb his_analyzer
+
+# Set DATABASE_URL in .env file
+echo "DATABASE_URL=postgresql://user:password@localhost:5432/his_analyzer" > .env
+
+# Initialize schema (done automatically on first run, or manually:)
+python3.12 -c "from repositories.base import init_db; init_db()"
 ```
 
 ### Run the App
 ```bash
 streamlit run app.py
 # With hot-reload:
-python3.11 -m streamlit run app.py --server.runOnSave true
+python3.12 -m streamlit run app.py --server.runOnSave true
 ```
 
 ### Database Analysis (Bash)
@@ -29,101 +41,181 @@ bash unified_db_analyzer.sh
 
 ### Tests
 ```bash
+python3.12 -m pytest tests/ -v
 python test_analysis_simple.py   # AI pattern detection tests
 python test_column_analysis.py   # Column analysis tests
 ```
 
+### Migration (SQLite → PostgreSQL)
+```bash
+# If migrating from legacy SQLite database
+DATABASE_URL=postgresql://user:password@localhost:5432/his_analyzer \
+    python3.12 scripts/migrate_sqlite_to_pg.py
+```
+
 ## Architecture Overview
 
-This is a Streamlit-based HIS (Hospital Information System) database migration toolkit with a three-phase pipeline:
+This is a Streamlit-based HIS (Hospital Information System) database migration toolkit with Clean Architecture + SOLID principles:
 
-1. **Analysis** — `analysis_report/unified_db_analyzer.sh` profiles source DB and outputs CSV/DDL reports
-2. **Mapping** — Streamlit UI for mapping source→target columns with optional AI suggestions (`services/ml_mapper.py`)
-3. **Migration** — Streamlit UI executes ETL: reads source in batches, applies transformers, inserts to target
+**Stack**: PostgreSQL + SQLAlchemy + Streamlit + Python 3.12
 
-### Directory Structure & MVC Pattern
+**Architecture**: Clean Architecture with MVC pattern, Repository pattern, and SOLID principles
 
-The codebase follows **strict MVC (Model-View-Controller)** architecture. See `CODE_OF_CONDUCT.md` for detailed conventions.
+**Key Achievements**:
+- ✅ Migrated from SQLite to PostgreSQL (Phase 1-10 complete)
+- ✅ SOLID principles fully implemented
+- ✅ Repository pattern for data access
+- ✅ Protocol interfaces for DI (Dependency Inversion)
+- ✅ Registry patterns for transformers/validators/dialects (Open/Closed)
+- ✅ Strict MVC separation for all pages
+- ✅ Thread-safe connection pooling
+
+### Directory Structure (PostgreSQL + SOLID)
 
 ```
-├── app.py                          # Router: delegates to controllers/views based on navigation
-├── config.py                       # Constants (transformers, validators, DB types)
-├── database.py                     # Data access layer (SQLite CRUD)
-├── models/                         # Domain models (dataclasses, NO streamlit imports)
+├── app.py                          # Router: delegates to controllers
+├── config.py                       # Environment configuration
+├── database.py                     # Legacy facade (deprecated, being removed)
+├── .env.example                    # Environment variables template
+│
+├── models/                         # Domain models (dataclasses, pure Python)
 │   ├── datasource.py               # Datasource connection profile
 │   ├── migration_config.py         # MigrationConfig & MappingItem
 │   └── pipeline_config.py          # PipelineConfig & PipelineStep
-├── services/                       # Business logic services (pure Python, NO streamlit imports)
-│   ├── db_connector.py             # SQLAlchemy engine factory (MySQL, PostgreSQL, SQLite)
-│   ├── ml_mapper.py                # AI semantic column mapping
-│   ├── transformers.py             # Vectorized data transformations
+│
+├── protocols/                      # Protocol interfaces (DIP - Dependency Inversion)
+│   ├── __init__.py
+│   ├── repository.py               # Repository protocol interfaces
+│   ├── database_dialect.py         # Database dialect protocol
+│   └── transformer.py              # Transformer protocol
+│
+├── repositories/                   # Data access layer (PostgreSQL)
+│   ├── __init__.py
+│   ├── connection.py               # SQLAlchemy engine singleton
+│   ├── base.py                     # DDL + init_db()
+│   ├── datasource_repo.py          # Datasource CRUD
+│   ├── config_repo.py              # Config CRUD + versioning
+│   ├── pipeline_repo.py            # Pipeline CRUD
+│   └── pipeline_run_repo.py        # Pipeline Run CRUD
+│
+├── dialects/                       # Database dialects (OCP - Open/Closed)
+│   ├── __init__.py
+│   ├── registry.py                 # Dialect registry
+│   ├── base.py                     # BaseDialect ABC
+│   ├── mysql.py                    # MySQL dialect
+│   ├── postgresql.py               # PostgreSQL dialect
+│   └── mssql.py                    # MSSQL dialect
+│
+├── data_transformers/              # Data transformations (OCP - pluggable)
+│   ├── __init__.py
+│   ├── registry.py                 # @register_transformer decorator
+│   ├── base.py                     # DataTransformer class
+│   ├── text.py                     # Text transformers (TRIM, UPPER, etc.)
+│   ├── dates.py                    # Date transformers
+│   ├── healthcare.py               # Healthcare-specific transformers
+│   ├── names.py                    # Name transformers
+│   ├── data_type.py                # Data type transformers
+│   └── lookup.py                   # Lookup transformers
+│
+├── validators/                     # Data validators (OCP - pluggable)
+│   ├── __init__.py
+│   ├── registry.py                 # @register_validator decorator
+│   ├── not_null.py                 # NOT_NULL validator
+│   ├── unique.py                   # UNIQUE_CHECK validator
+│   └── range_check.py              # RANGE_CHECK validator
+│
+├── services/                       # Business logic (pure Python)
+│   ├── db_connector.py             # SQLAlchemy engine factory (slim)
+│   ├── connection_pool.py          # Raw DBAPI connection pool
+│   ├── connection_tester.py        # Connection testing
+│   ├── schema_inspector.py         # Schema inspection & sampling
+│   ├── ml_mapper.py                # AI semantic column mapping (no Streamlit)
+│   ├── migration_executor.py       # ETL execution engine
+│   ├── pipeline_service.py         # Pipeline orchestration (DI-compliant)
 │   ├── checkpoint_manager.py       # Migration resumability
-│   ├── datasource_repository.py    # Query helper for datasources
 │   ├── encoding_helper.py          # Character encoding detection
 │   ├── migration_logger.py         # Logging service
 │   ├── query_builder.py            # SQL query builder
-│   ├── migration_executor.py       # ETL execution engine
-│   └── pipeline_service.py         # Pipeline orchestration service
-├── utils/                          # Utilities (state management, helpers)
-│   ├── state_manager.py            # PageState class for session_state
-│   └── ui_components.py            # Legacy CSS/dialogs (being migrated)
-├── controllers/                    # MVC Controllers (orchestrate state & logic)
-│   ├── settings_controller.py      # ✅ Settings page: owns state, fetches data, calls view
-│   └── pipeline_controller.py      # ✅ Data Pipeline: multi-step wizard with execution
-├── views/                          # Streamlit rendering (DUMB — only receive data + callbacks)
-│   ├── settings_view.py            # ✅ Pure rendering, delegates all logic to controller
-│   ├── pipeline_view.py            # ✅ Pure rendering for data pipeline
-│   ├── schema_mapper.py            # 🚧 Legacy (to refactor)
-│   ├── migration_engine.py         # 🚧 Legacy (to refactor)
-│   ├── er_diagram.py               # 🚧 Legacy (simple, to refactor)
-│   └── file_explorer.py            # 🚧 Legacy (simple, to refactor)
-└── views/components/               # Reusable UI components
-    ├── shared/                     # Shared across features
-    │   ├── dialogs.py              # Generic dialogs (confirm, preview)
-    │   └── styles.py               # Global CSS utilities
-    ├── schema_mapper/              # Schema mapper components
-    │   ├── source_selector.py      # Source table selection
-    │   ├── mapping_editor.py       # Column mapping grid
-    │   ├── metadata_editor.py      # Config metadata editor
-    │   ├── config_actions.py       # Save/load/delete actions
-    │   └── history_viewer.py       # Config history viewer
-    └── migration/                  # Migration engine components
-        ├── step_connections.py     # Source/target connection step
-        ├── step_config.py          # Config selection step
-        ├── step_review.py          # Pre-execution review step
-        └── step_execution.py       # Execution monitoring step
+│   └── datasource_repository.py    # Datasource query helper
+│
+├── controllers/                    # MVC Controllers (6/6 complete)
+│   ├── __init__.py
+│   ├── settings_controller.py      # ✅ Settings page
+│   ├── pipeline_controller.py      # ✅ Data Pipeline page
+│   ├── file_explorer_controller.py # ✅ File Explorer page
+│   ├── er_diagram_controller.py    # ✅ ER Diagram page
+│   ├── schema_mapper_controller.py # ✅ Schema Mapper page
+│   └── migration_engine_controller.py # ✅ Migration Engine page
+│
+├── views/                          # MVC Views (pure rendering)
+│   ├── settings_view.py            # ✅ Settings page rendering
+│   ├── pipeline_view.py            # ✅ Data Pipeline rendering
+│   ├── file_explorer.py            # ✅ File Explorer rendering
+│   ├── er_diagram.py               # ✅ ER Diagram rendering
+│   ├── schema_mapper.py            # ✅ Schema Mapper rendering
+│   ├── migration_engine.py         # ✅ Migration Engine rendering
+│   └── components/                 # Reusable UI components
+│       ├── shared/                 # Shared components
+│       │   ├── dialogs.py          # Generic dialogs
+│       │   └── styles.py           # Global CSS utilities
+│       ├── schema_mapper/          # Schema mapper components
+│       └── migration/              # Migration engine components
+│
+├── scripts/                        # Utility scripts
+│   └── migrate_sqlite_to_pg.py     # One-time SQLite → PostgreSQL migration
+│
+└── tests/                          # Test suite
+    ├── test_pipeline_service.py
+    └── ...
 ```
 
-### Key Files
+### Key Files & Their Status
 
-| File | Role | Status |
-|------|------|--------|
-| `app.py` | Router: dispatches to controllers/views | ✅ MVC-ready |
-| `database.py` | SQLite CRUD ops | ✅ Pure data layer |
-| `config.py` | Constants | ✅ No changes needed |
-| `controllers/settings_controller.py` | [PoC] Manages state, fetches data, defines callbacks | ✅ MVC pattern |
-| `views/settings_view.py` | [PoC] Pure Streamlit rendering | ✅ MVC pattern |
-| `views/schema_mapper.py` | Schema mapping UI | 🚧 Legacy (to refactor) |
-| `views/migration_engine.py` | Migration execution UI | 🚧 Legacy (to refactor) |
-| `services/ml_mapper.py` | AI semantic mapping | ✅ Pure Python |
-| `services/transformers.py` | Data transformation | ✅ Pure Python |
+| File | Role | Status | Notes |
+|------|------|--------|-------|
+| `app.py` | Router | ✅ Complete | Routes to all 6 controllers |
+| `database.py` | Legacy facade | 🚧 Deprecated | Being removed, use repositories directly |
+| `repositories/*.py` | Data access layer | ✅ Complete | PostgreSQL CRUD operations |
+| `protocols/*.py` | Protocol interfaces | ✅ Complete | DIP compliance |
+| `dialects/*.py` | DB dialects | ✅ Complete | OCP compliance |
+| `data_transformers/*.py` | Transformers | ✅ Complete | OCP compliance |
+| `validators/*.py` | Validators | ✅ Complete | OCP compliance |
+| `controllers/*.py` | MVC Controllers | ✅ 6/6 Complete | All pages refactored |
+| `services/pipeline_service.py` | Pipeline orchestration | ✅ Complete | DI-compliant (Phase 8) |
 
 ### Data Flow
 
-- **Mapping configs** → saved as JSON blobs in SQLite (`migration_tool.db`), versioned in `config_histories`
-- **Migration engine** → reads config, streams source rows in batches through `DataTransformer`, bulk-inserts to target
-- **Checkpoints** → stored in `migration_checkpoints/` for resuming interrupted migrations
-- **Logs** → written to `migration_logs/migration_NAME_TIMESTAMP.log`
+**PostgreSQL Architecture**:
+- **Connection pooling**: Thread-safe via SQLAlchemy Engine singleton
+- **Repositories**: Handle all PostgreSQL operations via `repositories/connection.py`
+- **Transactions**: Use `get_transaction()` context manager for auto-commit
+- **Thread safety**: Each thread gets its own connection from the pool
+
+**Config Storage**:
+- **Mapping configs** → Saved as JSON in PostgreSQL `configs` table
+- **Version history** → Stored in `config_histories` table
+- **Pipelines** → Stored in `pipelines` table with UUID primary keys
+- **Pipeline runs** → Stored in `pipeline_runs` table with status tracking
+
+**Migration Engine**:
+- **Checkpoints** → Stored in `migration_checkpoints/` (versioned format v2)
+- **Logs** → Written to `migration_logs/migration_NAME_TIMESTAMP.log`
 
 ### Config JSON Structure
 
 Core data structure passed between Schema Mapper and Migration Engine:
 ```json
 {
-  "source": {"database": "<datasource_id or run_id_XXX>", "table": "<table>"},
+  "source": {"database": "<datasource_id>", "table": "<table>"},
   "target": {"database": "<datasource_id>", "table": "<table>"},
   "mappings": [
-    {"source": "col_a", "target": "col_b", "transformers": ["TRIM"], "validators": [], "ignore": false}
+    {
+      "source": "col_a",
+      "target": "col_b",
+      "transformers": ["TRIM"],
+      "validators": [],
+      "ignore": false
+    }
   ]
 }
 ```
@@ -132,16 +224,130 @@ Core data structure passed between Schema Mapper and Migration Engine:
 
 - `ml_mapper.py` — Thai HIS dictionary with acronyms: `HN` (hospital number), `VN` (visit number), `CID` (citizen ID), etc.
 - Transformer `BUDDHIST_TO_ISO` — converts Thai Buddhist years (BE = CE + 543)
-- `mini_his/full_his_mockup.sql` — 884KB PostgreSQL schema with mock patient/visit data for testing
+- `mini_his/full_his_mockup.sql` — 884KB PostgreSQL schema with mock patient/visit data
 
-## Refactoring Roadmap (MVC Transition)
+### PostgreSQL Schema
 
-The project is transitioning from mixed-logic views to strict MVC. Order of refactoring:
+**Tables** (all in PostgreSQL):
+- `datasources` — Datasource connection profiles (SERIAL PK)
+- `configs` — Migration configurations (UUID PK)
+- `config_histories` — Config version history (UUID PK)
+- `pipelines` — Pipeline definitions (UUID PK)
+- `pipeline_runs` — Pipeline execution runs (UUID PK)
 
-1. ✅ **Settings** — `controllers/settings_controller.py` + `views/settings_view.py` (PoC complete)
-2. 🔜 **ER Diagram** — simple, no state
-3. 🔜 **File Explorer** — simple, minimal state
-4. 🔜 **Schema Mapper** — complex state management
-5. 🔜 **Migration Engine** — most complex (multi-step wizard)
+**Connection String**:
+```bash
+DATABASE_URL=postgresql://user:password@localhost:5432/his_analyzer
+```
 
-See `CODE_OF_CONDUCT.md` for strict MVC conventions and how to structure each new controller/view pair.
+## SOLID Principles Implementation
+
+### ✅ Single Responsibility Principle (SRP)
+- Each repository handles ONE domain (datasource, config, pipeline, pipeline_run)
+- Services split into focused modules (db_connector, connection_pool, schema_inspector, connection_tester)
+- Controllers own ONE page's logic
+
+### ✅ Open/Closed Principle (OCP)
+- Transformers: Add new transformers via `@register_transformer` decorator
+- Validators: Add new validators via `@register_validator` decorator
+- Dialects: Add new databases via `dialects/registry.py`
+
+### ✅ Liskov Substitution Principle (LSP)
+- Protocol interfaces ensure implementations are interchangeable
+- All repository implementations follow the same protocol
+
+### ✅ Interface Segregation Principle (ISP)
+- Focused protocol interfaces (DatasourceRepository, ConfigRepository, etc.)
+- No fat interfaces
+
+### ✅ Dependency Inversion Principle (DIP)
+- Controllers depend on protocol interfaces, not concrete implementations
+- `PipelineExecutor` receives repositories via constructor injection
+- `ml_mapper` has no Streamlit dependencies (moved caching to controller)
+
+## Migration Status
+
+**All 10 phases complete** ✅
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| Phase 1 | PostgreSQL connection setup | ✅ Complete |
+| Phase 2 | Repository pattern | ✅ Complete |
+| Phase 3 | Protocol interfaces (DIP) | ✅ Complete |
+| Phase 4 | Database dialect registry (OCP) | ✅ Complete |
+| Phase 5 | Transformer/Validator registries (OCP) | ✅ Complete |
+| Phase 6 | ML Mapper refactored (DIP) | ✅ Complete |
+| Phase 7 | MVC refactoring (6/6 pages) | ✅ Complete |
+| Phase 8 | Pipeline Service DI injection | ✅ Complete |
+| Phase 9 | DB Connector split (SRP) | ✅ Complete |
+| Phase 10 | Migration script + cleanup | ✅ Complete |
+
+See `plan/migrate-sqlite-to-postgresql.md` for detailed implementation notes.
+
+## Development Guidelines
+
+### Adding New Transformers
+```python
+# In data_transformers/text.py (or new file)
+from data_transformers.registry import register
+
+@register("MY_TRANSFORMER", "My Transformer", "Description")
+def my_transformer(series, params=None):
+    return series.astype(str).str.upper()
+```
+
+### Adding New Validators
+```python
+# In validators/new_validator.py
+from validators.registry import register_validator
+
+@register_validator("MY_VALIDATOR", "My Validator")
+def my_validator(series, params=None):
+    # Validation logic
+    pass
+```
+
+### Creating New Controllers
+Follow `CODE_OF_CONTRACT.md` for strict MVC conventions:
+1. Controller owns all session state
+2. Controller fetches all data
+3. Controller defines all callbacks
+4. View does pure rendering only
+
+### Testing
+```bash
+# Unit tests
+python3.12 -m pytest tests/test_pipeline_service.py -v
+
+# Integration tests
+python3.12 -m pytest tests/integration/ -v
+
+# Coverage
+python3.12 -m pytest --cov=repositories --cov=services
+```
+
+## Important Notes
+
+⚠️ **Database.py Facade Being Removed**
+- The `database.py` file is a legacy re-export facade
+- Import from repositories directly instead:
+  - ❌ `import database as db; db.get_datasources()`
+  - ✅ `from repositories.datasource_repo import get_all`
+
+⚠️ **Thread Safety**
+- SQLAlchemy Engine is thread-safe
+- Connection objects are NOT thread-safe
+- Use `get_transaction()` context manager for thread-safe operations
+
+⚠️ **UUID Handling**
+- PostgreSQL uses native UUID type
+- Pass `uuid.UUID` objects, not strings
+- Let PostgreSQL generate UUIDs via `gen_random_uuid()` default
+
+---
+
+**Last Updated**: 2026-04-10
+**Python Version**: 3.12
+**Database**: PostgreSQL 18+
+**Architecture**: Clean Architecture + SOLID + MVC
+**Status**: ✅ Production Ready

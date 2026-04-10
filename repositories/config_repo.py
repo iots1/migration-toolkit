@@ -1,0 +1,82 @@
+import uuid
+import pandas as pd
+from sqlalchemy import text
+from repositories.connection import get_transaction
+
+
+def save(config_name: str, table_name: str, json_data: str):
+    try:
+        with get_transaction() as conn:
+            result = conn.execute(text("SELECT id FROM configs WHERE config_name = :name"), {"name": config_name})
+            existing = result.fetchone()
+            if existing:
+                config_id = existing[0]
+                conn.execute(text("UPDATE configs SET table_name = :table_name, json_data = :json_data, updated_at = CURRENT_TIMESTAMP WHERE id = :id"), {"id": config_id, "table_name": table_name, "json_data": json_data})
+            else:
+                conn.execute(text("INSERT INTO configs (config_name, table_name, json_data, updated_at) VALUES (:config_name, :table_name, :json_data, CURRENT_TIMESTAMP)"), {"config_name": config_name, "table_name": table_name, "json_data": json_data})
+                result = conn.execute(text("SELECT id FROM configs WHERE config_name = :name"), {"name": config_name})
+                config_id = result.scalar()
+            ver_result = conn.execute(text("SELECT COALESCE(MAX(version), 0) FROM config_histories WHERE config_id = :cid"), {"cid": config_id})
+            next_version = ver_result.scalar() + 1
+            conn.execute(text("INSERT INTO config_histories (config_id, version, json_data, created_at) VALUES (:config_id, :version, :json_data, CURRENT_TIMESTAMP)"), {"config_id": config_id, "version": next_version, "json_data": json_data})
+        return True, f"Saved config '{config_name}' (version {next_version})"
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
+
+def get_list():
+    with get_transaction() as conn:
+        return pd.read_sql("SELECT id, config_name, table_name, updated_at FROM configs ORDER BY updated_at DESC", conn)
+
+
+def get_content(config_name: str):
+    with get_transaction() as conn:
+        result = conn.execute(text("SELECT * FROM configs WHERE config_name = :name"), {"name": config_name})
+        row = result.fetchone()
+        if row is None:
+            return None
+        columns = result.keys()
+        data = dict(zip(columns, row))
+        data["id"] = str(data["id"])
+        return data
+
+
+def delete(config_name: str):
+    try:
+        with get_transaction() as conn:
+            result = conn.execute(text("DELETE FROM configs WHERE config_name = :name"), {"name": config_name})
+            if result.rowcount == 0:
+                return False, f"Config '{config_name}' not found"
+        return True, f"Deleted config '{config_name}'"
+    except Exception as e:
+        return False, f"Error: {str(e)}"
+
+
+def get_history(config_name: str):
+    with get_transaction() as conn:
+        return pd.read_sql(text("SELECT ch.version, ch.json_data, ch.created_at FROM config_histories ch JOIN configs c ON ch.config_id = c.id WHERE c.config_name = :name ORDER BY ch.version DESC"), conn, params={"name": config_name})
+
+
+def get_version(config_name: str, version: int):
+    with get_transaction() as conn:
+        result = conn.execute(text("SELECT ch.version, ch.json_data, ch.created_at FROM config_histories ch JOIN configs c ON ch.config_id = c.id WHERE c.config_name = :name AND ch.version = :version"), {"name": config_name, "version": version})
+        row = result.fetchone()
+        if row is None:
+            return None
+        columns = result.keys()
+        return dict(zip(columns, row))
+
+
+def compare_versions(config_name: str, v1: int, v2: int):
+    import json
+    version1 = get_version(config_name, v1)
+    version2 = get_version(config_name, v2)
+    if version1 is None or version2 is None:
+        return None
+    try:
+        data1 = json.loads(version1["json_data"])
+        data2 = json.loads(version2["json_data"])
+        same = data1 == data2
+    except json.JSONDecodeError:
+        same = version1["json_data"] == version2["json_data"]
+    return {"config_name": config_name, "v1": version1, "v2": version2, "same": same}

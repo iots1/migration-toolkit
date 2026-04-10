@@ -1,5 +1,6 @@
 import streamlit as st
 import os
+from dotenv import load_dotenv
 import database as db
 
 # Import Views (legacy — to be migrated to controllers progressively)
@@ -10,6 +11,9 @@ from controllers import settings_controller, pipeline_controller
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="HIS Migration Toolkit", layout="wide", page_icon="🏥")
+
+# Load environment variables from .env file
+load_dotenv()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 

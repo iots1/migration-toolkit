@@ -224,7 +224,7 @@ class TestPipelineCRUD:
         for name in ("p1", "p2", "p3"):
             pc = PipelineConfig.new(name)
             db.save_pipeline(pc.name, "", pc.to_dict(), None, None, "fail_fast")
-        df = db.get_pipelines_list()
+        df = db.get_pipelines()  # Fixed: was get_pipelines_list()
         assert len(df) == 3
         assert set(df["name"].tolist()) == {"p1", "p2", "p3"}
 
@@ -240,7 +240,7 @@ class TestPipelineRunsCRUD:
         run_id = db.save_pipeline_run(pid, "running", "{}")
         assert len(run_id) == 36
 
-        latest = db.get_latest_pipeline_run(pid)
+        latest = db.get_latest_run(pid)  # Fixed: was get_latest_pipeline_run()
         assert latest["id"] == run_id
         assert latest["status"] == "running"
         assert latest["steps"] == {}
@@ -251,7 +251,7 @@ class TestPipelineRunsCRUD:
         steps = {"cfg_a": {"status": "success", "rows_processed": 100}}
         db.update_pipeline_run(run_id, "running", json.dumps(steps))
 
-        latest = db.get_latest_pipeline_run(pid)
+        latest = db.get_latest_run(pid)  # Fixed: was get_latest_pipeline_run()
         assert latest["steps"]["cfg_a"]["status"] == "success"
 
     def test_update_run_terminal_sets_completed_at(self):
@@ -259,7 +259,7 @@ class TestPipelineRunsCRUD:
         run_id = db.save_pipeline_run(pid, "running", "{}")
         db.update_pipeline_run(run_id, "completed", "{}")
 
-        latest = db.get_latest_pipeline_run(pid)
+        latest = db.get_latest_run(pid)  # Fixed: was get_latest_pipeline_run()
         assert latest["status"] == "completed"
         assert latest["completed_at"] is not None
 
@@ -274,7 +274,7 @@ class TestPipelineRunsCRUD:
         pid = self._saved_pipeline()
         run_id = db.save_pipeline_run(pid, "running", "{}")
         db.update_pipeline_run(run_id, "failed", "{}", error_message="boom")
-        latest = db.get_latest_pipeline_run(pid)
+        latest = db.get_latest_run(pid)  # Fixed: was get_latest_pipeline_run()
         assert latest["error_message"] == "boom"
 
 
@@ -298,7 +298,7 @@ class TestBackgroundThread:
         status = "running"
         while time.time() < deadline and status == "running":
             time.sleep(0.05)
-            latest = db.get_latest_pipeline_run(pc.id)
+            latest = db.get_latest_run(pc.id)  # Fixed: was get_latest_pipeline_run()
             if latest:
                 status = latest["status"]
 

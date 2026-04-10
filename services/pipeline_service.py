@@ -21,10 +21,13 @@ Solves the three core challenges:
         after each step. The UI polls get_latest_pipeline_run(run_id) with a
         "Refresh Status" button — no autorefresh library required.
 
+DIP Compliance (Phase 8)
+    Dependencies are now injected via constructor following Dependency Inversion Principle.
+    Uses protocol interfaces for config_repo and run_repo instead of concrete database module.
+
 Thread-safety note
-    update_pipeline_run() and save_pipeline_run() each open their own SQLite
-    connection internally (following the existing database.py pattern) so no
-    connection object crosses a thread boundary.
+    update_pipeline_run() and save_pipeline_run() each open their own PostgreSQL
+    connection internally via repositories with thread-safe connection managers.
 """
 from __future__ import annotations
 import json
@@ -32,8 +35,8 @@ import threading
 import time as _time
 from collections import deque
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 
-import database as db
 from models.pipeline_config import PipelineConfig, PipelineStep
 from services.migration_executor import run_single_migration
 from services.checkpoint_manager import (
@@ -41,6 +44,45 @@ from services.checkpoint_manager import (
     save_pipeline_checkpoint,
     clear_pipeline_checkpoint,
 )
+
+
+# ---------------------------------------------------------------------------
+# Direct Repository Imports (Phase 8 - DI)
+# ---------------------------------------------------------------------------
+
+# Import repository functions directly (concrete implementations)
+from repositories.config_repo import get_content as config_get_content
+from repositories.pipeline_run_repo import save as run_save, update as run_update, get_latest as run_get_latest
+
+
+# ---------------------------------------------------------------------------
+# Repository Adapter Classes (Phase 8 - DI)
+# ---------------------------------------------------------------------------
+
+class ConfigRepositoryAdapter:
+    """Adapter class that implements ConfigRepository protocol using repository functions."""
+
+    def get_content(self, config_name: str) -> dict | None:
+        """Get config content by name."""
+        return config_get_content(config_name)
+
+
+class PipelineRunRepositoryAdapter:
+    """Adapter class that implements PipelineRunRepository protocol using repository functions."""
+
+    def save(self, pipeline_id: str, status: str, steps_json: str) -> str:
+        """Save a new pipeline run. Returns generated run_id."""
+        return run_save(pipeline_id, status, steps_json)
+
+    def update(self, run_id: str, status: str, steps_json: str = None, error_message: str = None) -> None:
+        """Update pipeline run status."""
+        run_update(run_id, status, steps_json, error_message)
+
+    def get_latest(self, pipeline_id: str) -> dict | None:
+        """Get latest pipeline run for a pipeline."""
+        return run_get_latest(pipeline_id)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +128,8 @@ class PipelineExecutor:
         pipeline: PipelineConfig,
         source_conn_config: dict,
         target_conn_config: dict,
+        config_repo: ConfigRepository,
+        run_repo: PipelineRunRepository,
         log_callback=None,
         progress_callback=None,
         run_id: str | None = None,
@@ -96,6 +140,8 @@ class PipelineExecutor:
             source_conn_config:  Dict with keys db_type, host, port, db_name,
                                  user, password, charset (optional).
             target_conn_config:  Same shape as source_conn_config.
+            config_repo:         Config repository (DIP injection).
+            run_repo:            Pipeline run repository (DIP injection).
             log_callback:        fn(message: str, icon: str) — optional.
             progress_callback:   fn(batch_num, rows_processed, rows_in_batch) — optional.
             run_id:              Pre-existing run_id; set automatically by
@@ -104,6 +150,8 @@ class PipelineExecutor:
         self._pipeline = pipeline
         self._source_conn_config = source_conn_config
         self._target_conn_config = target_conn_config
+        self._config_repo = config_repo  # Injected (DIP)
+        self._run_repo = run_repo  # Injected (DIP)
         self._log_callback = log_callback
         self._progress_callback = progress_callback
         self._run_id = run_id
@@ -153,7 +201,7 @@ class PipelineExecutor:
                 continue
 
             # --- Load migration config from DB ---
-            config = db.get_config_content(step.config_name)
+            config = self._config_repo.get_content(step.config_name)
             if config is None:
                 err = f"Config '{step.config_name}' not found in database"
                 results[step.config_name] = StepResult(
@@ -237,9 +285,9 @@ class PipelineExecutor:
         """Challenge 3: Launch execute() in a daemon thread.
 
         Returns run_id immediately so the caller can store it and poll
-        db.get_latest_pipeline_run(run_id) for progress.
+        self._run_repo.get_latest(run_id) for progress.
         """
-        self._run_id = db.save_pipeline_run(self._pipeline.id, "running", "{}")
+        self._run_id = self._run_repo.save(self._pipeline.id, "running", "{}")
         thread = threading.Thread(
             target=self._background_run, daemon=True, name=f"pipeline-{self._pipeline.name}"
         )
@@ -253,15 +301,15 @@ class PipelineExecutor:
     def _background_run(self) -> None:
         """Thread entry point — wraps execute() with DB bookkeeping.
 
-        SQLite safety: all db.* calls here open their own connections
+        PostgreSQL safety: all repo calls here use thread-safe connection managers
         internally, so no connection object crosses a thread boundary.
         """
         try:
             result = self.execute()
             steps_json = json.dumps(self._steps_to_json(result.steps))
-            db.update_pipeline_run(self._run_id, result.status, steps_json)
+            self._run_repo.update(self._run_id, result.status, steps_json)
         except Exception as e:
-            db.update_pipeline_run(self._run_id, "failed", "{}", error_message=str(e))
+            self._run_repo.update(self._run_id, "failed", "{}", error_message=str(e))
         finally:
             # Completed (or crashed) — remove pipeline checkpoint so a fresh
             # start isn't accidentally resumed from stale state.
@@ -417,7 +465,7 @@ class PipelineExecutor:
         """
         if not self._run_id:
             return
-        db.update_pipeline_run(
+        self._run_repo.update(
             self._run_id,
             "running",
             json.dumps(self._steps_to_json(results)),

@@ -155,6 +155,21 @@ def get_pipeline_runs(pipeline_id: str) -> pd.DataFrame:
     return _get_pipeline_runs_list(pipeline_id)
 
 
+def save_pipeline_run(pipeline_id: str, status: str, steps_json: str) -> str:
+    """Save a new pipeline run. Returns generated run_id."""
+    return _save_pipeline_run(pipeline_id, status, steps_json)
+
+
+def update_pipeline_run(
+    run_id: str,
+    status: str,
+    steps_json: str | None = None,
+    error_message: str | None = None
+) -> None:
+    """Update pipeline run status."""
+    _update_pipeline_run(run_id, status, steps_json, error_message)
+
+
 def get_latest_run(pipeline_id: str) -> dict | None:
     """Get latest run for a pipeline."""
     return _get_latest_pipeline_run(pipeline_id)

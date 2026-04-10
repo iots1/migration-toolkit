@@ -21,6 +21,9 @@ from services.checkpoint_manager import load_pipeline_checkpoint
 from utils.state_manager import PageState
 from views.pipeline_view import render_pipeline_page
 
+# Import repository adapters for DI injection (Phase 8)
+from services.pipeline_service import ConfigRepositoryAdapter, PipelineRunRepositoryAdapter
+
 _DEFAULTS: dict = {
     "pipeline_wizard_step": 1,
     "pipeline_mode": "new",           # "new" | "edit"
@@ -53,7 +56,7 @@ def run() -> None:
     PageState.set("pipeline_zombie_warning", _check_zombie_runs())
 
     # Load data for the view
-    pipelines_df = db.get_pipelines_list()
+    pipelines_df = db.get_pipelines()  # Fixed: was get_pipelines_list()
     configs_df = db.get_configs_list()
     datasources_df = db.get_datasources()
 
@@ -276,7 +279,7 @@ def _on_start_pipeline() -> tuple[bool, str]:
         return False, "Save the pipeline before running it."
 
     # Guard: prevent concurrent runs
-    latest = db.get_latest_pipeline_run(pipeline_id)
+    latest = db.get_latest_run(pipeline_id)  # Fixed: was get_latest_pipeline_run()
     if latest and latest["status"] == "running":
         return False, "A run is already in progress for this pipeline."
 
@@ -297,7 +300,17 @@ def _on_start_pipeline() -> tuple[bool, str]:
 
     pc = PipelineConfig.from_dict(row["json_data"])
 
-    executor = PipelineExecutor(pc, src_conn, tgt_conn)
+    # Phase 8: DI injection - create repository adapter instances
+    config_repo = ConfigRepositoryAdapter()  # Adapter over repository functions
+    run_repo = PipelineRunRepositoryAdapter()  # Adapter over repository functions
+
+    executor = PipelineExecutor(
+        pipeline=pc,
+        source_conn_config=src_conn,
+        target_conn_config=tgt_conn,
+        config_repo=config_repo,  # Injected (DIP)
+        run_repo=run_repo,  # Injected (DIP)
+    )
     run_id = executor.start_background()
 
     PageState.set("pipeline_run_id", run_id)
@@ -315,7 +328,7 @@ def _on_poll_status() -> None:
     if not pipeline_id:
         st.warning("No pipeline loaded — save and start the pipeline first.")
         return
-    latest = db.get_latest_pipeline_run(pipeline_id)
+    latest = db.get_latest_run(pipeline_id)  # Fixed: was get_latest_pipeline_run()
     PageState.set("pipeline_run_result", latest)
     if latest and latest["status"] not in ("running", "pending"):
         PageState.set("pipeline_running", False)
@@ -324,7 +337,9 @@ def _on_poll_status() -> None:
 
 def _on_force_cancel(run_id: str) -> None:
     """Mark a stuck/zombie run as failed in the DB."""
-    db.update_pipeline_run(
+    # Import the update function directly from pipeline_run_repo
+    from repositories.pipeline_run_repo import update as _update_run
+    _update_run(
         run_id, "failed", "{}",
         error_message="Manually cancelled — suspected zombie run",
     )
@@ -403,7 +418,7 @@ def _check_zombie_runs() -> bool:
     pipeline_id = PageState.get("pipeline_current_id")
     if not pipeline_id:
         return False
-    latest = db.get_latest_pipeline_run(pipeline_id)
+    latest = db.get_latest_run(pipeline_id)  # Fixed: was get_latest_pipeline_run()
     if not latest or latest["status"] != "running":
         return False
     started_at = latest.get("started_at")

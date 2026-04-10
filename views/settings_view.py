@@ -24,7 +24,7 @@ def render_settings_page(
     callbacks: dict,
 ) -> None:
     inject_global_css()
-    st.subheader("🛠️ Project Settings (SQLite)")
+    st.subheader("🛠️ Project Settings (PostgreSQL)")
 
     tab_ds, tab_conf = st.tabs(["🔌 Datasources", "📄 Saved Configs"])
     with tab_ds:

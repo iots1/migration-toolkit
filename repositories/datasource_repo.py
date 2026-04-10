@@ -28,10 +28,16 @@ def get_all() -> pd.DataFrame:
            0   1  MySQL DB    MySQL  localhost   testdb      root
     """
     with get_transaction() as conn:
-        return pd.read_sql(
+        df = pd.read_sql(
             "SELECT id, name, db_type, host, dbname, username FROM datasources ORDER BY id",
             conn
         )
+        # Force string columns to numpy object dtype (prevents PyArrow LargeUtf8 errors)
+        import numpy as np
+        for col in df.columns:
+            if pd.api.types.is_string_dtype(df[col]):
+                df[col] = np.array(df[col].fillna("").tolist(), dtype=object)
+        return df
 
 
 def get_by_id(ds_id: int) -> dict | None:

@@ -254,6 +254,13 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
 
 
 def _build_aggrid(df_to_edit: pd.DataFrame, active_table: str, real_target_columns: list, col_nullable_map: dict | None = None):
+    # Convert ALL string-like columns to plain numpy object dtype
+    # pd.api.types.is_string_dtype covers both object and pd.StringDtype (LargeUtf8)
+    import numpy as np
+    for col in df_to_edit.columns:
+        if pd.api.types.is_string_dtype(df_to_edit[col]):
+            df_to_edit[col] = np.array(df_to_edit[col].fillna("").tolist(), dtype=object)
+
     gb = GridOptionsBuilder.from_dataframe(df_to_edit)
     gb.configure_column("Status", editable=False, width=90, cellStyle={"textAlign": "center"})
     gb.configure_column("Source Column", editable=False, width=200)

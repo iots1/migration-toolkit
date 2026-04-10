@@ -56,13 +56,13 @@ run-reload:
 	@echo "   App will reload automatically when you save files"
 	@echo "   Open your browser to: http://localhost:8501"
 	@echo ""
-	. $(BIN)/activate && $(PYTHON) -m streamlit run app.py --server.runOnSave true
+	. $(BIN)/activate && TRANSFORMERS_VERBOSITY=error TOKENIZERS_PARALLELISM=false $(PYTHON) -m streamlit run app.py --server.runOnSave true
 
 run-no-reload:
 	@echo "🚀 Starting HIS Migration Toolkit (no hot-reload)..."
 	@echo "   Open your browser to: http://localhost:8501"
 	@echo ""
-	. $(BIN)/activate && $(PYTHON) -m streamlit run app.py
+	. $(BIN)/activate && TRANSFORMERS_VERBOSITY=error TOKENIZERS_PARALLELISM=false $(PYTHON) -m streamlit run app.py
 
 test:
 	@echo "🧪 Running all unit tests..."

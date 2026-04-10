@@ -62,7 +62,7 @@ def get_datasource_by_id(ds_id: int) -> dict | None:
 
 def get_datasource_by_name(name: str) -> dict | None:
     """Get datasource by name."""
-    return _get_datasource_by_name(name)
+    return _get_ds_by_name(name)
 
 
 def save_datasource(name: str, db_type: str, host: str, port: str,
@@ -98,12 +98,12 @@ def get_config_content(config_name: str) -> dict | None:
 
 def save_config_to_db(config_name: str, table_name: str, json_data: str) -> tuple[bool, str]:
     """Save or update a config to the database."""
-    return _save(config_name, table_name, json_data)
+    return _save_config(config_name, table_name, json_data)
 
 
 def delete_config(config_name: str) -> tuple[bool, str]:
     """Delete a config."""
-    return _delete(config_name)
+    return _delete_config(config_name)
 
 
 def get_config_history(config_name: str) -> pd.DataFrame:
@@ -138,7 +138,7 @@ def get_pipeline_by_name(name: str) -> dict | None:
 def save_pipeline(name: str, description: str, json_data: str,
                  source_ds_id: int, target_ds_id: int, error_strategy: str) -> tuple[bool, str]:
     """Save a new pipeline."""
-    return _save(name, description, json_data, source_ds_id, target_ds_id, error_strategy)
+    return _save_pipeline(name, description, json_data, source_ds_id, target_ds_id, error_strategy)
 
 
 def delete_pipeline(name: str) -> tuple[bool, str]:

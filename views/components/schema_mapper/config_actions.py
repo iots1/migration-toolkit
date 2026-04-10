@@ -102,7 +102,7 @@ def render_unmapped_required_check(
             st.success(
                 f"✅ All {len(required_cols)} NOT NULL column(s) are safe! "
                 f"({len(required_cols) - cols_with_defaults} mapped, {cols_with_defaults} have defaults)",
-                icon="✓"
+                icon="✅"
             )
             return True
 

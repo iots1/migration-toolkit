@@ -28,7 +28,12 @@ def save(config_name: str, table_name: str, json_data: str):
 
 def get_list():
     with get_transaction() as conn:
-        return pd.read_sql("SELECT id, config_name, table_name, updated_at FROM configs ORDER BY updated_at DESC", conn)
+        df = pd.read_sql("SELECT id::text AS id, config_name, table_name, updated_at FROM configs ORDER BY updated_at DESC", conn)
+        import numpy as np
+        for col in df.columns:
+            if pd.api.types.is_string_dtype(df[col]):
+                df[col] = np.array(df[col].fillna("").tolist(), dtype=object)
+        return df
 
 
 def get_content(config_name: str):

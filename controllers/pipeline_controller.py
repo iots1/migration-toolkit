@@ -8,8 +8,10 @@ Follows the same MVC pattern as controllers/settings_controller.py:
     - Defines every action callback (no st.* rendering)
     - Delegates rendering entirely to views/pipeline_view.py
 """
+
 from __future__ import annotations
 from datetime import datetime, timedelta
+import json
 
 import streamlit as st
 
@@ -22,16 +24,19 @@ from utils.state_manager import PageState
 from views.pipeline_view import render_pipeline_page
 
 # Import repository adapters for DI injection (Phase 8)
-from services.pipeline_service import ConfigRepositoryAdapter, PipelineRunRepositoryAdapter
+from services.pipeline_service import (
+    ConfigRepositoryAdapter,
+    PipelineRunRepositoryAdapter,
+)
 
 _DEFAULTS: dict = {
     "pipeline_wizard_step": 1,
-    "pipeline_mode": "new",           # "new" | "edit"
-    "pipeline_selected": None,         # name of currently loaded pipeline
-    "pipeline_current_id": None,       # UUID of the saved PipelineConfig
+    "pipeline_mode": "new",  # "new" | "edit"
+    "pipeline_selected": None,  # name of currently loaded pipeline
+    "pipeline_current_id": None,  # UUID of the saved PipelineConfig
     "pipeline_form_name": "",
     "pipeline_form_desc": "",
-    "pipeline_form_steps": [],         # list[dict] matching PipelineStep.to_dict()
+    "pipeline_form_steps": [],  # list[dict] matching PipelineStep.to_dict()
     "pipeline_form_error_strategy": "fail_fast",
     "pipeline_form_batch_size": 1000,
     "pipeline_form_truncate": False,
@@ -43,7 +48,7 @@ _DEFAULTS: dict = {
     "pipeline_running": False,
     "pipeline_completed": False,
     "pipeline_run_id": None,
-    "pipeline_run_result": None,      # latest polled run snapshot dict
+    "pipeline_run_result": None,  # latest polled run snapshot dict
     "pipeline_zombie_warning": False,
 }
 
@@ -102,29 +107,38 @@ def run() -> None:
         "on_reset": _on_reset,
     }
 
-    render_pipeline_page(pipelines_df, configs_df, datasources_df, form_state, callbacks)
+    render_pipeline_page(
+        pipelines_df, configs_df, datasources_df, form_state, callbacks
+    )
 
 
 # ---------------------------------------------------------------------------
 # Step management callbacks
 # ---------------------------------------------------------------------------
 
+
 def _on_add_step(config_name: str) -> None:
     steps: list[dict] = list(PageState.get("pipeline_form_steps"))
     if any(s["config_name"] == config_name for s in steps):
         return  # already in pipeline
-    steps.append({
-        "order": len(steps) + 1,
-        "config_name": config_name,
-        "depends_on": [],
-        "enabled": True,
-    })
+    steps.append(
+        {
+            "order": len(steps) + 1,
+            "config_name": config_name,
+            "depends_on": [],
+            "enabled": True,
+        }
+    )
     _save_steps(steps)
     st.rerun()
 
 
 def _on_remove_step(config_name: str) -> None:
-    steps = [s for s in PageState.get("pipeline_form_steps") if s["config_name"] != config_name]
+    steps = [
+        s
+        for s in PageState.get("pipeline_form_steps")
+        if s["config_name"] != config_name
+    ]
     # Remove any depends_on references to this step
     for s in steps:
         s["depends_on"] = [d for d in s["depends_on"] if d != config_name]
@@ -134,7 +148,9 @@ def _on_remove_step(config_name: str) -> None:
 
 def _on_move_step_up(config_name: str) -> None:
     steps = list(PageState.get("pipeline_form_steps"))
-    idx = next((i for i, s in enumerate(steps) if s["config_name"] == config_name), None)
+    idx = next(
+        (i for i, s in enumerate(steps) if s["config_name"] == config_name), None
+    )
     if idx is None or idx == 0:
         return
     steps[idx - 1], steps[idx] = steps[idx], steps[idx - 1]
@@ -144,7 +160,9 @@ def _on_move_step_up(config_name: str) -> None:
 
 def _on_move_step_down(config_name: str) -> None:
     steps = list(PageState.get("pipeline_form_steps"))
-    idx = next((i for i, s in enumerate(steps) if s["config_name"] == config_name), None)
+    idx = next(
+        (i for i, s in enumerate(steps) if s["config_name"] == config_name), None
+    )
     if idx is None or idx == len(steps) - 1:
         return
     steps[idx], steps[idx + 1] = steps[idx + 1], steps[idx]
@@ -175,8 +193,10 @@ def _on_set_depends(config_name: str, depends_on: list[str]) -> None:
 # Pipeline CRUD callbacks
 # ---------------------------------------------------------------------------
 
-def _on_save_pipeline(name: str, desc: str, error_strategy: str,
-                      batch_size: int, truncate: bool) -> tuple[bool, str]:
+
+def _on_save_pipeline(
+    name: str, desc: str, error_strategy: str, batch_size: int, truncate: bool
+) -> tuple[bool, str]:
     if not name.strip():
         return False, "Pipeline name is required."
 
@@ -184,10 +204,16 @@ def _on_save_pipeline(name: str, desc: str, error_strategy: str,
     if not steps:
         return False, "Add at least one step before saving."
 
-    pc = PipelineConfig.new(name) if not PageState.get("pipeline_current_id") else PipelineConfig.from_dict({
-        "id": PageState.get("pipeline_current_id"),
-        "name": name,
-    })
+    pc = (
+        PipelineConfig.new(name)
+        if not PageState.get("pipeline_current_id")
+        else PipelineConfig.from_dict(
+            {
+                "id": PageState.get("pipeline_current_id"),
+                "name": name,
+            }
+        )
+    )
     pc.name = name
     pc.description = desc
     pc.error_strategy = error_strategy
@@ -198,8 +224,12 @@ def _on_save_pipeline(name: str, desc: str, error_strategy: str,
     pc.steps = [PipelineStep.from_dict(s) for s in steps]
 
     ok, msg = db.save_pipeline(
-        pc.name, pc.description, pc.to_dict(),
-        pc.source_datasource_id, pc.target_datasource_id, pc.error_strategy,
+        pc.name,
+        pc.description,
+        json.dumps(pc.to_dict()),
+        pc.source_datasource_id,
+        pc.target_datasource_id,
+        pc.error_strategy,
     )
     if ok:
         saved = db.get_pipeline_by_name(name)
@@ -215,7 +245,7 @@ def _on_load_pipeline(name: str) -> None:
     row = db.get_pipeline_by_name(name)
     if not row:
         return
-    pc = PipelineConfig.from_dict(row["json_data"])
+    pc = PipelineConfig.from_dict(json.loads(row["json_data"]))
     PageState.set("pipeline_mode", "edit")
     PageState.set("pipeline_selected", name)
     PageState.set("pipeline_current_id", row["id"])
@@ -253,6 +283,7 @@ def _on_new_pipeline() -> None:
 # Connection callbacks
 # ---------------------------------------------------------------------------
 
+
 def _on_test_source(ds_name: str, charset: str | None) -> tuple[bool, str]:
     PageState.set("pipeline_src_ds_name", ds_name)
     PageState.set("pipeline_src_charset", charset)
@@ -271,6 +302,7 @@ def _on_test_target(ds_name: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Execution callbacks
 # ---------------------------------------------------------------------------
+
 
 def _on_start_pipeline() -> tuple[bool, str]:
     """Build PipelineConfig + conn configs, launch background thread."""
@@ -298,7 +330,8 @@ def _on_start_pipeline() -> tuple[bool, str]:
     if not row:
         return False, "Pipeline not found in DB — save it first."
 
-    pc = PipelineConfig.from_dict(row["json_data"])
+    pc = PipelineConfig.from_dict(json.loads(row["json_data"]))
+    pc.id = row["id"]
 
     # Phase 8: DI injection - create repository adapter instances
     config_repo = ConfigRepositoryAdapter()  # Adapter over repository functions
@@ -339,8 +372,11 @@ def _on_force_cancel(run_id: str) -> None:
     """Mark a stuck/zombie run as failed in the DB."""
     # Import the update function directly from pipeline_run_repo
     from repositories.pipeline_run_repo import update as _update_run
+
     _update_run(
-        run_id, "failed", "{}",
+        run_id,
+        "failed",
+        "{}",
         error_message="Manually cancelled — suspected zombie run",
     )
     PageState.set("pipeline_running", False)
@@ -351,6 +387,7 @@ def _on_force_cancel(run_id: str) -> None:
 # ---------------------------------------------------------------------------
 # Wizard navigation callbacks
 # ---------------------------------------------------------------------------
+
 
 def _on_next_step() -> None:
     current = PageState.get("pipeline_wizard_step")
@@ -376,6 +413,7 @@ def _on_reset() -> None:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
 
 def _save_steps(steps: list[dict]) -> None:
     """Re-number orders and save steps list to session state."""

@@ -6,7 +6,10 @@ from sqlalchemy import text
 from repositories.connection import get_transaction
 
 
-def save(config_name: str, table_name: str, json_data: str):
+def save(config_name: str, table_name: str, json_data):
+    import json as _json
+    if isinstance(json_data, dict):
+        json_data = _json.dumps(json_data, ensure_ascii=False)
     try:
         with get_transaction() as conn:
             result = conn.execute(text("SELECT id FROM configs WHERE config_name = :name"), {"name": config_name})

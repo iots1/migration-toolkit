@@ -43,7 +43,7 @@ This is a Streamlit-based HIS (Hospital Information System) database migration t
 
 ### Directory Structure & MVC Pattern
 
-The codebase is transitioning to **strict MVC (Model-View-Controller)** architecture. See `CODE_OF_CONDUCT.md` for detailed conventions.
+The codebase follows **strict MVC (Model-View-Controller)** architecture. See `CODE_OF_CONDUCT.md` for detailed conventions.
 
 ```
 ├── app.py                          # Router: delegates to controllers/views based on navigation
@@ -51,28 +51,47 @@ The codebase is transitioning to **strict MVC (Model-View-Controller)** architec
 ├── database.py                     # Data access layer (SQLite CRUD)
 ├── models/                         # Domain models (dataclasses, NO streamlit imports)
 │   ├── datasource.py               # Datasource connection profile
-│   └── migration_config.py         # MigrationConfig & MappingItem
+│   ├── migration_config.py         # MigrationConfig & MappingItem
+│   └── pipeline_config.py          # PipelineConfig & PipelineStep
 ├── services/                       # Business logic services (pure Python, NO streamlit imports)
-│   ├── db_connector.py             # SQLAlchemy engine factory
+│   ├── db_connector.py             # SQLAlchemy engine factory (MySQL, PostgreSQL, SQLite)
 │   ├── ml_mapper.py                # AI semantic column mapping
 │   ├── transformers.py             # Vectorized data transformations
 │   ├── checkpoint_manager.py       # Migration resumability
-│   └── ...
+│   ├── datasource_repository.py    # Query helper for datasources
+│   ├── encoding_helper.py          # Character encoding detection
+│   ├── migration_logger.py         # Logging service
+│   ├── query_builder.py            # SQL query builder
+│   ├── migration_executor.py       # ETL execution engine
+│   └── pipeline_service.py         # Pipeline orchestration service
 ├── utils/                          # Utilities (state management, helpers)
 │   ├── state_manager.py            # PageState class for session_state
-│   ├── ui_components.py            # Legacy CSS/dialogs (being migrated)
-│   └── ...
+│   └── ui_components.py            # Legacy CSS/dialogs (being migrated)
 ├── controllers/                    # MVC Controllers (orchestrate state & logic)
-│   └── settings_controller.py      # [PoC] Settings page: owns state, fetches data, calls view
+│   ├── settings_controller.py      # ✅ Settings page: owns state, fetches data, calls view
+│   └── pipeline_controller.py      # ✅ Data Pipeline: multi-step wizard with execution
 ├── views/                          # Streamlit rendering (DUMB — only receive data + callbacks)
-│   ├── settings_view.py            # [PoC] Pure rendering, delegates all logic to controller
-│   ├── schema_mapper.py            # [Legacy] To be refactored
-│   ├── migration_engine.py         # [Legacy] To be refactored
-│   └── components/                 # Reusable UI components
-│       └── shared/
-│           ├── dialogs.py          # Shared dialogs (generic_confirm_dialog, preview_config_dialog)
-│           └── styles.py           # Global CSS (inject_global_css)
-└── ...
+│   ├── settings_view.py            # ✅ Pure rendering, delegates all logic to controller
+│   ├── pipeline_view.py            # ✅ Pure rendering for data pipeline
+│   ├── schema_mapper.py            # 🚧 Legacy (to refactor)
+│   ├── migration_engine.py         # 🚧 Legacy (to refactor)
+│   ├── er_diagram.py               # 🚧 Legacy (simple, to refactor)
+│   └── file_explorer.py            # 🚧 Legacy (simple, to refactor)
+└── views/components/               # Reusable UI components
+    ├── shared/                     # Shared across features
+    │   ├── dialogs.py              # Generic dialogs (confirm, preview)
+    │   └── styles.py               # Global CSS utilities
+    ├── schema_mapper/              # Schema mapper components
+    │   ├── source_selector.py      # Source table selection
+    │   ├── mapping_editor.py       # Column mapping grid
+    │   ├── metadata_editor.py      # Config metadata editor
+    │   ├── config_actions.py       # Save/load/delete actions
+    │   └── history_viewer.py       # Config history viewer
+    └── migration/                  # Migration engine components
+        ├── step_connections.py     # Source/target connection step
+        ├── step_config.py          # Config selection step
+        ├── step_review.py          # Pre-execution review step
+        └── step_execution.py       # Execution monitoring step
 ```
 
 ### Key Files

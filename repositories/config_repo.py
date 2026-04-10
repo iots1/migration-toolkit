@@ -37,6 +37,7 @@ def get_list():
 
 
 def get_content(config_name: str):
+    import json as _json
     with get_transaction() as conn:
         result = conn.execute(text("SELECT * FROM configs WHERE config_name = :name"), {"name": config_name})
         row = result.fetchone()
@@ -45,7 +46,21 @@ def get_content(config_name: str):
         columns = result.keys()
         data = dict(zip(columns, row))
         data["id"] = str(data["id"])
-        return data
+
+        # Parse json_data string into dict and merge with DB metadata
+        raw_json = data.get("json_data", "{}")
+        try:
+            parsed = _json.loads(raw_json) if isinstance(raw_json, str) else raw_json
+        except (_json.JSONDecodeError, TypeError):
+            parsed = {}
+
+        # Merge: parsed JSON takes priority; preserve DB metadata keys
+        merged = {**parsed}
+        merged.setdefault("config_name", data.get("config_name", ""))
+        merged.setdefault("name", data.get("config_name", ""))
+        merged["_db_id"] = data["id"]
+        merged["_db_updated_at"] = str(data.get("updated_at", ""))
+        return merged
 
 
 def delete(config_name: str):

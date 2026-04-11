@@ -1,12 +1,14 @@
 """
-PipelineConfig — domain model for a data pipeline.
+Pipeline domain models.
 
-A pipeline chains multiple MigrationConfig names into an ordered execution
-plan with optional inter-step dependencies, a shared error strategy, and
-shared source/target datasource settings.
+PipelineStep / PipelineConfig: domain model for pipeline execution logic.
+PipelineRecord:                write model for the pipelines table.
+PipelineRunRecord:             write model for INSERT into pipeline_runs.
+PipelineRunUpdateRecord:       write model for patching pipeline_runs status.
 
-Follows the same from_dict / to_dict pattern as migration_config.py.
-No Streamlit imports — pure domain model.
+PipelineRecord / PipelineRunRecord / PipelineRunUpdateRecord are the single
+source of truth for their table columns — pass them to the repo instead of
+flat kwargs. Adding a new column = add the field here only.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
@@ -89,3 +91,46 @@ class PipelineConfig:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+
+
+@dataclass
+class PipelineRecord:
+    """
+    Single source of truth for writable pipelines table columns.
+
+    Pass to pipeline_repo.save() instead of 6 flat kwargs.
+    Adding a new column = add the field here and update col_params in save() once.
+    """
+
+    name: str
+    description: str = ""
+    json_data: str | dict = field(default_factory=dict)
+    source_datasource_id: str | None = None
+    target_datasource_id: str | None = None
+    error_strategy: str = "fail_fast"
+
+
+@dataclass
+class PipelineRunRecord:
+    """
+    Write model for INSERT into pipeline_runs.
+
+    Pass to pipeline_run_repo.save() instead of 3 flat params.
+    """
+
+    pipeline_id: uuid.UUID
+    status: str = "pending"
+    steps_json: str | dict = field(default_factory=dict)
+
+
+@dataclass
+class PipelineRunUpdateRecord:
+    """
+    Write model for patching pipeline_runs status.
+
+    Pass to pipeline_run_repo.update() instead of 4 flat params.
+    """
+
+    status: str
+    steps_json: str | None = None
+    error_message: str | None = None

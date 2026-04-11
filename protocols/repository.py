@@ -13,6 +13,9 @@ Benefits:
 from typing import Protocol, runtime_checkable
 import pandas as pd
 import uuid
+from models.migration_config import ConfigRecord
+from models.datasource import DatasourceRecord
+from models.pipeline_config import PipelineRecord, PipelineRunRecord, PipelineRunUpdateRecord
 
 
 @runtime_checkable
@@ -31,31 +34,12 @@ class DatasourceRepository(Protocol):
         """Get datasource by name."""
         ...
 
-    def save(
-        self,
-        name: str,
-        db_type: str,
-        host: str,
-        port: str,
-        dbname: str,
-        username: str,
-        password: str,
-    ) -> tuple[bool, str]:
-        """Save new datasource."""
+    def save(self, record: DatasourceRecord) -> tuple[bool, str]:
+        """Insert new datasource. Pass DatasourceRecord."""
         ...
 
-    def update(
-        self,
-        id,
-        name: str,
-        db_type: str,
-        host: str,
-        port: str,
-        dbname: str,
-        username: str,
-        password: str,
-    ) -> tuple[bool, str]:
-        """Update existing datasource."""
+    def update(self, id, record: DatasourceRecord) -> tuple[bool, str]:
+        """Update existing datasource by ID. Pass DatasourceRecord."""
         ...
 
     def delete(self, id) -> None:
@@ -67,10 +51,8 @@ class DatasourceRepository(Protocol):
 class ConfigRepository(Protocol):
     """Protocol for config CRUD with versioning."""
 
-    def save(
-        self, config_name: str, table_name: str, json_data: str
-    ) -> tuple[bool, str]:
-        """Save or update config with versioning."""
+    def save(self, record: ConfigRecord) -> tuple[bool, str]:
+        """Save or update config with versioning. Pass ConfigRecord."""
         ...
 
     def get_list(self) -> pd.DataFrame:
@@ -102,16 +84,8 @@ class ConfigRepository(Protocol):
 class PipelineRepository(Protocol):
     """Protocol for pipeline CRUD operations."""
 
-    def save(
-        self,
-        name: str,
-        description: str,
-        json_data: str,
-        source_ds_id: uuid.UUID | None,
-        target_ds_id: uuid.UUID | None,
-        error_strategy: str,
-    ) -> tuple[bool, str]:
-        """Save or update pipeline."""
+    def save(self, record: PipelineRecord) -> tuple[bool, str]:
+        """Upsert pipeline. Pass PipelineRecord."""
         ...
 
     def get_list(self) -> pd.DataFrame:
@@ -131,18 +105,12 @@ class PipelineRepository(Protocol):
 class PipelineRunRepository(Protocol):
     """Protocol for pipeline run tracking."""
 
-    def save(self, pipeline_id: uuid.UUID, status: str, steps_json: str) -> uuid.UUID:
-        """Save new pipeline run."""
+    def save(self, record: PipelineRunRecord) -> uuid.UUID:
+        """Insert new pipeline run. Pass PipelineRunRecord. Returns generated UUID."""
         ...
 
-    def update(
-        self,
-        run_id: uuid.UUID,
-        status: str,
-        steps_json: str | None = None,
-        error_message: str | None = None,
-    ) -> None:
-        """Update pipeline run status."""
+    def update(self, run_id: uuid.UUID, patch: PipelineRunUpdateRecord) -> None:
+        """Patch pipeline run status/steps/error. Pass PipelineRunUpdateRecord."""
         ...
 
     def get_list(self, pipeline_id: uuid.UUID) -> pd.DataFrame:

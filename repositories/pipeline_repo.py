@@ -14,73 +14,49 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from repositories.connection import get_transaction
+from models.pipeline_config import PipelineRecord
 
 
-def save(
-    name: str,
-    description: str,
-    json_data: str,
-    source_ds_id,
-    target_ds_id,
-    error_strategy: str = "fail_fast",
-) -> tuple[bool, str]:
-    """
-    Save or update a pipeline configuration.
+def save(record: PipelineRecord) -> tuple[bool, str]:
+    """Upsert a pipeline configuration. Pass a PipelineRecord — no flat kwargs."""
+    import json as _json
 
-    Uses PostgreSQL's ON CONFLICT for upsert semantics.
+    json_str = record.json_data
+    if isinstance(json_str, dict):
+        json_str = _json.dumps(json_str, ensure_ascii=False)
 
-    Args:
-        name: Pipeline name (must be unique)
-        description: Pipeline description
-        json_data: Pipeline configuration as JSON string
-        source_ds_id: Source datasource ID (or None)
-        target_ds_id: Target datasource ID (or None)
-        error_strategy: Error handling strategy ("fail_fast", "continue", "stop_on_error")
-
-    Returns:
-        tuple[bool, str]: (success, message)
-
-    Example:
-        >>> ok, msg = save(
-        ...     "ETL Pipeline",
-        ...     "Daily ETL from MySQL to PostgreSQL",
-        ...     '{"steps": [...]}',
-        ...     source_ds_id=1,
-        ...     target_ds_id=2,
-        ...     error_strategy="fail_fast"
-        ... )
-    """
+    col_params = {
+        "name": record.name,
+        "description": record.description,
+        "json_data": json_str,
+        "source_datasource_id": record.source_datasource_id,
+        "target_datasource_id": record.target_datasource_id,
+        "error_strategy": record.error_strategy,
+    }
     try:
         with get_transaction() as conn:
             conn.execute(
                 text("""
-                INSERT INTO pipelines (
-                    name, description, json_data,
-                    source_datasource_id, target_datasource_id, error_strategy, updated_at
-                )
-                VALUES (:name, :description, :json_data,
-                        :src_ds, :tgt_ds, :strategy, CURRENT_TIMESTAMP)
-                ON CONFLICT (name) DO UPDATE SET
-                    name = EXCLUDED.name,
-                    description = EXCLUDED.description,
-                    json_data = EXCLUDED.json_data,
-                    source_datasource_id = EXCLUDED.source_datasource_id,
-                    target_datasource_id = EXCLUDED.target_datasource_id,
-                    error_strategy = EXCLUDED.error_strategy,
-                    updated_at = CURRENT_TIMESTAMP
-            """),
-                {
-                    "name": name,
-                    "description": description,
-                    "json_data": json_data,
-                    "src_ds": source_ds_id,
-                    "tgt_ds": target_ds_id,
-                    "strategy": error_strategy,
-                },
+                    INSERT INTO pipelines (
+                        name, description, json_data,
+                        source_datasource_id, target_datasource_id, error_strategy, updated_at
+                    )
+                    VALUES (:name, :description, :json_data,
+                            :source_datasource_id, :target_datasource_id, :error_strategy,
+                            CURRENT_TIMESTAMP)
+                    ON CONFLICT (name) DO UPDATE SET
+                        description = EXCLUDED.description,
+                        json_data = EXCLUDED.json_data,
+                        source_datasource_id = EXCLUDED.source_datasource_id,
+                        target_datasource_id = EXCLUDED.target_datasource_id,
+                        error_strategy = EXCLUDED.error_strategy,
+                        updated_at = CURRENT_TIMESTAMP
+                """),
+                col_params,
             )
-        return True, f"✅ Pipeline '{name}' บันทึกสำเร็จ"
+        return True, f"✅ Pipeline '{record.name}' บันทึกสำเร็จ"
     except IntegrityError:
-        return False, f"❌ Pipeline '{name}' มีอยู่แล้ว"
+        return False, f"❌ Pipeline '{record.name}' มีอยู่แล้ว"
     except Exception as e:
         return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
 

@@ -14,81 +14,51 @@ import uuid
 import pandas as pd
 from sqlalchemy import text
 from repositories.connection import get_transaction
+from models.pipeline_config import PipelineRunRecord, PipelineRunUpdateRecord
 
 
-def save(pipeline_id: uuid.UUID, status: str, steps_json: str) -> uuid.UUID:
-    """
-    Save a new pipeline run. Thread-safe.
+def save(record: PipelineRunRecord) -> uuid.UUID:
+    """Insert a new pipeline run. Returns generated UUID. Pass a PipelineRunRecord."""
+    import json as _json
 
-    Each call creates a new run record with a generated UUID.
+    steps_str = record.steps_json
+    if isinstance(steps_str, dict):
+        steps_str = _json.dumps(steps_str, ensure_ascii=False)
 
-    Args:
-        pipeline_id: Pipeline UUID (references pipelines.id)
-        status: Initial status ("pending", "running", etc.)
-        steps_json: Pipeline steps as JSON string
-
-    Returns:
-        uuid.UUID: Generated run ID
-
-    Example:
-        >>> import uuid
-        >>> pipeline_id = uuid.UUID("123e4567-e89b-12d3-a456-426614174000")
-        >>> run_id = save(pipeline_id, "pending", '{"steps": []}')
-        >>> print(f"Created run: {run_id}")
-    """
     with get_transaction() as conn:
         result = conn.execute(
             text("""
-            INSERT INTO pipeline_runs (pipeline_id, status, started_at, steps_json)
-            VALUES (:pipeline_id, :status, CURRENT_TIMESTAMP, :steps_json)
-            RETURNING id
-        """),
-            {"pipeline_id": pipeline_id, "status": status, "steps_json": steps_json},
+                INSERT INTO pipeline_runs (pipeline_id, status, started_at, steps_json)
+                VALUES (:pipeline_id, :status, CURRENT_TIMESTAMP, :steps_json)
+                RETURNING id
+            """),
+            {
+                "pipeline_id": record.pipeline_id,
+                "status": record.status,
+                "steps_json": steps_str,
+            },
         )
         return result.scalar()
 
 
-def update(
-    run_id: uuid.UUID,
-    status: str,
-    steps_json: str | None = None,
-    error_message: str | None = None,
-) -> None:
-    """
-    Update pipeline run status. Thread-safe.
-
-    Automatically sets completed_at when status is terminal
-    (completed, failed, partial).
-
-    Args:
-        run_id: Run UUID to update
-        status: New status
-        steps_json: Updated steps JSON (optional)
-        error_message: Error message if failed (optional)
-
-    Example:
-        >>> import uuid
-        >>> run_id = uuid.UUID("123e4567-e89b-12d3-a456-426614174000")
-        >>> update(run_id, "running")
-        >>> update(run_id, "completed", steps_json='{"steps": [...]}')
-        >>> update(run_id, "failed", error_message="Connection timeout")
-    """
+def update(run_id: uuid.UUID, patch: PipelineRunUpdateRecord) -> None:
+    """Patch pipeline run status/steps/error. Pass a PipelineRunUpdateRecord."""
     with get_transaction() as conn:
         conn.execute(
             text("""
-            UPDATE pipeline_runs
-            SET status = :status,
-                steps_json = COALESCE(:steps_json, steps_json),
-                error_message = COALESCE(:error_message, error_message),
-                completed_at = CASE WHEN :status IN ('completed','failed','partial')
-                    THEN CURRENT_TIMESTAMP ELSE completed_at END
-            WHERE id = :id
-        """),
+                UPDATE pipeline_runs
+                SET status = :status,
+                    steps_json = COALESCE(:steps_json, steps_json),
+                    error_message = COALESCE(:error_message, error_message),
+                    completed_at = CASE WHEN :status IN ('completed','failed','partial')
+                        THEN CURRENT_TIMESTAMP ELSE completed_at END
+                WHERE id = :id
+            """),
             {
                 "id": run_id,
-                "status": status,
-                "steps_json": steps_json,
-                "error_message": error_message,
+                "status": patch.status,
+                "steps_json": patch.steps_json,
+                "error_message": patch.error_message,
             },
         )
 

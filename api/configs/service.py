@@ -6,6 +6,7 @@ import json
 from api.base.service import BaseService
 from api.base.query_params import QueryParams
 from repositories import config_repo
+from models.migration_config import ConfigRecord
 
 
 class ConfigsService(BaseService):
@@ -14,6 +15,8 @@ class ConfigsService(BaseService):
     resource_type = "configs"
     allowed_fields = [
         "id", "config_name", "table_name", "json_data",
+        "datasource_source_id", "datasource_target_id",
+        "config_type", "script", "generate_sql", "condition", "lookup",
         "created_at", "created_by", "updated_at", "updated_by",
         "is_deleted", "deleted_at", "deleted_by", "deleted_reason",
     ]
@@ -41,37 +44,18 @@ class ConfigsService(BaseService):
 
     def create(self, data: dict) -> dict:
         """Create new config."""
-        config_name = data.get("config_name", "")
-        table_name = data.get("table_name", "")
-        json_data = data.get("json_data", "{}")
-
-        # Convert dict to JSON string if needed
-        if isinstance(json_data, dict):
-            json_data = json.dumps(json_data, ensure_ascii=False)
-
-        ok, msg = self.execute_db_operation(
-            lambda: config_repo.save(config_name, table_name, json_data)
-        )
+        record = self._to_record(data)
+        ok, msg = self.execute_db_operation(lambda: config_repo.save(record))
         self._assert_success(ok, msg)
-
-        result = self.execute_db_operation(lambda: config_repo.get_content(config_name))
+        result = self.execute_db_operation(lambda: config_repo.get_content(record.config_name))
         return self._sanitize_response(result)
 
     def update(self, id: str, data: dict) -> dict:
-        """Update config (upsert)."""
+        """Update config (patch — existing values are preserved for missing fields)."""
         existing = self.find_by_id(id)
-
-        table_name = data.get("table_name") or existing.get("table_name", "")
-        json_data = data.get("json_data") or existing.get("json_data", "{}")
-
-        if isinstance(json_data, dict):
-            json_data = json.dumps(json_data, ensure_ascii=False)
-
-        ok, msg = self.execute_db_operation(
-            lambda: config_repo.save(id, table_name, json_data)
-        )
+        record = self._to_record(data, existing=existing, config_name_override=id)
+        ok, msg = self.execute_db_operation(lambda: config_repo.save(record))
         self._assert_success(ok, msg)
-
         result = self.execute_db_operation(lambda: config_repo.get_content(id))
         return self._sanitize_response(result)
 
@@ -93,3 +77,34 @@ class ConfigsService(BaseService):
         )
         self._assert_found(result, f"{config_name}:v{version}")
         return result
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _to_record(
+        self,
+        data: dict,
+        *,
+        existing: dict | None = None,
+        config_name_override: str | None = None,
+    ) -> ConfigRecord:
+        """Build a ConfigRecord from request data, falling back to existing values."""
+        ex = existing or {}
+
+        json_data = data.get("json_data") or ex.get("json_data", "{}")
+        if isinstance(json_data, dict):
+            json_data = json.dumps(json_data, ensure_ascii=False)
+
+        return ConfigRecord(
+            config_name=config_name_override or data.get("config_name", ""),
+            table_name=data.get("table_name") or ex.get("table_name", ""),
+            json_data=json_data,
+            datasource_source_id=data.get("datasource_source_id") or ex.get("datasource_source_id"),
+            datasource_target_id=data.get("datasource_target_id") or ex.get("datasource_target_id"),
+            config_type=data.get("config_type") or ex.get("config_type", "std"),
+            script=data.get("script") or ex.get("script"),
+            generate_sql=data.get("generate_sql") or ex.get("generate_sql"),
+            condition=data.get("condition") or ex.get("condition"),
+            lookup=data.get("lookup") or ex.get("lookup"),
+        )

@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from api.base.service import BaseService
 from api.base.query_params import QueryParams
 from repositories import pipeline_run_repo
+from models.pipeline_config import PipelineRunRecord, PipelineRunUpdateRecord
 
 
 class PipelineRunsService(BaseService):
@@ -57,26 +58,21 @@ class PipelineRunsService(BaseService):
 
     def create(self, data: dict) -> dict:
         """Create new pipeline run."""
-        pipeline_id = uuid.UUID(data.get("pipeline_id", ""))
-        status = data.get("status", "pending")
         steps_json = data.get("steps_json", "{}")
-
         if isinstance(steps_json, dict):
             steps_json = json.dumps(steps_json, ensure_ascii=False)
 
-        run_id = self.execute_db_operation(
-            lambda: pipeline_run_repo.save(
-                pipeline_id=pipeline_id,
-                status=status,
-                steps_json=steps_json,
-            )
+        record = PipelineRunRecord(
+            pipeline_id=uuid.UUID(data.get("pipeline_id", "")),
+            status=data.get("status", "pending"),
+            steps_json=steps_json,
         )
-
+        run_id = self.execute_db_operation(lambda: pipeline_run_repo.save(record))
         result = self.execute_db_operation(lambda: pipeline_run_repo.get_by_id(run_id))
         return self._sanitize_response(result)
 
     def update(self, id: str, data: dict) -> dict:
-        """Update pipeline run."""
+        """Update pipeline run status/steps/error."""
         try:
             run_id = uuid.UUID(id)
         except ValueError:
@@ -86,15 +82,12 @@ class PipelineRunsService(BaseService):
         if isinstance(steps_json, dict):
             steps_json = json.dumps(steps_json, ensure_ascii=False)
 
-        self.execute_db_operation(
-            lambda: pipeline_run_repo.update(
-                run_id=run_id,
-                status=data.get("status", "pending"),
-                steps_json=steps_json,
-                error_message=data.get("error_message"),
-            )
+        patch = PipelineRunUpdateRecord(
+            status=data.get("status", "pending"),
+            steps_json=steps_json,
+            error_message=data.get("error_message"),
         )
-
+        self.execute_db_operation(lambda: pipeline_run_repo.update(run_id, patch))
         result = self.execute_db_operation(lambda: pipeline_run_repo.get_by_id(run_id))
         return self._sanitize_response(result)
 

@@ -3,8 +3,10 @@ Config Actions — Validate, Preview JSON, and Save bottom controls.
 
 Also owns:
     generate_json_config(params, mappings_df) -> dict
+    build_preview_sql(config_data) -> str
     load_data_profile(report_folder) -> DataFrame | None
 """
+
 from __future__ import annotations  # Enable modern type hints
 
 import os
@@ -12,7 +14,9 @@ import json
 import pandas as pd
 import streamlit as st
 
-import database as db
+from sqlalchemy import text
+from repositories import config_repo
+from models.migration_config import ConfigRecord
 from services.datasource_repository import DatasourceRepository as DSRepo
 from views.components.shared.dialogs import show_json_preview
 from views.components.schema_mapper.mapping_editor import validate_mapping_in_table
@@ -21,6 +25,7 @@ from views.components.schema_mapper.mapping_editor import validate_mapping_in_ta
 # ---------------------------------------------------------------------------
 # Bottom Controls
 # ---------------------------------------------------------------------------
+
 
 def check_unmapped_required_columns(
     mappings_df: pd.DataFrame,
@@ -81,7 +86,9 @@ def render_unmapped_required_check(
     if mappings_df is None or mappings_df.empty:
         return True
 
-    unmapped_required = check_unmapped_required_columns(mappings_df, col_nullable_map, col_defaults_map)
+    unmapped_required = check_unmapped_required_columns(
+        mappings_df, col_nullable_map, col_defaults_map
+    )
 
     st.markdown("---")
     st.markdown("### 🔒 Required Columns Validation")
@@ -90,19 +97,27 @@ def render_unmapped_required_check(
         if unmapped_required:
             st.error(
                 f"🚨 {len(unmapped_required)} NOT NULL column(s) without default - NOT mapped yet!",
-                icon="❌"
+                icon="❌",
             )
             st.markdown("**These columns need mapping (no default value):**")
             for col in unmapped_required:
                 st.markdown(f"  - `{col}` 🔒")
             return False
         else:
-            required_cols = [col for col, is_nullable in col_nullable_map.items() if not is_nullable]
-            cols_with_defaults = len([col for col, has_def in (col_defaults_map or {}).items() if has_def and not col_nullable_map.get(col, True)])
+            required_cols = [
+                col for col, is_nullable in col_nullable_map.items() if not is_nullable
+            ]
+            cols_with_defaults = len(
+                [
+                    col
+                    for col, has_def in (col_defaults_map or {}).items()
+                    if has_def and not col_nullable_map.get(col, True)
+                ]
+            )
             st.success(
                 f"✅ All {len(required_cols)} NOT NULL column(s) are safe! "
                 f"({len(required_cols) - cols_with_defaults} mapped, {cols_with_defaults} have defaults)",
-                icon="✅"
+                icon="✅",
             )
             return True
 
@@ -127,13 +142,27 @@ def render_bottom_controls(
 
     with col_preview:
         st.write("")
-        _render_preview_button(active_table, datasource_names, loaded_config, is_edit_existing,
-                               default_config_name, target_db_input, target_table_input)
+        _render_preview_button(
+            active_table,
+            datasource_names,
+            loaded_config,
+            is_edit_existing,
+            default_config_name,
+            target_db_input,
+            target_table_input,
+        )
 
     with col_save:
         st.write("")
-        _render_save_button(active_table, datasource_names, loaded_config, is_edit_existing,
-                            default_config_name, target_db_input, target_table_input)
+        _render_save_button(
+            active_table,
+            datasource_names,
+            loaded_config,
+            is_edit_existing,
+            default_config_name,
+            target_db_input,
+            target_table_input,
+        )
 
     if st.session_state.pop("_mapper_needs_rerun", False):
         st.rerun()
@@ -141,6 +170,7 @@ def render_bottom_controls(
 
 def _render_validate_button(active_table, target_db_input, target_table_input) -> None:
     import time
+
     if not st.button("🔍 Validate Targets", use_container_width=True):
         return
 
@@ -163,32 +193,79 @@ def _render_validate_button(active_table, target_db_input, target_table_input) -
         return
 
     real_cols = [c["name"] if isinstance(c, dict) else c for c in cols]
-    updated_df = validate_mapping_in_table(st.session_state[f"df_{active_table}"], cols, show_toast=True)
+    updated_df = validate_mapping_in_table(
+        st.session_state[f"df_{active_table}"], cols, show_toast=True
+    )
     st.session_state[f"df_{active_table}"] = updated_df
     import time
+
     st.session_state.mapper_editor_ver = time.time()
     st.session_state["_mapper_needs_rerun"] = True
 
 
-def _render_preview_button(active_table, datasource_names, loaded_config, is_edit_existing,
-                           default_config_name, target_db_input, target_table_input) -> None:
+def _render_preview_button(
+    active_table,
+    datasource_names,
+    loaded_config,
+    is_edit_existing,
+    default_config_name,
+    target_db_input,
+    target_table_input,
+) -> None:
     if not st.button("👁️ Preview JSON", use_container_width=True):
         return
 
-    config_name = st.session_state.get("mapper_config_name", default_config_name) if not is_edit_existing else default_config_name
-    params = _build_params(config_name, active_table, datasource_names, loaded_config, target_db_input, target_table_input)
+    config_name = (
+        st.session_state.get("mapper_config_name", default_config_name)
+        if not is_edit_existing
+        else default_config_name
+    )
+    params = _build_params(
+        config_name,
+        active_table,
+        datasource_names,
+        loaded_config,
+        target_db_input,
+        target_table_input,
+    )
     json_data = generate_json_config(params, st.session_state[f"df_{active_table}"])
     show_json_preview(json_data)
 
 
-def _render_save_button(active_table, datasource_names, loaded_config, is_edit_existing,
-                        default_config_name, target_db_input, target_table_input) -> None:
+def _render_save_button(
+    active_table,
+    datasource_names,
+    loaded_config,
+    is_edit_existing,
+    default_config_name,
+    target_db_input,
+    target_table_input,
+) -> None:
     import time
 
     def do_save(save_name: str) -> None:
-        params = _build_params(save_name, active_table, datasource_names, loaded_config, target_db_input, target_table_input)
+        params = _build_params(
+            save_name,
+            active_table,
+            datasource_names,
+            loaded_config,
+            target_db_input,
+            target_table_input,
+        )
         json_data = generate_json_config(params, st.session_state[f"df_{active_table}"])
-        success, msg = db.save_config_to_db(params["config_name"], active_table, json_data)
+        record = ConfigRecord(
+            config_name=params["config_name"],
+            table_name=active_table,
+            json_data=json_data,
+            datasource_source_id=params.get("source_datasource_id"),
+            datasource_target_id=params.get("target_datasource_id"),
+            config_type=st.session_state.get("mapper_config_type", "std"),
+            script=st.session_state.get("mapper_script") or None,
+            generate_sql=st.session_state.get("mapper_generate_sql_text") or None,
+            condition=st.session_state.get("mapper_condition") or None,
+            lookup=st.session_state.get("mapper_lookup") or None,
+        )
+        success, msg = config_repo.save(record)
         if success:
             st.toast(f"Config '{save_name}' saved successfully!", icon="✅")
             st.session_state.mapper_editor_ver = time.time()
@@ -197,8 +274,12 @@ def _render_save_button(active_table, datasource_names, loaded_config, is_edit_e
             st.toast(f"Save failed: {msg}", icon="❌")
 
     if is_edit_existing:
-        if st.button(f"💾 Save (Overwrite)", type="primary", use_container_width=True,
-                     help=f"Update '{default_config_name}'"):
+        if st.button(
+            f"💾 Save (Overwrite)",
+            type="primary",
+            use_container_width=True,
+            help=f"Update '{default_config_name}'",
+        ):
             do_save(default_config_name)
     else:
         config_name = st.session_state.get("mapper_config_name", default_config_name)
@@ -210,6 +291,7 @@ def _render_save_button(active_table, datasource_names, loaded_config, is_edit_e
 # JSON Config Generation
 # ---------------------------------------------------------------------------
 
+
 def generate_json_config(params: dict, mappings_df: pd.DataFrame) -> dict:
     """Build the config JSON dict from params + mapping DataFrame."""
     source_obj: dict = {"database": params["source_db"], "table": params["table_name"]}
@@ -218,7 +300,10 @@ def generate_json_config(params: dict, mappings_df: pd.DataFrame) -> dict:
     if params.get("source_datasource_name"):
         source_obj["datasource_name"] = params["source_datasource_name"]
 
-    target_obj: dict = {"database": params["target_db"], "table": params["target_table"]}
+    target_obj: dict = {
+        "database": params["target_db"],
+        "table": params["target_table"],
+    }
     if params.get("target_datasource_id") is not None:
         target_obj["datasource_id"] = params["target_datasource_id"]
     if params.get("target_datasource_name"):
@@ -306,9 +391,70 @@ def generate_json_config(params: dict, mappings_df: pd.DataFrame) -> dict:
     return config_data
 
 
+def build_preview_sql(config_data: dict, limit: int = 1000, db_type: str = "") -> str:
+    source = config_data.get("source", {})
+    target = config_data.get("target", {})
+    mappings = config_data.get("mappings", [])
+    condition = config_data.get("condition", "")
+    lookup = config_data.get("lookup", "")
+
+    source_table = source.get("table", "")
+    is_mssql = db_type.lower().startswith("microsoft sql server") if db_type else False
+
+    active_mappings = [m for m in mappings if not m.get("ignore", False)]
+
+    if not active_mappings:
+        return "-- No active mappings"
+
+    select_parts = []
+    for m in active_mappings:
+        src = m.get("source", "")
+        tgt = m.get("target", "")
+        if src and tgt:
+            transformers = m.get("transformers", [])
+            alias = src
+            if "TRIM" in transformers:
+                alias = f"LTRIM(RTRIM({src}))"
+            elif "UPPER" in transformers:
+                alias = f"UPPER({src})"
+            elif "LOWER" in transformers:
+                alias = f"LOWER({src})"
+            select_parts.append(f"    {alias} AS {tgt}")
+
+    top_clause = f"TOP {limit} " if is_mssql else ""
+    sql = f"SELECT {top_clause}\n"
+    sql += ",\n".join(select_parts)
+    sql += f"\nFROM {source_table}"
+
+    if lookup:
+        sql += f"\n{lookup}"
+
+    if condition:
+        sql += f"\nWHERE {condition}"
+
+    if not is_mssql:
+        sql += f"\nLIMIT {limit};"
+    else:
+        sql += ";"
+    return sql
+
+
+def execute_preview_sql(
+    datasource_name: str, sql: str
+) -> tuple[bool, str, "pd.DataFrame | None"]:
+    try:
+        engine = DSRepo.get_engine(datasource_name)
+        with engine.connect() as conn:
+            df = pd.read_sql(text(sql), conn)
+        return True, "", df
+    except Exception as e:
+        return False, str(e), None
+
+
 # ---------------------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------------------
+
 
 def load_data_profile(report_folder: str) -> pd.DataFrame | None:
     csv_path = os.path.join(report_folder, "data_profile", "data_profile.csv")
@@ -335,20 +481,34 @@ def _build_params(
     tgt_db_actual = _resolve_dbname(tgt_db_display, datasource_names)
     tgt_tbl_actual = st.session_state.get("mapper_tgt_tbl", target_table_input or "")
 
-    src_ds = DSRepo.get_by_name(src_db_display) if src_db_display and src_db_display in datasource_names else None
-    tgt_ds = DSRepo.get_by_name(tgt_db_display) if tgt_db_display and tgt_db_display in datasource_names else None
+    src_ds = (
+        DSRepo.get_by_name(src_db_display)
+        if src_db_display and src_db_display in datasource_names
+        else None
+    )
+    tgt_ds = (
+        DSRepo.get_by_name(tgt_db_display)
+        if tgt_db_display and tgt_db_display in datasource_names
+        else None
+    )
 
     return {
         "config_name": config_name,
         "table_name": active_table,
-        "module": loaded_config.get("module", "patient") if loaded_config else "patient",
+        "module": loaded_config.get("module", "patient")
+        if loaded_config
+        else "patient",
         "source_db": src_db_actual,
         "target_db": tgt_db_actual,
         "target_table": tgt_tbl_actual,
         "dependencies": [],
-        "source_datasource_id": src_ds.get("id") if src_ds else None,
+        "source_datasource_id": str(src_ds["id"])
+        if src_ds and src_ds.get("id")
+        else None,
         "source_datasource_name": src_db_display if src_ds else "",
-        "target_datasource_id": tgt_ds.get("id") if tgt_ds else None,
+        "target_datasource_id": str(tgt_ds["id"])
+        if tgt_ds and tgt_ds.get("id")
+        else None,
         "target_datasource_name": tgt_db_display if tgt_ds else "",
     }
 

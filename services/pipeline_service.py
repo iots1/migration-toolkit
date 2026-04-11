@@ -53,6 +53,7 @@ from services.checkpoint_manager import (
 # Import repository functions directly (concrete implementations)
 from repositories.config_repo import get_content as config_get_content
 from repositories.pipeline_run_repo import save as run_save, update as run_update, get_latest as run_get_latest
+from models.pipeline_config import PipelineRunRecord, PipelineRunUpdateRecord
 
 
 # ---------------------------------------------------------------------------
@@ -70,13 +71,13 @@ class ConfigRepositoryAdapter:
 class PipelineRunRepositoryAdapter:
     """Adapter class that implements PipelineRunRepository protocol using repository functions."""
 
-    def save(self, pipeline_id: str, status: str, steps_json: str) -> str:
+    def save(self, record: PipelineRunRecord) -> str:
         """Save a new pipeline run. Returns generated run_id."""
-        return run_save(pipeline_id, status, steps_json)
+        return run_save(record)
 
-    def update(self, run_id: str, status: str, steps_json: str = None, error_message: str = None) -> None:
+    def update(self, run_id, patch: PipelineRunUpdateRecord) -> None:
         """Update pipeline run status."""
-        run_update(run_id, status, steps_json, error_message)
+        run_update(run_id, patch)
 
     def get_latest(self, pipeline_id: str) -> dict | None:
         """Get latest pipeline run for a pipeline."""
@@ -287,7 +288,9 @@ class PipelineExecutor:
         Returns run_id immediately so the caller can store it and poll
         self._run_repo.get_latest(run_id) for progress.
         """
-        self._run_id = self._run_repo.save(self._pipeline.id, "running", "{}")
+        self._run_id = self._run_repo.save(PipelineRunRecord(
+            pipeline_id=self._pipeline.id, status="running", steps_json="{}",
+        ))
         thread = threading.Thread(
             target=self._background_run, daemon=True, name=f"pipeline-{self._pipeline.name}"
         )
@@ -307,9 +310,13 @@ class PipelineExecutor:
         try:
             result = self.execute()
             steps_json = json.dumps(self._steps_to_json(result.steps))
-            self._run_repo.update(self._run_id, result.status, steps_json)
+            self._run_repo.update(self._run_id, PipelineRunUpdateRecord(
+                status=result.status, steps_json=steps_json,
+            ))
         except Exception as e:
-            self._run_repo.update(self._run_id, "failed", "{}", error_message=str(e))
+            self._run_repo.update(self._run_id, PipelineRunUpdateRecord(
+                status="failed", steps_json="{}", error_message=str(e),
+            ))
         finally:
             # Completed (or crashed) — remove pipeline checkpoint so a fresh
             # start isn't accidentally resumed from stale state.
@@ -465,11 +472,10 @@ class PipelineExecutor:
         """
         if not self._run_id:
             return
-        self._run_repo.update(
-            self._run_id,
-            "running",
-            json.dumps(self._steps_to_json(results)),
-        )
+        self._run_repo.update(self._run_id, PipelineRunUpdateRecord(
+            status="running",
+            steps_json=json.dumps(self._steps_to_json(results)),
+        ))
 
     @staticmethod
     def _steps_to_json(results: dict[str, StepResult]) -> dict:

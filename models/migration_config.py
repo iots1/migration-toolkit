@@ -1,8 +1,12 @@
 """
-MigrationConfig — domain model for a mapping configuration.
+MigrationConfig — domain models for mapping configuration.
 
-Parsed from the JSON blob stored in SQLite `configs` table.
+MappingItem / MigrationConfig: domain model for the mapping JSON blob.
+ConfigRecord: single source of truth for configs table columns.
+              Pass this object to config_repo.save() instead of flat kwargs.
+              Adding a new DB column = add field here only.
 """
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 
@@ -54,6 +58,11 @@ class MigrationConfig:
     source_datasource_name: str = ""
     target_datasource_id: int | None = None
     target_datasource_name: str = ""
+    config_type: str = "std"
+    script: str = ""
+    generate_sql: bool = False
+    condition: str = ""
+    lookup: str = ""
 
     @classmethod
     def from_dict(cls, d: dict) -> "MigrationConfig":
@@ -71,6 +80,11 @@ class MigrationConfig:
             source_datasource_name=src.get("datasource_name", ""),
             target_datasource_id=tgt.get("datasource_id"),
             target_datasource_name=tgt.get("datasource_name", ""),
+            config_type=d.get("config_type", "std"),
+            script=d.get("script", ""),
+            generate_sql=d.get("generate_sql", False),
+            condition=d.get("condition", ""),
+            lookup=d.get("lookup", ""),
         )
 
     def to_dict(self) -> dict:
@@ -86,10 +100,45 @@ class MigrationConfig:
         if self.target_datasource_name:
             target["datasource_name"] = self.target_datasource_name
 
-        return {
+        result: dict = {
             "config_name": self.config_name,
             "source": source,
             "target": target,
             "mappings": [m.to_dict() for m in self.mappings],
             "batch_size": self.batch_size,
+            "config_type": self.config_type,
+            "generate_sql": self.generate_sql,
         }
+        if self.script:
+            result["script"] = self.script
+        if self.condition:
+            result["condition"] = self.condition
+        if self.lookup:
+            result["lookup"] = self.lookup
+        return result
+
+
+@dataclass
+class ConfigRecord:
+    """
+    Single source of truth for the `configs` table columns.
+
+    Pass this to config_repo.save() instead of flat keyword arguments.
+    When a new DB column is needed, add the field here — the repo and
+    API layer read their column list from this class.
+
+    Fields that map to DB columns (NOT including audit/soft-delete fields
+    which are managed by the DB itself):
+    """
+
+    config_name: str
+    table_name: str = ""
+    json_data: str | dict = field(default_factory=dict)
+    datasource_source_id: str | None = None
+    datasource_target_id: str | None = None
+    config_type: str = "std"
+    script: str | None = None
+    # Stores generated SQL text (not a boolean despite old DDL naming).
+    generate_sql: str | None = None
+    condition: str | None = None
+    lookup: str | None = None

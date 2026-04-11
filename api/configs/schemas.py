@@ -1,4 +1,8 @@
-"""Pydantic schemas for configs."""
+"""Pydantic schemas for configs API.
+
+Field list mirrors ConfigRecord in models/migration_config.py.
+When a new column is added to ConfigRecord, add the field here too.
+"""
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -10,14 +14,28 @@ class CreateConfigSchema(BaseModel):
     config_name: str = Field(..., min_length=1)
     table_name: str = Field(default="")
     json_data: str | dict = Field(default="{}")
+    datasource_source_id: str | None = None
+    datasource_target_id: str | None = None
+    config_type: str = Field(default="std")
+    script: str | None = None
+    generate_sql: str | None = None
+    condition: str | None = None
+    lookup: str | None = None
 
 
 class UpdateConfigSchema(BaseModel):
-    """Update config request."""
+    """Update config request (all fields optional — patch semantics)."""
 
     config_name: str | None = None
     table_name: str | None = None
     json_data: str | dict | None = None
+    datasource_source_id: str | None = None
+    datasource_target_id: str | None = None
+    config_type: str | None = None
+    script: str | None = None
+    generate_sql: str | None = None
+    condition: str | None = None
+    lookup: str | None = None
 
 
 class ConfigSchema(BaseModel):

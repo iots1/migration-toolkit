@@ -377,6 +377,17 @@ def _auto_fill_from_config(loaded_config: dict, datasource_names: list) -> None:
             if "default_value" in m:
                 st.session_state[f"default_value_{src_col}"] = m["default_value"]
 
+        st.session_state.pop("mapper_condition", None)
+        st.session_state.pop("mapper_lookup", None)
+        st.session_state.pop("mapper_generate_sql_text", None)
+        st.session_state["mapper_condition"] = loaded_config.get("condition", "")
+        st.session_state["mapper_lookup"] = loaded_config.get("lookup", "")
+        st.session_state["mapper_config_type"] = loaded_config.get("config_type", "std")
+        st.session_state["mapper_script"] = loaded_config.get("script", "")
+        st.session_state["mapper_generate_sql_text"] = loaded_config.get(
+            "generate_sql", ""
+        )
+
 
 def _render_config_details(loaded_config: dict, datasource_names: list) -> None:
     st.markdown("---")

@@ -14,6 +14,10 @@ import pandas as pd
 import uuid
 from typing import Any
 
+from models.datasource import DatasourceRecord
+from models.pipeline_config import PipelineRecord, PipelineRunRecord, PipelineRunUpdateRecord
+from models.migration_config import ConfigRecord
+
 # Import the new PostgreSQL repositories
 from repositories.datasource_repo import (
     get_all as _get_datasources,
@@ -76,8 +80,11 @@ def save_datasource(
     username: str,
     password: str,
 ) -> tuple[bool, str]:
-    """Save a new datasource."""
-    return _save_ds(name, db_type, host, port, dbname, username, password)
+    """Save a new datasource. Deprecated: use datasource_repo.save(DatasourceRecord)."""
+    return _save_ds(DatasourceRecord(
+        name=name, db_type=db_type, host=host, port=port,
+        dbname=dbname, username=username, password=password,
+    ))
 
 
 def update_datasource(
@@ -90,8 +97,11 @@ def update_datasource(
     username: str,
     password: str,
 ) -> tuple[bool, str]:
-    """Update an existing datasource."""
-    return _update_ds(ds_id, name, db_type, host, port, dbname, username, password)
+    """Update an existing datasource. Deprecated: use datasource_repo.update(id, DatasourceRecord)."""
+    return _update_ds(ds_id, DatasourceRecord(
+        name=name, db_type=db_type, host=host, port=port,
+        dbname=dbname, username=username, password=password,
+    ))
 
 
 def delete_datasource(ds_id) -> None:
@@ -115,10 +125,36 @@ def get_config_content(config_name: str) -> dict | None:
 
 
 def save_config_to_db(
-    config_name: str, table_name: str, json_data: str
+    config_name: str,
+    table_name: str,
+    json_data: str,
+    datasource_source_id=None,
+    datasource_target_id=None,
+    config_type="std",
+    script=None,
+    generate_sql=None,
+    condition=None,
+    lookup=None,
 ) -> tuple[bool, str]:
-    """Save or update a config to the database."""
-    return _save_config(config_name, table_name, json_data)
+    """Save or update a config to the database.
+
+    Deprecated: build a ConfigRecord and call config_repo.save(record) directly.
+    """
+    from models.migration_config import ConfigRecord
+
+    record = ConfigRecord(
+        config_name=config_name,
+        table_name=table_name,
+        json_data=json_data,
+        datasource_source_id=datasource_source_id,
+        datasource_target_id=datasource_target_id,
+        config_type=config_type,
+        script=script,
+        generate_sql=generate_sql,
+        condition=condition,
+        lookup=lookup,
+    )
+    return _save_config(record)
 
 
 def delete_config(config_name: str) -> tuple[bool, str]:
@@ -164,10 +200,13 @@ def save_pipeline(
     target_ds_id: int,
     error_strategy: str,
 ) -> tuple[bool, str]:
-    """Save a new pipeline."""
-    return _save_pipeline(
-        name, description, json_data, source_ds_id, target_ds_id, error_strategy
-    )
+    """Save a new pipeline. Deprecated: use pipeline_repo.save(PipelineRecord)."""
+    return _save_pipeline(PipelineRecord(
+        name=name, description=description, json_data=json_data,
+        source_datasource_id=str(source_ds_id) if source_ds_id else None,
+        target_datasource_id=str(target_ds_id) if target_ds_id else None,
+        error_strategy=error_strategy,
+    ))
 
 
 def delete_pipeline(name: str) -> tuple[bool, str]:
@@ -186,8 +225,12 @@ def get_pipeline_runs(pipeline_id: str) -> pd.DataFrame:
 
 
 def save_pipeline_run(pipeline_id: str, status: str, steps_json: str) -> str:
-    """Save a new pipeline run. Returns generated run_id."""
-    return _save_pipeline_run(pipeline_id, status, steps_json)
+    """Save a new pipeline run. Deprecated: use pipeline_run_repo.save(PipelineRunRecord)."""
+    return _save_pipeline_run(PipelineRunRecord(
+        pipeline_id=uuid.UUID(pipeline_id) if isinstance(pipeline_id, str) else pipeline_id,
+        status=status,
+        steps_json=steps_json,
+    ))
 
 
 def update_pipeline_run(
@@ -196,8 +239,15 @@ def update_pipeline_run(
     steps_json: str | None = None,
     error_message: str | None = None,
 ) -> None:
-    """Update pipeline run status."""
-    _update_pipeline_run(run_id, status, steps_json, error_message)
+    """Update pipeline run status. Deprecated: use pipeline_run_repo.update(run_id, PipelineRunUpdateRecord)."""
+    _update_pipeline_run(
+        uuid.UUID(run_id) if isinstance(run_id, str) else run_id,
+        PipelineRunUpdateRecord(
+            status=status,
+            steps_json=steps_json,
+            error_message=error_message,
+        ),
+    )
 
 
 def get_latest_run(pipeline_id: str) -> dict | None:

@@ -1,7 +1,10 @@
 """
-Datasource — domain model for a database connection profile.
+Datasource — domain models for a database connection profile.
 
-Parsed from the `datasources` table in SQLite.
+Datasource:       read model (from DB row, includes id).
+DatasourceRecord: write model — single source of truth for datasources table columns.
+                  Pass to datasource_repo.save() / update() instead of flat kwargs.
+                  Adding a new column = add the field here only.
 """
 from __future__ import annotations
 from dataclasses import dataclass
@@ -30,3 +33,22 @@ class Datasource:
             username=d.get("username", ""),
             password=d.get("password", ""),
         )
+
+
+@dataclass
+class DatasourceRecord:
+    """
+    Single source of truth for writable datasources table columns.
+
+    Used for both INSERT (save) and UPDATE — the repo receives this object
+    instead of 7 separate keyword arguments. Adding a new column means
+    adding a field here and updating the INSERT/UPDATE SQL once each.
+    """
+
+    name: str
+    db_type: str
+    host: str = ""
+    port: str = ""
+    dbname: str = ""
+    username: str = ""
+    password: str = ""

@@ -1,47 +1,82 @@
 from __future__ import annotations  # Enable modern type hints
 
-import uuid
 import pandas as pd
 from sqlalchemy import text
 from repositories.connection import get_transaction
+from models.migration_config import ConfigRecord
 
 
-def save(config_name: str, table_name: str, json_data):
+def save(record: ConfigRecord) -> tuple[bool, str]:
+    """Save or update a config. Pass a ConfigRecord — no flat kwargs."""
     import json as _json
 
-    if isinstance(json_data, dict):
-        json_data = _json.dumps(json_data, ensure_ascii=False)
+    json_str = record.json_data
+    if isinstance(json_str, dict):
+        json_str = _json.dumps(json_str, ensure_ascii=False)
+
+    # Single params dict derived from ConfigRecord — the ONLY place to update
+    # when a new column is added to the configs table.
+    col_params: dict = {
+        "table_name": record.table_name,
+        "json_data": json_str,
+        "datasource_source_id": record.datasource_source_id,
+        "datasource_target_id": record.datasource_target_id,
+        "config_type": record.config_type,
+        "script": record.script or None,
+        "generate_sql": record.generate_sql or None,
+        "condition": record.condition or None,
+        "lookup": record.lookup or None,
+    }
+
     try:
         with get_transaction() as conn:
             result = conn.execute(
                 text("SELECT id FROM configs WHERE config_name = :name"),
-                {"name": config_name},
+                {"name": record.config_name},
             )
             existing = result.fetchone()
             if existing:
                 config_id = existing[0]
                 conn.execute(
                     text(
-                        "UPDATE configs SET table_name = :table_name, json_data = :json_data, updated_at = CURRENT_TIMESTAMP WHERE id = :id"
+                        """UPDATE configs SET
+                               table_name = :table_name,
+                               json_data = :json_data,
+                               datasource_source_id = :datasource_source_id,
+                               datasource_target_id = :datasource_target_id,
+                               config_type = :config_type,
+                               script = :script,
+                               generate_sql = :generate_sql,
+                               condition = :condition,
+                               lookup = :lookup,
+                               updated_at = CURRENT_TIMESTAMP
+                           WHERE id = :id"""
                     ),
-                    {"id": config_id, "table_name": table_name, "json_data": json_data},
+                    {"id": config_id, **col_params},
                 )
             else:
                 conn.execute(
                     text(
-                        "INSERT INTO configs (config_name, table_name, json_data, updated_at) VALUES (:config_name, :table_name, :json_data, CURRENT_TIMESTAMP)"
+                        """INSERT INTO configs (
+                               config_name, table_name, json_data,
+                               datasource_source_id, datasource_target_id,
+                               config_type, script, generate_sql, condition, lookup,
+                               updated_at
+                           ) VALUES (
+                               :config_name, :table_name, :json_data,
+                               :datasource_source_id, :datasource_target_id,
+                               :config_type, :script, :generate_sql, :condition, :lookup,
+                               CURRENT_TIMESTAMP
+                           )"""
                     ),
-                    {
-                        "config_name": config_name,
-                        "table_name": table_name,
-                        "json_data": json_data,
-                    },
+                    {"config_name": record.config_name, **col_params},
                 )
                 result = conn.execute(
                     text("SELECT id FROM configs WHERE config_name = :name"),
-                    {"name": config_name},
+                    {"name": record.config_name},
                 )
                 config_id = result.scalar()
+
             ver_result = conn.execute(
                 text(
                     "SELECT COALESCE(MAX(version), 0) FROM config_histories WHERE config_id = :cid"
@@ -51,15 +86,12 @@ def save(config_name: str, table_name: str, json_data):
             next_version = ver_result.scalar() + 1
             conn.execute(
                 text(
-                    "INSERT INTO config_histories (config_id, version, json_data, created_at) VALUES (:config_id, :version, :json_data, CURRENT_TIMESTAMP)"
+                    "INSERT INTO config_histories (config_id, version, json_data, created_at)"
+                    " VALUES (:config_id, :version, :json_data, CURRENT_TIMESTAMP)"
                 ),
-                {
-                    "config_id": config_id,
-                    "version": next_version,
-                    "json_data": json_data,
-                },
+                {"config_id": config_id, "version": next_version, "json_data": json_str},
             )
-        return True, f"Saved config '{config_name}' (version {next_version})"
+        return True, f"Saved config '{record.config_name}' (version {next_version})"
     except Exception as e:
         return False, f"Error: {str(e)}"
 
@@ -85,7 +117,12 @@ def get_all_list() -> list[dict]:
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id::text AS id, config_name, table_name, json_data, created_at, created_by, updated_at, updated_by, is_deleted, deleted_at, deleted_by, deleted_reason FROM configs WHERE is_deleted = false ORDER BY updated_at DESC"
+                """SELECT id::text AS id, config_name, table_name, json_data,
+                   datasource_source_id::text, datasource_target_id::text,
+                   config_type, script, generate_sql, condition, lookup,
+                   created_at, created_by, updated_at, updated_by,
+                   is_deleted, deleted_at, deleted_by, deleted_reason
+                   FROM configs WHERE is_deleted = false ORDER BY updated_at DESC"""
             )
         )
         rows = []
@@ -130,6 +167,19 @@ def get_content(config_name: str):
         merged.setdefault("name", data.get("config_name", ""))
         merged["_db_id"] = data["id"]
         merged["_db_updated_at"] = str(data.get("updated_at", ""))
+        merged["condition"] = data.get("condition") or parsed.get("condition", "")
+        merged["lookup"] = data.get("lookup") or parsed.get("lookup", "")
+        merged["config_type"] = data.get("config_type") or parsed.get(
+            "config_type", "std"
+        )
+        merged["script"] = data.get("script") or parsed.get("script", "")
+        merged["generate_sql"] = data.get("generate_sql") or parsed.get(
+            "generate_sql", ""
+        )
+        ds_src_id = data.get("datasource_source_id")
+        merged["_datasource_source_id"] = str(ds_src_id) if ds_src_id else None
+        ds_tgt_id = data.get("datasource_target_id")
+        merged["_datasource_target_id"] = str(ds_tgt_id) if ds_tgt_id else None
         return merged
 
 
@@ -140,7 +190,12 @@ def get_by_id_raw(config_id: str) -> dict | None:
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id::text AS id, config_name, table_name, json_data, created_at, created_by, updated_at, updated_by, is_deleted, deleted_at, deleted_by, deleted_reason FROM configs WHERE id = :id"
+                """SELECT id::text AS id, config_name, table_name, json_data,
+                   datasource_source_id::text, datasource_target_id::text,
+                   config_type, script, generate_sql, condition, lookup,
+                   created_at, created_by, updated_at, updated_by,
+                   is_deleted, deleted_at, deleted_by, deleted_reason
+                   FROM configs WHERE id = :id"""
             ),
             {"id": config_id},
         )

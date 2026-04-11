@@ -5,6 +5,7 @@ from __future__ import annotations
 from api.base.service import BaseService
 from api.base.query_params import QueryParams
 from repositories import datasource_repo
+from models.datasource import DatasourceRecord
 
 
 class DatasourcesService(BaseService):
@@ -39,52 +40,42 @@ class DatasourcesService(BaseService):
 
     def create(self, data: dict) -> dict:
         """Create new datasource."""
-        ok, msg = self.execute_db_operation(
-            lambda: datasource_repo.save(
-                name=data.get("name", ""),
-                db_type=data.get("db_type", ""),
-                host=data.get("host", ""),
-                port=data.get("port", ""),
-                dbname=data.get("dbname", ""),
-                username=data.get("username", ""),
-                password=data.get("password", ""),
-            )
+        record = DatasourceRecord(
+            name=data.get("name", ""),
+            db_type=data.get("db_type", ""),
+            host=data.get("host", ""),
+            port=data.get("port", ""),
+            dbname=data.get("dbname", ""),
+            username=data.get("username", ""),
+            password=data.get("password", ""),
         )
+        ok, msg = self.execute_db_operation(lambda: datasource_repo.save(record))
         self._assert_success(ok, msg)
 
-        # Return created record
         result = self.execute_db_operation(
-            lambda: datasource_repo.get_by_name(data["name"])
+            lambda: datasource_repo.get_by_name(record.name)
         )
         return self._sanitize_response(self._strip_password(result))
 
     def update(self, id: str | int, data: dict) -> dict:
-        """Update datasource."""
-        # Get existing record first
+        """Update datasource (patch — missing fields fall back to existing values)."""
         existing = self.find_by_id(id)
-
-        # Merge with updates
-        updated_data = {**existing, **{k: v for k, v in data.items() if v is not None}}
-
-        ok, msg = self.execute_db_operation(
-            lambda: datasource_repo.update(
-                ds_id=id,
-                name=updated_data.get("name", ""),
-                db_type=updated_data.get("db_type", ""),
-                host=updated_data.get("host", ""),
-                port=updated_data.get("port", ""),
-                dbname=updated_data.get("dbname", ""),
-                username=updated_data.get("username", ""),
-                password=updated_data.get("password", ""),
-            )
+        record = DatasourceRecord(
+            name=data.get("name") or existing.get("name", ""),
+            db_type=data.get("db_type") or existing.get("db_type", ""),
+            host=data.get("host") or existing.get("host", ""),
+            port=data.get("port") or existing.get("port", ""),
+            dbname=data.get("dbname") or existing.get("dbname", ""),
+            username=data.get("username") or existing.get("username", ""),
+            password=data.get("password") or existing.get("password", ""),
         )
+        ok, msg = self.execute_db_operation(lambda: datasource_repo.update(id, record))
         self._assert_success(ok, msg)
 
-        # Return updated record
         result = self.execute_db_operation(lambda: datasource_repo.get_by_id(id))
         return self._sanitize_response(self._strip_password(result))
 
     def delete(self, id: str | int) -> None:
         """Delete datasource."""
-        existing = self.find_by_id(id)
+        self.find_by_id(id)
         self.execute_db_operation(lambda: datasource_repo.delete(id))

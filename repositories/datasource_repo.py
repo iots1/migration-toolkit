@@ -12,6 +12,7 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from repositories.connection import get_transaction
+from models.datasource import DatasourceRecord
 
 
 def get_all() -> pd.DataFrame:
@@ -106,122 +107,66 @@ def get_by_name(name: str) -> dict | None:
         return dict(zip(columns, row))
 
 
-def save(
-    name: str,
-    db_type: str,
-    host: str,
-    port: str,
-    dbname: str,
-    username: str,
-    password: str,
-) -> tuple[bool, str]:
-    """
-    Save a new datasource.
-
-    Args:
-        name: Datasource name (must be unique)
-        db_type: Database type (MySQL, PostgreSQL, Microsoft SQL Server)
-        host: Database host
-        port: Database port
-        dbname: Database name
-        username: Database username
-        password: Database password
-
-    Returns:
-        tuple[bool, str]: (success, message)
-
-    Example:
-        >>> ok, msg = save("My DB", "MySQL", "localhost", "3306",
-        ...                "testdb", "root", "password")
-        >>> if ok:
-        ...     print("Saved!")
-    """
+def save(record: DatasourceRecord) -> tuple[bool, str]:
+    """Insert a new datasource. Pass a DatasourceRecord — no flat kwargs."""
+    col_params = {
+        "name": record.name,
+        "db_type": record.db_type,
+        "host": record.host,
+        "port": record.port,
+        "dbname": record.dbname,
+        "username": record.username,
+        "password": record.password,
+    }
     try:
         with get_transaction() as conn:
             conn.execute(
                 text("""
-                INSERT INTO datasources (name, db_type, host, port, dbname, username, password)
-                VALUES (:name, :db_type, :host, :port, :dbname, :username, :password)
-            """),
-                {
-                    "name": name,
-                    "db_type": db_type,
-                    "host": host,
-                    "port": port,
-                    "dbname": dbname,
-                    "username": username,
-                    "password": password,
-                },
+                    INSERT INTO datasources (name, db_type, host, port, dbname, username, password)
+                    VALUES (:name, :db_type, :host, :port, :dbname, :username, :password)
+                """),
+                col_params,
             )
-        return True, f"✅ บันทึก '{name}' สำเร็จ"
+        return True, f"✅ บันทึก '{record.name}' สำเร็จ"
     except IntegrityError:
-        return False, f"❌ ชื่อ '{name}' มีอยู่แล้ว"
+        return False, f"❌ ชื่อ '{record.name}' มีอยู่แล้ว"
     except Exception as e:
         return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
 
 
-def update(
-    ds_id,
-    name: str,
-    db_type: str,
-    host: str,
-    port: str,
-    dbname: str,
-    username: str,
-    password: str,
-) -> tuple[bool, str]:
-    """
-    Update an existing datasource.
-
-    Args:
-        ds_id: Datasource ID to update (UUID or string)
-        name: New datasource name (must be unique)
-        db_type: Database type
-        host: Database host
-        port: Database port
-        dbname: Database name
-        username: Database username
-        password: Database password
-
-    Returns:
-        tuple[bool, str]: (success, message)
-
-    Example:
-        >>> ok, msg = update(uuid.UUID("..."), "Updated Name", "PostgreSQL", ...)
-        >>> if ok:
-        ...     print("Updated!")
-    """
+def update(ds_id, record: DatasourceRecord) -> tuple[bool, str]:
+    """Update an existing datasource by ID. Pass a DatasourceRecord — no flat kwargs."""
     if isinstance(ds_id, str):
         ds_id = uuid.UUID(ds_id)
+    col_params = {
+        "name": record.name,
+        "db_type": record.db_type,
+        "host": record.host,
+        "port": record.port,
+        "dbname": record.dbname,
+        "username": record.username,
+        "password": record.password,
+    }
     try:
         with get_transaction() as conn:
             conn.execute(
                 text("""
-                UPDATE datasources SET
-                    name = :name,
-                    db_type = :db_type,
-                    host = :host,
-                    port = :port,
-                    dbname = :dbname,
-                    username = :username,
-                    password = :password,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id
-            """),
-                {
-                    "id": ds_id,
-                    "name": name,
-                    "db_type": db_type,
-                    "host": host,
-                    "port": port,
-                    "dbname": dbname,
-                    "username": username,
-                    "password": password,
-                },
+                    UPDATE datasources SET
+                        name = :name,
+                        db_type = :db_type,
+                        host = :host,
+                        port = :port,
+                        dbname = :dbname,
+                        username = :username,
+                        password = :password,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :id
+                """),
+                {"id": ds_id, **col_params},
             )
-        return True, f"✅ อัปเดต '{name}' สำเร็จ"
+        return True, f"✅ อัปเดต '{record.name}' สำเร็จ"
     except IntegrityError:
-        return False, f"❌ ชื่อ '{name}' มีอยู่แล้ว"
+        return False, f"❌ ชื่อ '{record.name}' มีอยู่แล้ว"
     except Exception as e:
         return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
 

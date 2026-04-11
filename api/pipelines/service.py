@@ -6,6 +6,7 @@ import json
 from api.base.service import BaseService
 from api.base.query_params import QueryParams
 from repositories import pipeline_repo
+from models.pipeline_config import PipelineRecord
 
 
 class PipelinesService(BaseService):
@@ -16,6 +17,7 @@ class PipelinesService(BaseService):
         "id",
         "name",
         "description",
+        "json_data",
         "source_datasource_id",
         "target_datasource_id",
         "error_strategy",
@@ -46,55 +48,19 @@ class PipelinesService(BaseService):
 
     def create(self, data: dict) -> dict:
         """Create new pipeline."""
-        name = data.get("name", "")
-        description = data.get("description", "")
-        json_data = data.get("json_data", "{}")
-
-        if isinstance(json_data, dict):
-            json_data = json.dumps(json_data, ensure_ascii=False)
-
-        ok, msg = self.execute_db_operation(
-            lambda: pipeline_repo.save(
-                name=name,
-                description=description,
-                json_data=json_data,
-                source_ds_id=data.get("source_datasource_id"),
-                target_ds_id=data.get("target_datasource_id"),
-                error_strategy=data.get("error_strategy", "fail_fast"),
-            )
-        )
+        record = self._to_record(data)
+        ok, msg = self.execute_db_operation(lambda: pipeline_repo.save(record))
         self._assert_success(ok, msg)
-
-        result = self.execute_db_operation(lambda: pipeline_repo.get_by_name(name))
+        result = self.execute_db_operation(lambda: pipeline_repo.get_by_name(record.name))
         return self._sanitize_response(result)
 
     def update(self, id: str, data: dict) -> dict:
-        """Update pipeline (upsert)."""
+        """Update pipeline (patch — missing fields fall back to existing values)."""
         existing = self.find_by_id(id)
-
-        name = data.get("name") or existing.get("name", "")
-        description = data.get("description") or existing.get("description", "")
-        json_data = data.get("json_data") or existing.get("json_data", "{}")
-
-        if isinstance(json_data, dict):
-            json_data = json.dumps(json_data, ensure_ascii=False)
-
-        ok, msg = self.execute_db_operation(
-            lambda: pipeline_repo.save(
-                name=name,
-                description=description,
-                json_data=json_data,
-                source_ds_id=data.get("source_datasource_id")
-                or existing.get("source_datasource_id"),
-                target_ds_id=data.get("target_datasource_id")
-                or existing.get("target_datasource_id"),
-                error_strategy=data.get("error_strategy")
-                or existing.get("error_strategy", "fail_fast"),
-            )
-        )
+        record = self._to_record(data, existing=existing, name_override=id)
+        ok, msg = self.execute_db_operation(lambda: pipeline_repo.save(record))
         self._assert_success(ok, msg)
-
-        result = self.execute_db_operation(lambda: pipeline_repo.get_by_name(name))
+        result = self.execute_db_operation(lambda: pipeline_repo.get_by_name(record.name))
         return self._sanitize_response(result)
 
     def delete(self, id: str) -> None:
@@ -102,3 +68,36 @@ class PipelinesService(BaseService):
         self.find_by_id(id)
         ok, msg = self.execute_db_operation(lambda: pipeline_repo.delete(id))
         self._assert_success(ok, msg)
+
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _to_record(
+        self,
+        data: dict,
+        *,
+        existing: dict | None = None,
+        name_override: str | None = None,
+    ) -> PipelineRecord:
+        """Build a PipelineRecord from request data, falling back to existing values."""
+        ex = existing or {}
+
+        json_data = data.get("json_data") or ex.get("json_data", "{}")
+        if isinstance(json_data, dict):
+            json_data = json.dumps(json_data, ensure_ascii=False)
+
+        return PipelineRecord(
+            name=name_override or data.get("name", ""),
+            description=data.get("description") or ex.get("description", ""),
+            json_data=json_data,
+            source_datasource_id=(
+                data.get("source_datasource_id") or ex.get("source_datasource_id")
+            ),
+            target_datasource_id=(
+                data.get("target_datasource_id") or ex.get("target_datasource_id")
+            ),
+            error_strategy=(
+                data.get("error_strategy") or ex.get("error_strategy", "fail_fast")
+            ),
+        )

@@ -247,6 +247,23 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
     with c_head:
         st.markdown("### 📋 Field Mapping")
         st.caption("Select a row to edit details below.")
+        if st.button("+ Add Row", key="btn_add_mapping_row"):
+            df = st.session_state[f"df_{active_table}"]
+            new_row = {
+                "Status": "",
+                "Source Column": "",
+                "Type": "",
+                "Target Column": "",
+                "Transformers": "",
+                "Validators": "",
+                "Default Value": "",
+                "Required": False,
+                "Ignore": False,
+            }
+            df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+            st.session_state[f"df_{active_table}"] = df
+            st.session_state.mapper_editor_ver = time.time()
+            st.session_state["_mapper_needs_rerun"] = True
 
     with c_ignore:
         col_check, col_uncheck = st.columns(2)
@@ -317,8 +334,8 @@ def _build_aggrid(
     gb.configure_column(
         "Status", editable=False, width=90, cellStyle={"textAlign": "center"}
     )
-    gb.configure_column("Source Column", editable=False, width=200)
-    gb.configure_column("Type", editable=False, width=120)
+    gb.configure_column("Source Column", editable=True, width=200)
+    gb.configure_column("Type", editable=True, width=120)
 
     if real_target_columns:
         # Prevent None values in dropdown

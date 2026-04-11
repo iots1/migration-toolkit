@@ -149,7 +149,13 @@ def _run_migration(add_log, status_box, metric_processed, metric_batch, metric_t
 
     if result.status == "failed":
         status_box.update(label="Migration Failed", state="error", expanded=True)
-        st.error(f"Migration Failed: {result.error_message}")
+        short_msg, failed_sql = _parse_db_error(result.error_message or "")
+        st.error(f"**Migration Failed:** {short_msg}")
+        if failed_sql:
+            with st.expander("🔍 Failed SQL Query", expanded=True):
+                st.code(failed_sql, language="sql")
+        with st.expander("📋 Full Error Details"):
+            st.code(result.error_message or "No details", language="text")
         col_err1, _ = st.columns(2)
         with col_err1:
             if st.button("🗑️ Emergency Truncate Target Table", key="emergency_truncate"):
@@ -264,3 +270,50 @@ def _reset_and_restart() -> None:
     st.session_state.checkpoint_batch = 0
     st.session_state.migration_step = 1
     st.rerun()
+
+
+def _parse_db_error(raw: str) -> tuple[str, str | None]:
+    """
+    Extract a readable summary and the failed SQL from a SQLAlchemy/pymssql error string.
+
+    Returns (short_summary, failed_sql | None).
+
+    Raw pymssql format:
+        (pymssql.exceptions.ProgrammingError) (207, b"Invalid column name 'old_hn'.
+        DB-Lib error message 20018, severity 16:\\nGeneral SQL Server error...\\n" * N)
+        [SQL: SELECT ...]
+        (Background on this error at: ...)
+    """
+    import re
+
+    if not raw:
+        return "Unknown error", None
+
+    # ── Extract failed SQL ────────────────────────────────────────────────────
+    failed_sql: str | None = None
+    sql_marker = "[SQL:"
+    bg_marker = "(Background on this error"
+    if sql_marker in raw:
+        sql_start = raw.index(sql_marker) + len(sql_marker)
+        sql_end = raw.find(bg_marker, sql_start)
+        if sql_end == -1:
+            sql_end = len(raw)
+        failed_sql = raw[sql_start:sql_end].strip().rstrip("]").strip()
+
+    # ── Build short summary ───────────────────────────────────────────────────
+    first_line = raw.split("\n")[0]
+
+    # pymssql pattern: (207, b"Invalid column name 'old_hn'.DB-Lib...)
+    match = re.search(r'\((\d+),\s*b[\'"](.+?)(?:DB-Lib|\\n|[\'"])', first_line)
+    if match:
+        code = match.group(1)
+        msg = match.group(2).rstrip(".").strip()
+        # Exception class name from e.g. "(pymssql.exceptions.ProgrammingError)"
+        cls_match = re.search(r'\([\w.]*?(\w+Error)\)', first_line)
+        exc = cls_match.group(1) if cls_match else "DatabaseError"
+        short_summary = f"{exc} [{code}]: {msg}"
+    else:
+        # Generic fallback — first 200 chars of the first line
+        short_summary = first_line[:200]
+
+    return short_summary, failed_sql

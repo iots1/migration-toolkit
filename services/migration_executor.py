@@ -87,7 +87,22 @@ def run_single_migration(
         _validate_schema(src_engine, tgt_engine, source_table, target_table, config, log)
         _init_hn_counter(tgt_engine, target_table, config, log)
 
-        select_query = build_select_query(config, source_table, src_db_type)
+        generate_sql = (config.get("generate_sql") or "").strip()
+        if generate_sql:
+            select_query = generate_sql
+            log("generate_sql found — using custom SQL (JOIN/WHERE included)", "📋")
+            # generate_sql aliases columns to target names.
+            # Remap active mappings so transform_batch finds them by target column name.
+            remapped = [
+                {**m, "source": m["target"]}
+                for m in config.get("mappings", [])
+                if not m.get("ignore", False) and m.get("target")
+            ]
+            config = {**config, "mappings": remapped}
+            log(f"Remapped {len(remapped)} active mappings (source → target name)", "🔁")
+        else:
+            select_query = build_select_query(config, source_table, src_db_type)
+            log("generate_sql not set — using dynamic SELECT from mappings", "🔧")
         log(f"SELECT Query: {select_query}", "🔍")
         log(f"Starting Batch Processing (Size: {batch_size})...", "🚀")
 

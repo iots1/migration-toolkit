@@ -528,21 +528,28 @@ def _render_quick_edit(
         if "VALUE_MAP" in new_trans:
             _render_value_map(src_col, sel_row, active_df_raw)
 
-        if st.button("✅ Update Row", type="primary"):
-            df_state.at[idx, "Target Column"] = new_target
-            df_state.at[idx, "Transformers"] = ", ".join(new_trans)
-            df_state.at[idx, "Validators"] = ", ".join(new_vals)
-            df_state.at[idx, "Default Value"] = st.session_state.get(dv_key, "")
-            if is_ignored:
-                df_state.at[idx, "Required"] = False
-            elif col_nullable_map and new_target:
-                # Auto-check Required if target column is NOT NULL
-                is_col_not_null = not col_nullable_map.get(new_target, True)
-                if is_col_not_null:
-                    df_state.at[idx, "Required"] = True
-            st.session_state[f"df_{active_table}"] = df_state
-            st.session_state.mapper_editor_ver = time.time()
-            st.rerun()
+        col_update, col_delete = st.columns([3, 1])
+        with col_update:
+            if st.button("✅ Update Row", type="primary", use_container_width=True):
+                df_state.at[idx, "Target Column"] = new_target
+                df_state.at[idx, "Transformers"] = ", ".join(new_trans)
+                df_state.at[idx, "Validators"] = ", ".join(new_vals)
+                df_state.at[idx, "Default Value"] = st.session_state.get(dv_key, "")
+                if is_ignored:
+                    df_state.at[idx, "Required"] = False
+                elif col_nullable_map and new_target:
+                    is_col_not_null = not col_nullable_map.get(new_target, True)
+                    if is_col_not_null:
+                        df_state.at[idx, "Required"] = True
+                st.session_state[f"df_{active_table}"] = df_state
+                st.session_state.mapper_editor_ver = time.time()
+                st.rerun()
+        with col_delete:
+            if st.button("🗑️ Delete Row", use_container_width=True):
+                df_state = df_state.drop(index=idx).reset_index(drop=True)
+                st.session_state[f"df_{active_table}"] = df_state
+                st.session_state.mapper_editor_ver = time.time()
+                st.rerun()
 
 
 def _render_generate_hn(src_col: str) -> None:

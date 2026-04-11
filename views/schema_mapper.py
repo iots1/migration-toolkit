@@ -20,6 +20,13 @@ import streamlit as st
 import database as db
 from utils.ui_components import inject_global_css
 
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _get_datasources():
+    """Cached datasource list — refreshes every 30 s to avoid DB hit on every rerun."""
+    return db.get_datasources()
+
+
 from views.components.schema_mapper.source_selector import render_source_selector
 from views.components.schema_mapper.metadata_editor import (
     render_target_selector,
@@ -52,6 +59,8 @@ _DEFAULTS: dict = {
     "mapper_config_type": "std",
     "mapper_script": "",
     "mapper_generate_sql_text": "",
+    "_mapper_condition_widget": "",
+    "_mapper_lookup_widget": "",
 }
 
 
@@ -78,7 +87,8 @@ def render_schema_mapper_page() -> None:
             st.rerun()
 
     # --- Datasource list (shared across components) ---
-    datasources_df = db.get_datasources()
+    # Cached: datasource list rarely changes; avoid DB hit on every rerun.
+    datasources_df = _get_datasources()
     datasource_names = ["-- Select Datasource --"] + (
         datasources_df["name"].tolist() if not datasources_df.empty else []
     )
@@ -207,24 +217,32 @@ def _render_condition_lookup_sql(
     st.markdown("---")
     st.markdown("### 🔧 Table Conditions & SQL Preview")
 
-    with st.expander("⚙️ Condition & Lookup", expanded=False):
+    print(st.session_state.get("mapper_condition"))
+    _condition_val = st.session_state.get("mapper_condition", "")
+    _lookup_val = st.session_state.get("mapper_lookup", "")
+    _has_condition_or_lookup = bool(_condition_val or _lookup_val)
+    with st.expander("⚙️ Condition & Lookup", expanded=_has_condition_or_lookup):
         c1, c2 = st.columns(2)
         with c1:
-            st.text_area(
+            _edited_condition = st.text_area(
                 "WHERE Condition",
+                value=_condition_val,
                 placeholder="CreateDateAt > '2024-01-01' AND Sex = 1",
                 height=80,
-                key="mapper_condition",
+                key="_mapper_condition_widget",
                 help="SQL WHERE clause to filter source data",
             )
+            st.session_state["mapper_condition"] = _edited_condition
         with c2:
-            st.text_area(
+            _edited_lookup = st.text_area(
                 "Lookup / JOIN",
+                value=_lookup_val,
                 placeholder="LEFT JOIN lookup_table lt ON source.cid = lt.cid",
                 height=80,
-                key="mapper_lookup",
+                key="_mapper_lookup_widget",
                 help="SQL JOIN clause for lookup tables",
             )
+            st.session_state["mapper_lookup"] = _edited_lookup
 
     # --- SQL generation (helper) ---
     def _generate_sql() -> str:

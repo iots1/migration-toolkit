@@ -12,6 +12,18 @@ import streamlit as st
 from services.datasource_repository import DatasourceRepository as DSRepo
 
 
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_get_tables(ds_name: str):
+    """Cache table list per datasource — avoids repeated network calls on every rerun."""
+    return DSRepo.get_tables(ds_name)
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _cached_get_columns(ds_name: str, table_name: str):
+    """Cache column list per datasource+table — avoids repeated network calls on every rerun."""
+    return DSRepo.get_columns(ds_name, table_name)
+
+
 def render_target_selector(
     datasource_names: list,
     active_table: str,
@@ -59,7 +71,7 @@ def render_target_selector(
         default_tgt_tbl = st.session_state.get("mapper_tgt_tbl")
 
         if target_db_input and target_db_input != "-- Select Datasource --":
-            ok, tables = DSRepo.get_tables(target_db_input)
+            ok, tables = _cached_get_tables(target_db_input)
             if ok:
                 def_idx = (
                     tables.index(default_tgt_tbl)
@@ -77,7 +89,7 @@ def render_target_selector(
                 )
 
             if target_table_input:
-                ok_c, cols = DSRepo.get_columns(target_db_input, target_table_input)
+                ok_c, cols = _cached_get_columns(target_db_input, target_table_input)
                 if ok_c:
                     real_target_columns = (
                         cols  # Keep full column info (name, type, is_nullable)

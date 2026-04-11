@@ -148,6 +148,7 @@ def validate_mapping_in_table(
 # ---------------------------------------------------------------------------
 
 
+@st.fragment
 def render_mapping_editor(
     active_table: str,
     real_target_columns: list,
@@ -155,12 +156,13 @@ def render_mapping_editor(
     col_nullable_map: dict | None = None,
     col_defaults_map: dict | None = None,
 ) -> None:
-    """Renders the AgGrid column mapping table + Quick Edit panel."""
+    """Renders the AgGrid column mapping table + Quick Edit panel.
+
+    Decorated with @st.fragment so widget interactions (selectbox, multiselect,
+    button clicks) only rerun this component — not the entire page.
+    """
     if not st.session_state.mapper_focus_mode:
         _render_table_header(active_table, real_target_columns)
-
-    if st.session_state.pop("_mapper_needs_rerun", False):
-        st.rerun()
 
     df_to_edit = st.session_state[f"df_{active_table}"].copy()
 
@@ -263,7 +265,7 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
             df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
             st.session_state[f"df_{active_table}"] = df
             st.session_state.mapper_editor_ver = time.time()
-            st.session_state["_mapper_needs_rerun"] = True
+            st.rerun()
 
     with c_ignore:
         col_check, col_uncheck = st.columns(2)
@@ -274,14 +276,14 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
                 df["Required"] = False
                 st.session_state[f"df_{active_table}"] = df
                 st.session_state.mapper_editor_ver = time.time()
-                st.session_state["_mapper_needs_rerun"] = True
+                st.rerun()
         with col_uncheck:
             if st.button("✗ Uncheck All", use_container_width=True):
                 df = st.session_state[f"df_{active_table}"]
                 df["Ignore"] = False
                 st.session_state[f"df_{active_table}"] = df
                 st.session_state.mapper_editor_ver = time.time()
-                st.session_state["_mapper_needs_rerun"] = True
+                st.rerun()
 
     with c_ai:
         if real_target_columns:
@@ -307,7 +309,7 @@ def _render_table_header(active_table: str, real_target_columns: list) -> None:
                     st.session_state[f"df_{active_table}"] = df
                     st.session_state.mapper_editor_ver = time.time()
                     st.toast(f"AI matched {count} columns!", icon="🤖")
-                    st.session_state["_mapper_needs_rerun"] = True
+                    st.rerun()
 
 
 def _build_aggrid(
@@ -543,13 +545,13 @@ def _render_quick_edit(
                         df_state.at[idx, "Required"] = True
                 st.session_state[f"df_{active_table}"] = df_state
                 st.session_state.mapper_editor_ver = time.time()
-                st.rerun()
+                st.rerun()  # fragment-scoped rerun — AgGrid updates within fragment
         with col_delete:
             if st.button("🗑️ Delete Row", use_container_width=True):
                 df_state = df_state.drop(index=idx).reset_index(drop=True)
                 st.session_state[f"df_{active_table}"] = df_state
                 st.session_state.mapper_editor_ver = time.time()
-                st.rerun()
+                st.rerun()  # fragment-scoped rerun
 
 
 def _render_generate_hn(src_col: str) -> None:

@@ -19,6 +19,10 @@ import streamlit as st
 import database as db
 from services.datasource_repository import DatasourceRepository as DSRepo
 import utils.helpers as helpers
+from views.components.schema_mapper.metadata_editor import (
+    _cached_get_tables,
+    _cached_get_columns,
+)
 
 
 def render_source_selector(
@@ -168,7 +172,7 @@ def _mode_datasource(col_sel, datasource_names, datasources_df):
         if st.session_state[status_key] != "success":
             return None, None, None, None
 
-        ok_t, tables = DSRepo.get_tables(src_ds_name)
+        ok_t, tables = _cached_get_tables(src_ds_name)
         if not ok_t:
             return None, None, None, None
 
@@ -186,7 +190,7 @@ def _mode_datasource(col_sel, datasource_names, datasources_df):
         if sel_table in tables:
             st.session_state.sm_src_tbl_idx = list(tables).index(sel_table)
 
-        ok_c, cols = DSRepo.get_columns(src_ds_name, sel_table)
+        ok_c, cols = _cached_get_columns(src_ds_name, sel_table)
         if not ok_c:
             return None, None, None, None
 
@@ -283,7 +287,7 @@ def _mode_config(col_sel, source_mode: str, datasources_df):
 
         df_raw = None
         if src_db_name:
-            ok, cols = DSRepo.get_columns(src_db_name, src_tbl_name)
+            ok, cols = _cached_get_columns(src_db_name, src_tbl_name)
             if ok:
                 st.success(f"✅ Loaded & Synced: {src_tbl_name} (from {src_db_name})")
                 df_raw = pd.DataFrame(
@@ -380,6 +384,8 @@ def _auto_fill_from_config(loaded_config: dict, datasource_names: list) -> None:
         st.session_state.pop("mapper_condition", None)
         st.session_state.pop("mapper_lookup", None)
         st.session_state.pop("mapper_generate_sql_text", None)
+        st.session_state.pop("_mapper_condition_widget", None)
+        st.session_state.pop("_mapper_lookup_widget", None)
         st.session_state["mapper_condition"] = loaded_config.get("condition", "")
         st.session_state["mapper_lookup"] = loaded_config.get("lookup", "")
         st.session_state["mapper_config_type"] = loaded_config.get("config_type", "std")
@@ -387,6 +393,20 @@ def _auto_fill_from_config(loaded_config: dict, datasource_names: list) -> None:
         st.session_state["mapper_generate_sql_text"] = loaded_config.get(
             "generate_sql", ""
         )
+
+    else:
+        # Same config already loaded — only back-fill fields that are currently empty.
+        # This handles the case where session state was cleared (navigate away & back)
+        # without overwriting edits the user made in the current session.
+        for ss_key, cfg_key in [
+            ("mapper_condition", "condition"),
+            ("mapper_lookup", "lookup"),
+            ("mapper_generate_sql_text", "generate_sql"),
+        ]:
+            cfg_val = loaded_config.get(cfg_key, "")
+            if cfg_val and not st.session_state.get(ss_key, ""):
+                st.session_state.pop(ss_key, None)
+                st.session_state[ss_key] = cfg_val
 
 
 def _render_config_details(loaded_config: dict, datasource_names: list) -> None:
@@ -430,7 +450,7 @@ def _render_config_details(loaded_config: dict, datasource_names: list) -> None:
 
         if selected_tgt_db and selected_tgt_db != "-- Select Datasource --":
             if "mapper_tgt_tables" not in st.session_state:
-                ok, tables = DSRepo.get_tables(selected_tgt_db)
+                ok, tables = _cached_get_tables(selected_tgt_db)
                 if ok:
                     st.session_state["mapper_tgt_tables"] = tables
 
@@ -454,7 +474,7 @@ def _render_config_details(loaded_config: dict, datasource_names: list) -> None:
                 and selected_tgt_db != "-- Select Datasource --"
                 and sel_tbl
             ):
-                ok_c, cols_c = DSRepo.get_columns(selected_tgt_db, sel_tbl)
+                ok_c, cols_c = _cached_get_columns(selected_tgt_db, sel_tbl)
                 if ok_c:
                     st.session_state["mapper_real_tgt_cols"] = [
                         c["name"] for c in cols_c
@@ -499,11 +519,22 @@ def _handle_context_change(
                 "mapper_tgt_tbl_edit",
                 "mapper_tgt_tables",
                 "_mapper_loaded_config_name",
+                # Clear config-specific fields so they don't linger across sources
+                "mapper_condition",
+                "mapper_lookup",
+                "mapper_generate_sql_text",
+                "mapper_config_type",
+                "mapper_script",
+                "_mapper_condition_widget",
+                "_mapper_lookup_widget",
             ]:
                 st.session_state.pop(k, None)
             st.session_state["mapper_tgt_db"] = None
             st.session_state["mapper_tgt_tbl"] = None
             st.session_state["mapper_real_tgt_cols"] = []
+            st.session_state["mapper_condition"] = ""
+            st.session_state["mapper_lookup"] = ""
+            st.session_state["mapper_generate_sql_text"] = ""
 
         st.session_state.mapper_editor_ver = time.time()
         st.session_state.last_mapper_signature = current_sig

@@ -6,6 +6,7 @@ This module handles pipeline definitions with:
 - UUID primary keys
 - Foreign key references to datasources
 """
+
 from __future__ import annotations  # Enable modern type hints
 
 import uuid
@@ -21,7 +22,7 @@ def save(
     json_data: str,
     source_ds_id: int | None,
     target_ds_id: int | None,
-    error_strategy: str = "fail_fast"
+    error_strategy: str = "fail_fast",
 ) -> tuple[bool, str]:
     """
     Save or update a pipeline configuration.
@@ -51,7 +52,8 @@ def save(
     """
     try:
         with get_transaction() as conn:
-            conn.execute(text("""
+            conn.execute(
+                text("""
                 INSERT INTO pipelines (
                     name, description, json_data,
                     source_datasource_id, target_datasource_id, error_strategy, updated_at
@@ -66,14 +68,16 @@ def save(
                     target_datasource_id = EXCLUDED.target_datasource_id,
                     error_strategy = EXCLUDED.error_strategy,
                     updated_at = CURRENT_TIMESTAMP
-            """), {
-                "name": name,
-                "description": description,
-                "json_data": json_data,
-                "src_ds": source_ds_id,
-                "tgt_ds": target_ds_id,
-                "strategy": error_strategy
-            })
+            """),
+                {
+                    "name": name,
+                    "description": description,
+                    "json_data": json_data,
+                    "src_ds": source_ds_id,
+                    "tgt_ds": target_ds_id,
+                    "strategy": error_strategy,
+                },
+            )
         return True, f"✅ Pipeline '{name}' บันทึกสำเร็จ"
     except IntegrityError:
         return False, f"❌ Pipeline '{name}' มีอยู่แล้ว"
@@ -84,17 +88,6 @@ def save(
 def get_list() -> pd.DataFrame:
     """
     Get all pipelines as a pandas DataFrame.
-
-    Returns:
-        pd.DataFrame: All pipelines with columns:
-            [id, name, description, source_datasource_id, target_datasource_id,
-             error_strategy, created_at, updated_at]
-
-    Example:
-        >>> df = get_list()
-        >>> print(df)
-                                      id          name  ...
-        0  123e4567-e89b-12d3-a456-426614174000  ETL Pipeline  ...
     """
     with get_transaction() as conn:
         return pd.read_sql(
@@ -102,8 +95,62 @@ def get_list() -> pd.DataFrame:
                       error_strategy, created_at, updated_at
                FROM pipelines
                ORDER BY updated_at DESC""",
-            conn
+            conn,
         )
+
+
+def get_all_list() -> list[dict]:
+    """Get all pipelines as a list of dicts."""
+    import json as _json
+    with get_transaction() as conn:
+        result = conn.execute(
+            text(
+                """SELECT id::text AS id, name, description, json_data,
+                      source_datasource_id::text AS source_datasource_id,
+                      target_datasource_id::text AS target_datasource_id,
+                      error_strategy, created_at, created_by, updated_at, updated_by,
+                      is_deleted, deleted_at, deleted_by, deleted_reason
+               FROM pipelines
+               ORDER BY updated_at DESC"""
+            )
+        )
+        rows = []
+        for row in result.fetchall():
+            data = dict(zip(result.keys(), row))
+            raw = data.get("json_data")
+            try:
+                data["json_data"] = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except (_json.JSONDecodeError, TypeError):
+                data["json_data"] = {}
+            rows.append(data)
+        return rows
+
+
+def get_by_id(pipeline_id: str) -> dict | None:
+    """Get pipeline by UUID — returns clean DB row with json_data parsed to dict."""
+    import json as _json
+    with get_transaction() as conn:
+        result = conn.execute(
+            text("""
+            SELECT id::text AS id, name, description, json_data,
+                   source_datasource_id::text AS source_datasource_id,
+                   target_datasource_id::text AS target_datasource_id,
+                   error_strategy, created_at, created_by, updated_at, updated_by,
+                   is_deleted, deleted_at, deleted_by, deleted_reason
+            FROM pipelines WHERE id = :id
+            """),
+            {"id": pipeline_id},
+        )
+        row = result.fetchone()
+        if row is None:
+            return None
+        data = dict(zip(result.keys(), row))
+        raw = data.get("json_data")
+        try:
+            data["json_data"] = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+        except (_json.JSONDecodeError, TypeError):
+            data["json_data"] = {}
+        return data
 
 
 def get_by_name(name: str) -> dict | None:
@@ -134,8 +181,7 @@ def get_by_name(name: str) -> dict | None:
     """
     with get_transaction() as conn:
         result = conn.execute(
-            text("SELECT * FROM pipelines WHERE name = :name"),
-            {"name": name}
+            text("SELECT * FROM pipelines WHERE name = :name"), {"name": name}
         )
         row = result.fetchone()
         if row is None:
@@ -168,8 +214,7 @@ def delete(name: str) -> tuple[bool, str]:
     try:
         with get_transaction() as conn:
             result = conn.execute(
-                text("DELETE FROM pipelines WHERE name = :name"),
-                {"name": name}
+                text("DELETE FROM pipelines WHERE name = :name"), {"name": name}
             )
             if result.rowcount == 0:
                 return False, f"❌ ไม่พบ pipeline '{name}'"
@@ -194,7 +239,8 @@ def get_with_datasource_names(name: str) -> dict | None:
         ...     print(f"Source: {pipeline.get('source_datasource_name')}")
     """
     with get_transaction() as conn:
-        result = conn.execute(text("""
+        result = conn.execute(
+            text("""
             SELECT
                 p.id, p.name, p.description, p.json_data,
                 p.source_datasource_id, s1.name as source_datasource_name,
@@ -204,7 +250,9 @@ def get_with_datasource_names(name: str) -> dict | None:
             LEFT JOIN datasources s1 ON p.source_datasource_id = s1.id
             LEFT JOIN datasources s2 ON p.target_datasource_id = s2.id
             WHERE p.name = :name
-        """), {"name": name})
+        """),
+            {"name": name},
+        )
         row = result.fetchone()
         if row is None:
             return None

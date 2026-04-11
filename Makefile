@@ -1,4 +1,4 @@
-.PHONY: help setup install run run-reload run-no-reload clean test test-simple test-column test-suite
+.PHONY: help setup install run run-reload run-no-reload api api-reload api-prod clean test test-simple test-column test-suite
 
 # Default Python version
 PYTHON := python3.11
@@ -13,10 +13,15 @@ help:
 	@echo "  make setup              Create venv and install dependencies"
 	@echo "  make install            Install dependencies only (venv must exist)"
 	@echo ""
-	@echo "Development:"
-	@echo "  make run                Run app with hot-reload (default)"
-	@echo "  make run-reload         Run app with hot-reload (explicit)"
-	@echo "  make run-no-reload      Run app without hot-reload"
+	@echo "Streamlit App:"
+	@echo "  make run                Run Streamlit app with hot-reload (default)"
+	@echo "  make run-reload         Run Streamlit app with hot-reload (explicit)"
+	@echo "  make run-no-reload      Run Streamlit app without hot-reload"
+	@echo ""
+	@echo "FastAPI:"
+	@echo "  make api                Run FastAPI with hot-reload on port 8000 (default)"
+	@echo "  make api-reload         Run FastAPI with hot-reload on port 8000 (explicit)"
+	@echo "  make api-prod           Run FastAPI without hot-reload (production)"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test               Run all unit tests (pytest discovers everything)"
@@ -30,7 +35,8 @@ help:
 	@echo ""
 	@echo "Examples:"
 	@echo "  make setup              # First time: create env and install"
-	@echo "  make run                # Start developing with hot-reload"
+	@echo "  make run                # Start Streamlit with hot-reload"
+	@echo "  make api                # Start FastAPI with hot-reload"
 	@echo "  make test               # Run all unit tests"
 	@echo "  make clean              # Clean up environment"
 	@echo ""
@@ -63,6 +69,19 @@ run-no-reload:
 	@echo "   Open your browser to: http://localhost:8501"
 	@echo ""
 	. $(BIN)/activate && TRANSFORMERS_VERBOSITY=error TOKENIZERS_PARALLELISM=false $(PYTHON) -m streamlit run app.py
+
+api: api-reload
+
+api-reload:
+	@echo "🚀 Starting FastAPI with hot-reload on http://localhost:8000"
+	@echo "   Docs: http://localhost:8000/docs"
+	@echo ""
+	. $(BIN)/activate && uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+api-prod:
+	@echo "🚀 Starting FastAPI (production mode) on http://localhost:8000"
+	@echo ""
+	. $(BIN)/activate && uvicorn api.main:app --host 0.0.0.0 --port 8000
 
 test:
 	@echo "🧪 Running all unit tests..."

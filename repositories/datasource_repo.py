@@ -4,6 +4,7 @@ Datasource repository - CRUD operations for datasources table.
 This module handles all database operations for datasource entities.
 Thread-safe: each function gets its own connection/transaction.
 """
+
 from __future__ import annotations  # Enable modern type hints
 
 import uuid
@@ -20,24 +21,29 @@ def get_all() -> pd.DataFrame:
     Returns:
         pd.DataFrame: All datasources with columns:
             [id, name, db_type, host, dbname, username]
-
-    Example:
-        >>> df = get_all()
-        >>> print(df)
-           id     name  db_type        host      dbname username
-           0   1  MySQL DB    MySQL  localhost   testdb      root
     """
     with get_transaction() as conn:
         df = pd.read_sql(
             "SELECT id, name, db_type, host, dbname, username FROM datasources ORDER BY id",
-            conn
+            conn,
         )
-        # Force string columns to numpy object dtype (prevents PyArrow LargeUtf8 errors)
         import numpy as np
+
         for col in df.columns:
             if pd.api.types.is_string_dtype(df[col]):
                 df[col] = np.array(df[col].fillna("").tolist(), dtype=object)
         return df
+
+
+def get_all_list() -> list[dict]:
+    """Get all datasources as a list of dicts (no password)."""
+    with get_transaction() as conn:
+        result = conn.execute(
+            text(
+                "SELECT id, name, db_type, host, port, dbname, username FROM datasources ORDER BY id"
+            )
+        )
+        return [dict(zip(result.keys(), row)) for row in result.fetchall()]
 
 
 def get_by_id(ds_id: int) -> dict | None:
@@ -55,12 +61,13 @@ def get_by_id(ds_id: int) -> dict | None:
         >>> if ds:
         ...     print(f"Host: {ds['host']}")
     """
-    # Convert numpy.int64 to int for psycopg2
     ds_id = int(ds_id)
     with get_transaction() as conn:
         result = conn.execute(
-            text("SELECT * FROM datasources WHERE id = :id"),
-            {"id": ds_id}
+            text(
+                "SELECT id, name, db_type, host, port, dbname, username FROM datasources WHERE id = :id"
+            ),
+            {"id": ds_id},
         )
         row = result.fetchone()
         if row is None:
@@ -86,8 +93,10 @@ def get_by_name(name: str) -> dict | None:
     """
     with get_transaction() as conn:
         result = conn.execute(
-            text("SELECT * FROM datasources WHERE name = :name"),
-            {"name": name}
+            text(
+                "SELECT id, name, db_type, host, port, dbname, username FROM datasources WHERE name = :name"
+            ),
+            {"name": name},
         )
         row = result.fetchone()
         if row is None:
@@ -103,7 +112,7 @@ def save(
     port: str,
     dbname: str,
     username: str,
-    password: str
+    password: str,
 ) -> tuple[bool, str]:
     """
     Save a new datasource.
@@ -128,18 +137,21 @@ def save(
     """
     try:
         with get_transaction() as conn:
-            conn.execute(text("""
+            conn.execute(
+                text("""
                 INSERT INTO datasources (name, db_type, host, port, dbname, username, password)
                 VALUES (:name, :db_type, :host, :port, :dbname, :username, :password)
-            """), {
-                "name": name,
-                "db_type": db_type,
-                "host": host,
-                "port": port,
-                "dbname": dbname,
-                "username": username,
-                "password": password
-            })
+            """),
+                {
+                    "name": name,
+                    "db_type": db_type,
+                    "host": host,
+                    "port": port,
+                    "dbname": dbname,
+                    "username": username,
+                    "password": password,
+                },
+            )
         return True, f"✅ บันทึก '{name}' สำเร็จ"
     except IntegrityError:
         return False, f"❌ ชื่อ '{name}' มีอยู่แล้ว"
@@ -155,7 +167,7 @@ def update(
     port: str,
     dbname: str,
     username: str,
-    password: str
+    password: str,
 ) -> tuple[bool, str]:
     """
     Update an existing datasource.
@@ -182,7 +194,8 @@ def update(
     ds_id = int(ds_id)
     try:
         with get_transaction() as conn:
-            conn.execute(text("""
+            conn.execute(
+                text("""
                 UPDATE datasources SET
                     name = :name,
                     db_type = :db_type,
@@ -193,16 +206,18 @@ def update(
                     password = :password,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = :id
-            """), {
-                "id": ds_id,
-                "name": name,
-                "db_type": db_type,
-                "host": host,
-                "port": port,
-                "dbname": dbname,
-                "username": username,
-                "password": password
-            })
+            """),
+                {
+                    "id": ds_id,
+                    "name": name,
+                    "db_type": db_type,
+                    "host": host,
+                    "port": port,
+                    "dbname": dbname,
+                    "username": username,
+                    "password": password,
+                },
+            )
         return True, f"✅ อัปเดต '{name}' สำเร็จ"
     except IntegrityError:
         return False, f"❌ ชื่อ '{name}' มีอยู่แล้ว"

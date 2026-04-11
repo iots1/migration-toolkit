@@ -13,6 +13,10 @@ pymssql
 psycopg2-binary
 sqlalchemy
 
+# --- REST API ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
 # --- Machine Learning ---
 sentence-transformers
 scikit-learn

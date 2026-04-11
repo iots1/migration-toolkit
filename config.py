@@ -1,4 +1,7 @@
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # --- PATHS (ส่วนที่น่าจะขาดหายไป) ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))

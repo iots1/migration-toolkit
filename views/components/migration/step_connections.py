@@ -10,6 +10,7 @@ Updates session_state:
     src_charset             str | None
     migration_step          → 1 (back) | 3 (next)
 """
+
 import streamlit as st
 import database as db
 import services.db_connector as connector
@@ -43,7 +44,9 @@ def render_step_connections() -> None:
         st.session_state.migration_step = 1
         st.rerun()
     if st.session_state.migration_src_ok and st.session_state.migration_tgt_ok:
-        if c2.button("Next: Review & Execute →", type="primary", use_container_width=True):
+        if c2.button(
+            "Next: Review & Execute →", type="primary", use_container_width=True
+        ):
             st.session_state.migration_step = 3
             st.rerun()
 
@@ -51,6 +54,7 @@ def render_step_connections() -> None:
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
 
 def _auto_populate_from_config(datasources) -> None:
     """Auto-select datasource profiles when the loaded config embeds datasource IDs.
@@ -63,15 +67,22 @@ def _auto_populate_from_config(datasources) -> None:
     src_id = config.get("source", {}).get("datasource_id")
     tgt_id = config.get("target", {}).get("datasource_id")
 
-    if src_id is not None and st.session_state.get("src_sel", "Select Profile...") == "Select Profile...":
-        match = datasources[datasources["id"] == int(src_id)]
+    if (
+        src_id is not None
+        and st.session_state.get("src_sel", "Select Profile...") == "Select Profile..."
+    ):
+        match = datasources[datasources["id"].astype(str) == str(src_id)]
         if not match.empty:
             st.session_state["src_sel"] = match.iloc[0]["name"]
 
-    if tgt_id is not None and st.session_state.get("tgt_sel", "Select Profile...") == "Select Profile...":
-        match = datasources[datasources["id"] == int(tgt_id)]
+    if (
+        tgt_id is not None
+        and st.session_state.get("tgt_sel", "Select Profile...") == "Select Profile..."
+    ):
+        match = datasources[datasources["id"].astype(str) == str(tgt_id)]
         if not match.empty:
             st.session_state["tgt_sel"] = match.iloc[0]["name"]
+
 
 def _render_source_panel(datasources, ds_options) -> None:
     st.markdown("#### Source Database")
@@ -89,10 +100,14 @@ def _render_source_panel(datasources, ds_options) -> None:
         if st.button("🔍 Test Source"):
             with st.spinner("Connecting..."):
                 row = datasources[datasources["name"] == src_sel].iloc[0]
-                ds = db.get_datasource_by_id(int(row["id"]))
+                ds = db.get_datasource_by_id(row["id"])
                 ok, msg = connector.test_db_connection(
-                    ds["db_type"], ds["host"], ds["port"],
-                    ds["dbname"], ds["username"], ds["password"],
+                    ds["db_type"],
+                    ds["host"],
+                    ds["port"],
+                    ds["dbname"],
+                    ds["username"],
+                    ds["password"],
                 )
                 if ok:
                     st.session_state.migration_src_ok = True
@@ -111,10 +126,14 @@ def _render_target_panel(datasources, ds_options) -> None:
         if st.button("🔍 Test Target"):
             with st.spinner("Connecting..."):
                 row = datasources[datasources["name"] == tgt_sel].iloc[0]
-                ds = db.get_datasource_by_id(int(row["id"]))
+                ds = db.get_datasource_by_id(row["id"])
                 ok, msg = connector.test_db_connection(
-                    ds["db_type"], ds["host"], ds["port"],
-                    ds["dbname"], ds["username"], ds["password"],
+                    ds["db_type"],
+                    ds["host"],
+                    ds["port"],
+                    ds["dbname"],
+                    ds["username"],
+                    ds["password"],
                 )
                 if ok:
                     st.session_state.migration_tgt_ok = True

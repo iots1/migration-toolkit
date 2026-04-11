@@ -7,6 +7,7 @@ to use the repositories directly.
 
 TODO: Remove this file after all imports are updated to use repositories directly.
 """
+
 from __future__ import annotations  # Enable modern type hints
 
 import pandas as pd
@@ -50,12 +51,13 @@ from repositories.base import init_db
 # Datasource Functions (re-exported from repositories/datasource_repo.py)
 # ---------------------------------------------------------------------------
 
+
 def get_datasources() -> pd.DataFrame:
     """Get all datasources as DataFrame."""
     return _get_datasources()
 
 
-def get_datasource_by_id(ds_id: int) -> dict | None:
+def get_datasource_by_id(ds_id) -> dict | None:
     """Get datasource by ID."""
     return _get_ds_by_id(ds_id)
 
@@ -65,19 +67,34 @@ def get_datasource_by_name(name: str) -> dict | None:
     return _get_ds_by_name(name)
 
 
-def save_datasource(name: str, db_type: str, host: str, port: str,
-                   dbname: str, username: str, password: str) -> tuple[bool, str]:
+def save_datasource(
+    name: str,
+    db_type: str,
+    host: str,
+    port: str,
+    dbname: str,
+    username: str,
+    password: str,
+) -> tuple[bool, str]:
     """Save a new datasource."""
     return _save_ds(name, db_type, host, port, dbname, username, password)
 
 
-def update_datasource(ds_id: int, name: str, db_type: str, host: str,
-                     port: str, dbname: str, username: str, password: str) -> tuple[bool, str]:
+def update_datasource(
+    ds_id,
+    name: str,
+    db_type: str,
+    host: str,
+    port: str,
+    dbname: str,
+    username: str,
+    password: str,
+) -> tuple[bool, str]:
     """Update an existing datasource."""
     return _update_ds(ds_id, name, db_type, host, port, dbname, username, password)
 
 
-def delete_datasource(ds_id: int) -> None:
+def delete_datasource(ds_id) -> None:
     """Delete a datasource."""
     _delete_ds(ds_id)
 
@@ -85,6 +102,7 @@ def delete_datasource(ds_id: int) -> None:
 # ---------------------------------------------------------------------------
 # Config Functions (re-exported from repositories/config_repo.py)
 # ---------------------------------------------------------------------------
+
 
 def get_configs_list() -> pd.DataFrame:
     """Get all configs as DataFrame."""
@@ -96,7 +114,9 @@ def get_config_content(config_name: str) -> dict | None:
     return _get_config_content(config_name)
 
 
-def save_config_to_db(config_name: str, table_name: str, json_data: str) -> tuple[bool, str]:
+def save_config_to_db(
+    config_name: str, table_name: str, json_data: str
+) -> tuple[bool, str]:
     """Save or update a config to the database."""
     return _save_config(config_name, table_name, json_data)
 
@@ -125,6 +145,7 @@ def compare_config_versions(config_name: str, v1: int, v2: int) -> dict | None:
 # Pipeline Functions (re-exported from repositories/pipeline_repo.py)
 # ---------------------------------------------------------------------------
 
+
 def get_pipelines() -> pd.DataFrame:
     """Get all pipelines as DataFrame."""
     return _get_pipelines_list()
@@ -135,10 +156,18 @@ def get_pipeline_by_name(name: str) -> dict | None:
     return _get_pipeline_by_name(name)
 
 
-def save_pipeline(name: str, description: str, json_data: str,
-                 source_ds_id: int, target_ds_id: int, error_strategy: str) -> tuple[bool, str]:
+def save_pipeline(
+    name: str,
+    description: str,
+    json_data: str,
+    source_ds_id: int,
+    target_ds_id: int,
+    error_strategy: str,
+) -> tuple[bool, str]:
     """Save a new pipeline."""
-    return _save_pipeline(name, description, json_data, source_ds_id, target_ds_id, error_strategy)
+    return _save_pipeline(
+        name, description, json_data, source_ds_id, target_ds_id, error_strategy
+    )
 
 
 def delete_pipeline(name: str) -> tuple[bool, str]:
@@ -149,6 +178,7 @@ def delete_pipeline(name: str) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 # Pipeline Run Functions (re-exported from repositories/pipeline_run_repo.py)
 # ---------------------------------------------------------------------------
+
 
 def get_pipeline_runs(pipeline_id: str) -> pd.DataFrame:
     """Get runs for a pipeline."""
@@ -164,7 +194,7 @@ def update_pipeline_run(
     run_id: str,
     status: str,
     steps_json: str | None = None,
-    error_message: str | None = None
+    error_message: str | None = None,
 ) -> None:
     """Update pipeline run status."""
     _update_pipeline_run(run_id, status, steps_json, error_message)
@@ -179,9 +209,11 @@ def get_latest_run(pipeline_id: str) -> dict | None:
 # Database Initialization
 # ---------------------------------------------------------------------------
 
+
 def init_db() -> None:
     """Initialize database schema."""
     from repositories.base import init_db as _init_db
+
     _init_db()
 
 
@@ -191,6 +223,7 @@ def init_db() -> None:
 
 # These functions may have been used in old code but are now deprecated
 # They are kept here for backward compatibility during migration
+
 
 def get_connection():
     """Deprecated: Use repositories.connection.get_engine() instead."""

@@ -1,6 +1,8 @@
 """Pydantic schemas for datasources."""
+
 from __future__ import annotations
 
+import uuid
 from pydantic import BaseModel, Field
 
 
@@ -31,7 +33,7 @@ class UpdateDatasourceSchema(BaseModel):
 class DatasourceSchema(BaseModel):
     """Datasource response."""
 
-    id: int
+    id: uuid.UUID
     name: str
     db_type: str
     host: str

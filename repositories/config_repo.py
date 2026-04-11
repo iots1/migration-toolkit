@@ -67,7 +67,7 @@ def save(config_name: str, table_name: str, json_data):
 def get_list():
     with get_transaction() as conn:
         df = pd.read_sql(
-            "SELECT id::text AS id, config_name, table_name, updated_at FROM configs ORDER BY updated_at DESC",
+            "SELECT id::text AS id, config_name, table_name, updated_at FROM configs WHERE is_deleted = false ORDER BY updated_at DESC",
             conn,
         )
         import numpy as np
@@ -81,10 +81,11 @@ def get_list():
 def get_all_list() -> list[dict]:
     """Get all configs as a list of dicts."""
     import json as _json
+
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id::text AS id, config_name, table_name, json_data, created_at, created_by, updated_at, updated_by, is_deleted, deleted_at, deleted_by, deleted_reason FROM configs ORDER BY updated_at DESC"
+                "SELECT id::text AS id, config_name, table_name, json_data, created_at, created_by, updated_at, updated_by, is_deleted, deleted_at, deleted_by, deleted_reason FROM configs WHERE is_deleted = false ORDER BY updated_at DESC"
             )
         )
         rows = []
@@ -92,7 +93,9 @@ def get_all_list() -> list[dict]:
             data = dict(zip(result.keys(), row))
             raw = data.get("json_data")
             try:
-                data["json_data"] = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                data["json_data"] = (
+                    _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                )
             except (_json.JSONDecodeError, TypeError):
                 data["json_data"] = {}
             rows.append(data)
@@ -147,7 +150,9 @@ def get_by_id_raw(config_id: str) -> dict | None:
         data = dict(zip(result.keys(), row))
         raw = data.get("json_data")
         try:
-            data["json_data"] = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            data["json_data"] = (
+                _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            )
         except (_json.JSONDecodeError, TypeError):
             data["json_data"] = {}
         return data

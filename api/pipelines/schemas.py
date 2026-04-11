@@ -1,6 +1,8 @@
 """Pydantic schemas for pipelines."""
+
 from __future__ import annotations
 
+import uuid
 from pydantic import BaseModel, Field
 
 
@@ -10,8 +12,8 @@ class CreatePipelineSchema(BaseModel):
     name: str = Field(..., min_length=1)
     description: str = Field(default="")
     json_data: str | dict = Field(default="{}")
-    source_datasource_id: int | None = None
-    target_datasource_id: int | None = None
+    source_datasource_id: uuid.UUID | None = None
+    target_datasource_id: uuid.UUID | None = None
     error_strategy: str = Field(default="fail_fast")
 
 
@@ -21,8 +23,8 @@ class UpdatePipelineSchema(BaseModel):
     name: str | None = None
     description: str | None = None
     json_data: str | dict | None = None
-    source_datasource_id: int | None = None
-    target_datasource_id: int | None = None
+    source_datasource_id: uuid.UUID | None = None
+    target_datasource_id: uuid.UUID | None = None
     error_strategy: str | None = None
 
 
@@ -32,8 +34,8 @@ class PipelineSchema(BaseModel):
     id: str
     name: str
     description: str
-    source_datasource_id: int | None
-    target_datasource_id: int | None
+    source_datasource_id: uuid.UUID | None
+    target_datasource_id: uuid.UUID | None
     error_strategy: str
     created_at: str
     updated_at: str

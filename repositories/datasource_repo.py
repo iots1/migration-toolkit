@@ -5,7 +5,7 @@ This module handles all database operations for datasource entities.
 Thread-safe: each function gets its own connection/transaction.
 """
 
-from __future__ import annotations  # Enable modern type hints
+from __future__ import annotations
 
 import uuid
 import pandas as pd
@@ -20,11 +20,11 @@ def get_all() -> pd.DataFrame:
 
     Returns:
         pd.DataFrame: All datasources with columns:
-            [id, name, db_type, host, dbname, username]
+            [id, name, db_type, host, port, dbname, username]
     """
     with get_transaction() as conn:
         df = pd.read_sql(
-            "SELECT id, name, db_type, host, dbname, username FROM datasources ORDER BY id",
+            "SELECT id, name, db_type, host, port, dbname, username FROM datasources WHERE is_deleted = false ORDER BY name",
             conn,
         )
         import numpy as np
@@ -36,36 +36,37 @@ def get_all() -> pd.DataFrame:
 
 
 def get_all_list() -> list[dict]:
-    """Get all datasources as a list of dicts (no password)."""
+    """Get all datasources as a list of dicts (includes password for internal use)."""
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id, name, db_type, host, port, dbname, username FROM datasources ORDER BY id"
+                "SELECT id, name, db_type, host, port, dbname, username, password FROM datasources WHERE is_deleted = false ORDER BY name"
             )
         )
         return [dict(zip(result.keys(), row)) for row in result.fetchall()]
 
 
-def get_by_id(ds_id: int) -> dict | None:
+def get_by_id(ds_id) -> dict | None:
     """
     Get datasource by ID.
 
     Args:
-        ds_id: Datasource ID (integer primary key)
+        ds_id: Datasource ID (UUID or string)
 
     Returns:
         dict | None: Datasource data or None if not found
 
     Example:
-        >>> ds = get_by_id(1)
+        >>> ds = get_by_id(uuid.UUID("..."))
         >>> if ds:
         ...     print(f"Host: {ds['host']}")
     """
-    ds_id = int(ds_id)
+    if isinstance(ds_id, str):
+        ds_id = uuid.UUID(ds_id)
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id, name, db_type, host, port, dbname, username FROM datasources WHERE id = :id"
+                "SELECT id, name, db_type, host, port, dbname, username, password FROM datasources WHERE id = :id AND is_deleted = false"
             ),
             {"id": ds_id},
         )
@@ -94,7 +95,7 @@ def get_by_name(name: str) -> dict | None:
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id, name, db_type, host, port, dbname, username FROM datasources WHERE name = :name"
+                "SELECT id, name, db_type, host, port, dbname, username, password FROM datasources WHERE name = :name AND is_deleted = false"
             ),
             {"name": name},
         )
@@ -160,7 +161,7 @@ def save(
 
 
 def update(
-    ds_id: int,
+    ds_id,
     name: str,
     db_type: str,
     host: str,
@@ -173,7 +174,7 @@ def update(
     Update an existing datasource.
 
     Args:
-        ds_id: Datasource ID to update
+        ds_id: Datasource ID to update (UUID or string)
         name: New datasource name (must be unique)
         db_type: Database type
         host: Database host
@@ -186,12 +187,12 @@ def update(
         tuple[bool, str]: (success, message)
 
     Example:
-        >>> ok, msg = update(1, "Updated Name", "PostgreSQL", ...)
+        >>> ok, msg = update(uuid.UUID("..."), "Updated Name", "PostgreSQL", ...)
         >>> if ok:
         ...     print("Updated!")
     """
-    # Convert numpy.int64 to int for psycopg2
-    ds_id = int(ds_id)
+    if isinstance(ds_id, str):
+        ds_id = uuid.UUID(ds_id)
     try:
         with get_transaction() as conn:
             conn.execute(
@@ -225,19 +226,26 @@ def update(
         return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
 
 
-def delete(ds_id: int) -> None:
+def delete(ds_id) -> None:
     """
-    Delete a datasource by ID.
+    Soft-delete a datasource by ID (sets is_deleted = true).
 
     Args:
-        ds_id: Datasource ID to delete
+        ds_id: Datasource ID to delete (UUID or string)
 
     Note:
-        This will also cascade delete any pipelines that reference
-        this datasource as source or target.
+        This sets is_deleted = true instead of hard-deleting.
+        Cascade behavior is handled by foreign key constraints.
 
     Example:
-        >>> delete(1)  # Deletes datasource with ID 1
+        >>> delete(uuid.UUID("..."))  # Soft-deletes datasource
     """
+    if isinstance(ds_id, str):
+        ds_id = uuid.UUID(ds_id)
     with get_transaction() as conn:
-        conn.execute(text("DELETE FROM datasources WHERE id = :id"), {"id": ds_id})
+        conn.execute(
+            text(
+                "UPDATE datasources SET is_deleted = true, deleted_at = CURRENT_TIMESTAMP WHERE id = :id"
+            ),
+            {"id": ds_id},
+        )

@@ -12,6 +12,7 @@ Follows the same MVC pattern as controllers/settings_controller.py:
 from __future__ import annotations
 from datetime import datetime, timedelta
 import json
+import uuid
 
 import streamlit as st
 
@@ -437,7 +438,7 @@ def _ds_to_conn_config(ds_name: str, charset: str | None = None) -> dict:
     }
 
 
-def _ds_id(ds_name: str | None) -> int | None:
+def _ds_id(ds_name: str | None) -> uuid.UUID | None:
     if not ds_name:
         return None
     ds = DSRepo.get_by_name(ds_name)

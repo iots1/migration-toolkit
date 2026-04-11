@@ -33,7 +33,7 @@ class DatasourcesService(BaseService):
 
     def find_by_id(self, id: str | int) -> dict:
         """Get datasource by ID."""
-        result = self.execute_db_operation(lambda: datasource_repo.get_by_id(int(id)))
+        result = self.execute_db_operation(lambda: datasource_repo.get_by_id(id))
         self._assert_found(result, id)
         return self._sanitize_response(self._strip_password(result))
 
@@ -68,7 +68,7 @@ class DatasourcesService(BaseService):
 
         ok, msg = self.execute_db_operation(
             lambda: datasource_repo.update(
-                ds_id=int(id),
+                ds_id=id,
                 name=updated_data.get("name", ""),
                 db_type=updated_data.get("db_type", ""),
                 host=updated_data.get("host", ""),
@@ -81,10 +81,10 @@ class DatasourcesService(BaseService):
         self._assert_success(ok, msg)
 
         # Return updated record
-        result = self.execute_db_operation(lambda: datasource_repo.get_by_id(int(id)))
+        result = self.execute_db_operation(lambda: datasource_repo.get_by_id(id))
         return self._sanitize_response(self._strip_password(result))
 
     def delete(self, id: str | int) -> None:
         """Delete datasource."""
         existing = self.find_by_id(id)
-        self.execute_db_operation(lambda: datasource_repo.delete(int(id)))
+        self.execute_db_operation(lambda: datasource_repo.delete(id))

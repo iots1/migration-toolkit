@@ -9,6 +9,7 @@ Benefits:
 - Flexible: Can swap implementations (PostgreSQL → MySQL)
 - Type-safe: Static type checking with mypy
 """
+
 from typing import Protocol, runtime_checkable
 import pandas as pd
 import uuid
@@ -22,7 +23,7 @@ class DatasourceRepository(Protocol):
         """Get all datasources."""
         ...
 
-    def get_by_id(self, id: int) -> dict | None:
+    def get_by_id(self, id) -> dict | None:
         """Get datasource by ID."""
         ...
 
@@ -38,26 +39,26 @@ class DatasourceRepository(Protocol):
         port: str,
         dbname: str,
         username: str,
-        password: str
+        password: str,
     ) -> tuple[bool, str]:
         """Save new datasource."""
         ...
 
     def update(
         self,
-        id: int,
+        id,
         name: str,
         db_type: str,
         host: str,
         port: str,
         dbname: str,
         username: str,
-        password: str
+        password: str,
     ) -> tuple[bool, str]:
         """Update existing datasource."""
         ...
 
-    def delete(self, id: int) -> None:
+    def delete(self, id) -> None:
         """Delete datasource."""
         ...
 
@@ -66,7 +67,9 @@ class DatasourceRepository(Protocol):
 class ConfigRepository(Protocol):
     """Protocol for config CRUD with versioning."""
 
-    def save(self, config_name: str, table_name: str, json_data: str) -> tuple[bool, str]:
+    def save(
+        self, config_name: str, table_name: str, json_data: str
+    ) -> tuple[bool, str]:
         """Save or update config with versioning."""
         ...
 
@@ -104,9 +107,9 @@ class PipelineRepository(Protocol):
         name: str,
         description: str,
         json_data: str,
-        source_ds_id: int | None,
-        target_ds_id: int | None,
-        error_strategy: str
+        source_ds_id: uuid.UUID | None,
+        target_ds_id: uuid.UUID | None,
+        error_strategy: str,
     ) -> tuple[bool, str]:
         """Save or update pipeline."""
         ...
@@ -137,7 +140,7 @@ class PipelineRunRepository(Protocol):
         run_id: uuid.UUID,
         status: str,
         steps_json: str | None = None,
-        error_message: str | None = None
+        error_message: str | None = None,
     ) -> None:
         """Update pipeline run status."""
         ...

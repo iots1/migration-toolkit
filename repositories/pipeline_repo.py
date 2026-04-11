@@ -20,8 +20,8 @@ def save(
     name: str,
     description: str,
     json_data: str,
-    source_ds_id: int | None,
-    target_ds_id: int | None,
+    source_ds_id,
+    target_ds_id,
     error_strategy: str = "fail_fast",
 ) -> tuple[bool, str]:
     """
@@ -94,6 +94,7 @@ def get_list() -> pd.DataFrame:
             """SELECT id, name, description, source_datasource_id, target_datasource_id,
                       error_strategy, created_at, updated_at
                FROM pipelines
+               WHERE is_deleted = false
                ORDER BY updated_at DESC""",
             conn,
         )
@@ -102,6 +103,7 @@ def get_list() -> pd.DataFrame:
 def get_all_list() -> list[dict]:
     """Get all pipelines as a list of dicts."""
     import json as _json
+
     with get_transaction() as conn:
         result = conn.execute(
             text(
@@ -111,6 +113,7 @@ def get_all_list() -> list[dict]:
                       error_strategy, created_at, created_by, updated_at, updated_by,
                       is_deleted, deleted_at, deleted_by, deleted_reason
                FROM pipelines
+               WHERE is_deleted = false
                ORDER BY updated_at DESC"""
             )
         )
@@ -119,7 +122,9 @@ def get_all_list() -> list[dict]:
             data = dict(zip(result.keys(), row))
             raw = data.get("json_data")
             try:
-                data["json_data"] = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                data["json_data"] = (
+                    _json.loads(raw) if isinstance(raw, str) else (raw or {})
+                )
             except (_json.JSONDecodeError, TypeError):
                 data["json_data"] = {}
             rows.append(data)
@@ -129,6 +134,7 @@ def get_all_list() -> list[dict]:
 def get_by_id(pipeline_id: str) -> dict | None:
     """Get pipeline by UUID — returns clean DB row with json_data parsed to dict."""
     import json as _json
+
     with get_transaction() as conn:
         result = conn.execute(
             text("""
@@ -147,7 +153,9 @@ def get_by_id(pipeline_id: str) -> dict | None:
         data = dict(zip(result.keys(), row))
         raw = data.get("json_data")
         try:
-            data["json_data"] = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            data["json_data"] = (
+                _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            )
         except (_json.JSONDecodeError, TypeError):
             data["json_data"] = {}
         return data

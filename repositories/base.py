@@ -6,15 +6,15 @@ This module defines all table schemas for PostgreSQL 18+ with:
 - TIMESTAMP WITH TIME ZONE for timezone-aware timestamps
 - Proper foreign key constraints with CASCADE
 - Audit fields (created_at, updated_at)
+- Soft-delete fields (is_deleted, deleted_at, deleted_by, deleted_reason)
 """
+
 from sqlalchemy import text
 from repositories.connection import get_engine
 
-# DDL statements for all tables
 TABLES_DDL = [
-    # datasources table - stores database connection configurations
     """CREATE TABLE IF NOT EXISTS datasources (
-        id SERIAL PRIMARY KEY,
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         name VARCHAR(255) UNIQUE NOT NULL,
         db_type VARCHAR(50) NOT NULL,
         host VARCHAR(255),
@@ -23,42 +23,54 @@ TABLES_DDL = [
         username VARCHAR(255),
         password VARCHAR(255),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID,
+        is_deleted BOOLEAN NOT NULL DEFAULT false,
+        deleted_at TIMESTAMP WITH TIME ZONE,
+        deleted_by UUID,
+        deleted_reason TEXT
     )""",
-
-    # configs table - stores mapping configurations
     """CREATE TABLE IF NOT EXISTS configs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         config_name VARCHAR(255) UNIQUE NOT NULL,
         table_name VARCHAR(255),
         json_data TEXT,
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID,
+        is_deleted BOOLEAN NOT NULL DEFAULT false,
+        deleted_at TIMESTAMP WITH TIME ZONE,
+        deleted_by UUID,
+        deleted_reason TEXT
     )""",
-
-    # config_histories table - version history for configs
     """CREATE TABLE IF NOT EXISTS config_histories (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         config_id UUID NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
         version INTEGER NOT NULL,
         json_data TEXT,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
         UNIQUE(config_id, version)
     )""",
-
-    # pipelines table - stores pipeline definitions
     """CREATE TABLE IF NOT EXISTS pipelines (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         name VARCHAR(255) UNIQUE NOT NULL,
         description TEXT DEFAULT '',
         json_data TEXT,
-        source_datasource_id INTEGER REFERENCES datasources(id) ON DELETE SET NULL,
-        target_datasource_id INTEGER REFERENCES datasources(id) ON DELETE SET NULL,
+        source_datasource_id UUID REFERENCES datasources(id) ON DELETE SET NULL,
+        target_datasource_id UUID REFERENCES datasources(id) ON DELETE SET NULL,
         error_strategy VARCHAR(50) DEFAULT 'fail_fast',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID,
+        is_deleted BOOLEAN NOT NULL DEFAULT false,
+        deleted_at TIMESTAMP WITH TIME ZONE,
+        deleted_by UUID,
+        deleted_reason TEXT
     )""",
-
-    # pipeline_runs table - stores pipeline execution runs
     """CREATE TABLE IF NOT EXISTS pipeline_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         pipeline_id UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
@@ -67,7 +79,14 @@ TABLES_DDL = [
         completed_at TIMESTAMP WITH TIME ZONE,
         steps_json TEXT,
         error_message TEXT,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID,
+        is_deleted BOOLEAN NOT NULL DEFAULT false,
+        deleted_at TIMESTAMP WITH TIME ZONE,
+        deleted_by UUID,
+        deleted_reason TEXT
     )""",
 ]
 
@@ -88,10 +107,8 @@ def init_db() -> None:
     engine = get_engine()
 
     with engine.begin() as conn:
-        # Enable pgcrypto extension for gen_random_uuid()
-        conn.execute(text("CREATE EXTENSION IF NOT EXISTS \"pgcrypto\""))
+        conn.execute(text('CREATE EXTENSION IF NOT EXISTS "pgcrypto"'))
 
-        # Create all tables
         for ddl in TABLES_DDL:
             conn.execute(text(ddl))
 
@@ -105,7 +122,6 @@ def drop_all_tables() -> None:
     engine = get_engine()
 
     with engine.begin() as conn:
-        # Drop in reverse order of dependencies
         tables = [
             "pipeline_runs",
             "pipelines",
@@ -127,12 +143,13 @@ def get_table_info() -> list[dict]:
     Example:
         >>> info = get_table_info()
         >>> for table in info:
-        ...     print(f"{table['table_name']}: {table['row_count']} rows")
+        ...     print(f"{table['table_name']}: {table['column_count']} rows")
     """
     engine = get_engine()
 
     with engine.connect() as conn:
-        result = conn.execute(text("""
+        result = conn.execute(
+            text("""
             SELECT
                 table_name,
                 (SELECT COUNT(*) FROM information_schema.columns
@@ -141,7 +158,8 @@ def get_table_info() -> list[dict]:
             WHERE table_schema = 'public'
             AND table_type = 'BASE TABLE'
             ORDER BY table_name
-        """))
+        """)
+        )
 
         return [
             {

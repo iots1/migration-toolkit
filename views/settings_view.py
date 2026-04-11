@@ -9,12 +9,16 @@ Rules:
     - MUST NOT contain business logic or validation beyond "is the field non-empty?".
     - All data mutations are delegated to callbacks provided by the controller.
 """
+
 import streamlit as st
 from config import DB_TYPES
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
 from views.components.shared.styles import inject_global_css
-from views.components.shared.dialogs import generic_confirm_dialog, preview_config_dialog
+from views.components.shared.dialogs import (
+    generic_confirm_dialog,
+    preview_config_dialog,
+)
 
 
 def render_settings_page(
@@ -37,6 +41,7 @@ def render_settings_page(
 # Tab: Datasources
 # ---------------------------------------------------------------------------
 
+
 def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) -> None:
     is_edit_mode = form_state["is_edit_mode"]
     edit_ds_id = form_state["edit_ds_id"]
@@ -55,7 +60,9 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
             gb.configure_selection("single", use_checkbox=False)
             if "id" in datasources_df.columns:
                 gb.configure_column("id", hide=True)
-            gb.configure_column("name", header_name="Name", flex=1, filter=True, sortable=True)
+            gb.configure_column(
+                "name", header_name="Name", flex=1, filter=True, sortable=True
+            )
             gb.configure_column("db_type", header_name="Type", width=120)
             gb.configure_column("host", header_name="Host", width=150)
             gb.configure_column("dbname", header_name="Database", width=150)
@@ -74,8 +81,10 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
 
             selected = grid_response["selected_rows"]
             if selected is not None and len(selected) > 0:
-                sel_row = selected[0] if isinstance(selected, list) else selected.iloc[0]
-                sel_id = int(sel_row.get("id"))
+                sel_row = (
+                    selected[0] if isinstance(selected, list) else selected.iloc[0]
+                )
+                sel_id = sel_row.get("id")
                 # Guard: only notify controller if the selection actually changed
                 if sel_id != edit_ds_id:
                     callbacks["on_row_select"](sel_id)
@@ -91,7 +100,10 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
             c1, c2 = st.columns(2)
             ds_name = c1.text_input("Profile Name (Unique)", key="new_ds_name")
             ds_type = c2.selectbox(
-                "Type", DB_TYPES, index=form_state["ds_form_type_index"], key="new_ds_type"
+                "Type",
+                DB_TYPES,
+                index=form_state["ds_form_type_index"],
+                key="new_ds_type",
             )
 
             c3, c4 = st.columns(2)
@@ -108,18 +120,30 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
             if is_edit_mode:
                 b1, b2, b3 = st.columns([1, 1, 1])
 
-                if b1.button("💾 Save Changes", type="primary", use_container_width=True):
+                if b1.button(
+                    "💾 Save Changes", type="primary", use_container_width=True
+                ):
                     if ds_name and ds_host:
                         ok, msg = callbacks["on_update"](
-                            edit_ds_id, ds_name, ds_type, ds_host,
-                            ds_port, ds_db, ds_user, ds_pass,
+                            edit_ds_id,
+                            ds_name,
+                            ds_type,
+                            ds_host,
+                            ds_port,
+                            ds_db,
+                            ds_user,
+                            ds_pass,
                         )
                         if not ok:
                             st.error(msg)
                     else:
                         st.error("Name and Host are required.")
 
-                b2.button("🚫 Cancel", use_container_width=True, on_click=callbacks["on_cancel"])
+                b2.button(
+                    "🚫 Cancel",
+                    use_container_width=True,
+                    on_click=callbacks["on_cancel"],
+                )
 
                 if b3.button("🗑️ Delete Datasource", use_container_width=True):
                     generic_confirm_dialog(
@@ -130,11 +154,18 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
                         ds_id=edit_ds_id,
                     )
             else:
-                if st.button("✨ Save New Datasource", type="primary", use_container_width=True):
+                if st.button(
+                    "✨ Save New Datasource", type="primary", use_container_width=True
+                ):
                     if ds_name and ds_host:
                         ok, msg = callbacks["on_save_new"](
-                            ds_name, ds_type, ds_host,
-                            ds_port, ds_db, ds_user, ds_pass,
+                            ds_name,
+                            ds_type,
+                            ds_host,
+                            ds_port,
+                            ds_db,
+                            ds_user,
+                            ds_pass,
                         )
                         if not ok:
                             st.error(msg)
@@ -146,6 +177,7 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
 # Tab: Saved Configs
 # ---------------------------------------------------------------------------
 
+
 def _render_configs_tab(configs_df, callbacks: dict) -> None:
     st.markdown("#### Existing Saved Configs")
     st.caption("Select a row to preview JSON or delete.")
@@ -156,10 +188,18 @@ def _render_configs_tab(configs_df, callbacks: dict) -> None:
 
     gb = GridOptionsBuilder.from_dataframe(configs_df)
     gb.configure_selection("single", use_checkbox=True)
-    gb.configure_column("config_name", header_name="Config Name", flex=1, filter=True, sortable=True)
-    gb.configure_column("source_table", header_name="Source Table", width=150, filter=True)
-    gb.configure_column("destination_table", header_name="Destination Table", width=150, filter=True)
-    gb.configure_column("updated_at", header_name="Last Updated", width=180, sortable=True)
+    gb.configure_column(
+        "config_name", header_name="Config Name", flex=1, filter=True, sortable=True
+    )
+    gb.configure_column(
+        "source_table", header_name="Source Table", width=150, filter=True
+    )
+    gb.configure_column(
+        "destination_table", header_name="Destination Table", width=150, filter=True
+    )
+    gb.configure_column(
+        "updated_at", header_name="Last Updated", width=180, sortable=True
+    )
     gb.configure_grid_options(domLayout="autoHeight")
 
     grid_response = AgGrid(

@@ -188,8 +188,7 @@ def migrate():
         count = migrate_table(
             source,
             "pipelines",
-            ["id", "name", "description", "json_data", "source_datasource_id",
-             "target_datasource_id", "error_strategy", "created_at", "updated_at"],
+            ["id", "name", "description", "json_data", "error_strategy", "created_at", "updated_at"],
             "name"
         )
         migrated_counts["pipelines"] = count

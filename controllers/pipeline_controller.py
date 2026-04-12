@@ -220,16 +220,12 @@ def _on_save_pipeline(
     pc.error_strategy = error_strategy
     pc.batch_size = batch_size
     pc.truncate_targets = truncate
-    pc.source_datasource_id = _ds_id(PageState.get("pipeline_src_ds_name"))
-    pc.target_datasource_id = _ds_id(PageState.get("pipeline_tgt_ds_name"))
     pc.steps = [PipelineStep.from_dict(s) for s in steps]
 
     ok, msg = db.save_pipeline(
         pc.name,
         pc.description,
         json.dumps(pc.to_dict()),
-        pc.source_datasource_id,
-        pc.target_datasource_id,
         pc.error_strategy,
     )
     if ok:
@@ -256,13 +252,6 @@ def _on_load_pipeline(name: str) -> None:
     PageState.set("pipeline_form_error_strategy", pc.error_strategy)
     PageState.set("pipeline_form_batch_size", pc.batch_size)
     PageState.set("pipeline_form_truncate", pc.truncate_targets)
-    # Restore datasource selectors if IDs are embedded
-    if pc.source_datasource_id:
-        ds = db.get_datasource_by_id(pc.source_datasource_id)
-        PageState.set("pipeline_src_ds_name", ds["name"] if ds else None)
-    if pc.target_datasource_id:
-        ds = db.get_datasource_by_id(pc.target_datasource_id)
-        PageState.set("pipeline_tgt_ds_name", ds["name"] if ds else None)
     PageState.set("pipeline_src_ok", False)
     PageState.set("pipeline_tgt_ok", False)
     PageState.set("pipeline_wizard_step", 1)

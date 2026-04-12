@@ -47,8 +47,6 @@ class PipelineConfig:
     name: str
     description: str = ""
     steps: list[PipelineStep] = field(default_factory=list)
-    source_datasource_id: int | None = None
-    target_datasource_id: int | None = None
     error_strategy: str = "fail_fast"   # fail_fast | continue_on_error | skip_dependents
     batch_size: int = 1000
     truncate_targets: bool = False
@@ -68,8 +66,6 @@ class PipelineConfig:
             name=d.get("name", ""),
             description=d.get("description", ""),
             steps=[PipelineStep.from_dict(s) for s in d.get("steps", [])],
-            source_datasource_id=d.get("source_datasource_id"),
-            target_datasource_id=d.get("target_datasource_id"),
             error_strategy=d.get("error_strategy", "fail_fast"),
             batch_size=d.get("batch_size", 1000),
             truncate_targets=d.get("truncate_targets", False),
@@ -83,8 +79,6 @@ class PipelineConfig:
             "name": self.name,
             "description": self.description,
             "steps": [s.to_dict() for s in self.steps],
-            "source_datasource_id": self.source_datasource_id,
-            "target_datasource_id": self.target_datasource_id,
             "error_strategy": self.error_strategy,
             "batch_size": self.batch_size,
             "truncate_targets": self.truncate_targets,
@@ -105,8 +99,6 @@ class PipelineRecord:
     name: str
     description: str = ""
     json_data: str | dict = field(default_factory=dict)
-    source_datasource_id: str | None = None
-    target_datasource_id: str | None = None
     error_strategy: str = "fail_fast"
 
 

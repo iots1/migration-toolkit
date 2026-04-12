@@ -63,15 +63,6 @@ def test_pipeline_config_from_dict_defaults():
     assert pc.batch_size == 1000
     assert pc.truncate_targets is False
     assert pc.steps == []
-    assert pc.source_datasource_id is None
-
-
-def test_pipeline_config_to_dict_includes_datasource_ids():
-    pc = PipelineConfig.new("p", source_datasource_id=3, target_datasource_id=7)
-    d = pc.to_dict()
-    assert d["source_datasource_id"] == 3
-    assert d["target_datasource_id"] == 7
-
 
 def test_pipeline_config_step_order_preserved():
     pc = _make_pipeline()

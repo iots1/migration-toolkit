@@ -4,7 +4,6 @@ Pipeline repository - CRUD operations for pipelines table.
 This module handles pipeline definitions with:
 - Upsert using ON CONFLICT (PostgreSQL feature)
 - UUID primary keys
-- Foreign key references to datasources
 """
 
 from __future__ import annotations  # Enable modern type hints
@@ -29,8 +28,6 @@ def save(record: PipelineRecord) -> tuple[bool, str]:
         "name": record.name,
         "description": record.description,
         "json_data": json_str,
-        "source_datasource_id": record.source_datasource_id,
-        "target_datasource_id": record.target_datasource_id,
         "error_strategy": record.error_strategy,
     }
     try:
@@ -39,16 +36,14 @@ def save(record: PipelineRecord) -> tuple[bool, str]:
                 text("""
                     INSERT INTO pipelines (
                         name, description, json_data,
-                        source_datasource_id, target_datasource_id, error_strategy, updated_at
+                        error_strategy, updated_at
                     )
                     VALUES (:name, :description, :json_data,
-                            :source_datasource_id, :target_datasource_id, :error_strategy,
+                            , :error_strategy,
                             CURRENT_TIMESTAMP)
                     ON CONFLICT (name) DO UPDATE SET
                         description = EXCLUDED.description,
                         json_data = EXCLUDED.json_data,
-                        source_datasource_id = EXCLUDED.source_datasource_id,
-                        target_datasource_id = EXCLUDED.target_datasource_id,
                         error_strategy = EXCLUDED.error_strategy,
                         updated_at = CURRENT_TIMESTAMP
                 """),
@@ -67,7 +62,7 @@ def get_list() -> pd.DataFrame:
     """
     with get_transaction() as conn:
         return pd.read_sql(
-            """SELECT id, name, description, source_datasource_id, target_datasource_id,
+            """SELECT id, name, description,
                       error_strategy, created_at, updated_at
                FROM pipelines
                WHERE is_deleted = false
@@ -84,8 +79,6 @@ def get_all_list() -> list[dict]:
         result = conn.execute(
             text(
                 """SELECT id::text AS id, name, description, json_data,
-                      source_datasource_id::text AS source_datasource_id,
-                      target_datasource_id::text AS target_datasource_id,
                       error_strategy, created_at, created_by, updated_at, updated_by,
                       is_deleted, deleted_at, deleted_by, deleted_reason
                FROM pipelines
@@ -115,8 +108,6 @@ def get_by_id(pipeline_id: str) -> dict | None:
         result = conn.execute(
             text("""
             SELECT id::text AS id, name, description, json_data,
-                   source_datasource_id::text AS source_datasource_id,
-                   target_datasource_id::text AS target_datasource_id,
                    error_strategy, created_at, created_by, updated_at, updated_by,
                    is_deleted, deleted_at, deleted_by, deleted_reason
             FROM pipelines WHERE id = :id
@@ -151,8 +142,6 @@ def get_by_name(name: str) -> dict | None:
                 "name": <str>,
                 "description": <str>,
                 "json_data": <str>,
-                "source_datasource_id": <int|None>,
-                "target_datasource_id": <int|None>,
                 "error_strategy": <str>,
                 "created_at": <timestamp>,
                 "updated_at": <timestamp>
@@ -205,42 +194,3 @@ def delete(name: str) -> tuple[bool, str]:
         return True, f"✅ ลบ pipeline '{name}' สำเร็จ"
     except Exception as e:
         return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
-
-
-def get_with_datasource_names(name: str) -> dict | None:
-    """
-    Get pipeline with datasource names joined in.
-
-    Args:
-        name: Pipeline name
-
-    Returns:
-        dict | None: Pipeline data with datasource names or None
-
-    Example:
-        >>> pipeline = get_with_datasource_names("ETL Pipeline")
-        >>> if pipeline:
-        ...     print(f"Source: {pipeline.get('source_datasource_name')}")
-    """
-    with get_transaction() as conn:
-        result = conn.execute(
-            text("""
-            SELECT
-                p.id, p.name, p.description, p.json_data,
-                p.source_datasource_id, s1.name as source_datasource_name,
-                p.target_datasource_id, s2.name as target_datasource_name,
-                p.error_strategy, p.created_at, p.updated_at
-            FROM pipelines p
-            LEFT JOIN datasources s1 ON p.source_datasource_id = s1.id
-            LEFT JOIN datasources s2 ON p.target_datasource_id = s2.id
-            WHERE p.name = :name
-        """),
-            {"name": name},
-        )
-        row = result.fetchone()
-        if row is None:
-            return None
-        columns = result.keys()
-        data = dict(zip(columns, row))
-        data["id"] = str(data["id"])
-        return data

@@ -66,8 +66,6 @@ TABLES_DDL = [
         name VARCHAR(255) UNIQUE NOT NULL,
         description TEXT DEFAULT '',
         json_data TEXT,
-        source_datasource_id UUID REFERENCES datasources(id) ON DELETE SET NULL,
-        target_datasource_id UUID REFERENCES datasources(id) ON DELETE SET NULL,
         error_strategy VARCHAR(50) DEFAULT 'fail_fast',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,

@@ -18,8 +18,6 @@ class PipelinesService(BaseService):
         "name",
         "description",
         "json_data",
-        "source_datasource_id",
-        "target_datasource_id",
         "error_strategy",
         "created_at",
         "updated_at",
@@ -91,12 +89,6 @@ class PipelinesService(BaseService):
             name=name_override or data.get("name", ""),
             description=data.get("description") or ex.get("description", ""),
             json_data=json_data,
-            source_datasource_id=(
-                data.get("source_datasource_id") or ex.get("source_datasource_id")
-            ),
-            target_datasource_id=(
-                data.get("target_datasource_id") or ex.get("target_datasource_id")
-            ),
             error_strategy=(
                 data.get("error_strategy") or ex.get("error_strategy", "fail_fast")
             ),

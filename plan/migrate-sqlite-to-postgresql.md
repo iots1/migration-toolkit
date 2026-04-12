@@ -2,14 +2,14 @@
 
 ## Overview
 
-| Aspect | Current | Target |
-|--------|---------|--------|
-| Internal DB | ✅ PostgreSQL via SQLAlchemy Core `text()` + Engine pooling | ✅ **COMPLETE** |
-| Credentials | ✅ Environment variable `DATABASE_URL` | ✅ **COMPLETE** |
-| Architecture | ✅ Split repositories per domain + Protocol interfaces | ✅ **COMPLETE** |
-| SOLID | ✅ Protocol-based DI, registry patterns, split responsibilities | ✅ **COMPLETE** |
-| MVC | ✅ **6/6 pages** refactored to strict MVC pattern | ✅ **COMPLETE** |
-| Table naming | ✅ Plural nouns + snake_case | ✅ **COMPLETE** |
+| Aspect              | Current                                                                            | Target          |
+| ------------------- | ---------------------------------------------------------------------------------- | --------------- |
+| Internal DB         | ✅ PostgreSQL via SQLAlchemy Core `text()` + Engine pooling                        | ✅ **COMPLETE** |
+| Credentials         | ✅ Environment variable `DATABASE_URL`                                             | ✅ **COMPLETE** |
+| Architecture        | ✅ Split repositories per domain + Protocol interfaces                             | ✅ **COMPLETE** |
+| SOLID               | ✅ Protocol-based DI, registry patterns, split responsibilities                    | ✅ **COMPLETE** |
+| MVC                 | ✅ **6/6 pages** refactored to strict MVC pattern                                  | ✅ **COMPLETE** |
+| Table naming        | ✅ Plural nouns + snake_case                                                       | ✅ **COMPLETE** |
 | Directory structure | ✅ `repositories/`, `protocols/`, `data_transformers/`, `dialects/`, `validators/` | ✅ **COMPLETE** |
 
 ### Scope Decisions
@@ -28,6 +28,7 @@
 
 ```markdown
 ### Database Preparation
+
 - [ ] Install PostgreSQL 18+ (latest version)
 - [ ] Create database: `CREATE DATABASE his_analyzer;`
 - [ ] Create user with permissions: `CREATE USER his_user WITH PASSWORD 'secure_password';`
@@ -35,17 +36,20 @@
 - [ ] Test connection: `psql -h localhost -U his_user -d his_analyzer`
 
 ### Documentation & Baseline
+
 - [ ] Document current SQLite schema: `sqlite3 migration_tool.db ".schema > schema_backup.sql"`
 - [ ] Record row counts per table for validation
 - [ ] Run full test suite on SQLite baseline: `pytest tests/ --baseline-sqlite`
 
 ### Environment Setup
+
 - [ ] Create `.env` file from `.env.example`
 - [ ] Test `DATABASE_URL` connection locally
 - [ ] Verify `python-dotenv` loads correctly in `app.py`
 - [ ] Test PostgreSQL connection with simple query
 
 ### Risk Assessment
+
 - [ ] Identify active pipeline runs (must not interrupt)
 - [ ] Document all checkpoint files in `migration_checkpoints/`
 - [ ] Plan maintenance window (if production)
@@ -59,11 +63,13 @@
 ### 1A. `config.py` — Replace `DB_FILE` with `DATABASE_URL`
 
 **Before:**
+
 ```python
 DB_FILE = os.path.join(BASE_DIR, "migration_tool.db")
 ```
 
 **After:**
+
 ```python
 def get_database_url() -> str:
     url = os.environ.get("DATABASE_URL")
@@ -105,6 +111,7 @@ def dispose_engine() -> None:
 ```
 
 **Why this over SQLite pattern:**
+
 - SQLAlchemy Engine is thread-safe (fixes `check_same_thread` concern)
 - Connection pooling built-in (no more open/close per function)
 - `pool_pre_ping=True` auto-detects stale connections
@@ -120,6 +127,7 @@ LOG_LEVEL=INFO
 Add `python-dotenv` to `requirements.txt`.
 
 In `app.py`, add before `db.init_db()`:
+
 ```python
 from dotenv import load_dotenv
 load_dotenv()
@@ -179,6 +187,7 @@ class PipelineExecutor:
 ```
 
 **Why this matters:**
+
 - `pipeline_service.py` runs background threads via `threading.Thread`
 - Reusing connection objects across threads → race conditions + crashes
 - Each thread must get its own connection via `get_transaction()`
@@ -238,8 +247,6 @@ TABLES_DDL = [
         name VARCHAR(255) UNIQUE NOT NULL,
         description TEXT DEFAULT '',
         json_data TEXT,
-        source_datasource_id INTEGER,
-        target_datasource_id INTEGER,
         error_strategy VARCHAR(50) DEFAULT 'fail_fast',
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
@@ -265,6 +272,7 @@ def init_db() -> None:
 ```
 
 **Key changes from SQLite:**
+
 - `VARCHAR(36)` → `UUID` with `gen_random_uuid()` default
 - `TIMESTAMP` → `TIMESTAMP WITH TIME ZONE` (timezone-aware)
 - Added `created_at` to `datasources` table for audit trail
@@ -343,17 +351,17 @@ def delete(id) -> None:
 
 ### 2D. SQLite → PostgreSQL dialect mapping (all repos must follow)
 
-| SQLite | PostgreSQL / SQLAlchemy |
-|--------|------------------------|
-| `sqlite3.connect(DB_FILE)` | `get_engine().connect()` / `get_engine().begin()` |
+| SQLite                                    | PostgreSQL / SQLAlchemy                                |
+| ----------------------------------------- | ------------------------------------------------------ |
+| `sqlite3.connect(DB_FILE)`                | `get_engine().connect()` / `get_engine().begin()`      |
 | `cursor.execute("... WHERE id=?", (id,))` | `conn.execute(text("... WHERE id = :id"), {"id": id})` |
-| `cursor.fetchone()` | `result.fetchone()` + `dict(zip(result.keys(), row))` |
-| `INSERT OR REPLACE INTO` | `INSERT INTO ... ON CONFLICT (col) DO UPDATE SET ...` |
-| `sqlite3.IntegrityError` | `sqlalchemy.exc.IntegrityError` |
-| `pd.read_sql_query(sql, conn)` | `pd.read_sql(sql, conn)` |
-| `conn.commit()` | `with engine.begin() as conn:` (auto-commit) |
-| `INTEGER PRIMARY KEY AUTOINCREMENT` | `SERIAL PRIMARY KEY` |
-| `sqlite_master` / `PRAGMA` | `information_schema` |
+| `cursor.fetchone()`                       | `result.fetchone()` + `dict(zip(result.keys(), row))`  |
+| `INSERT OR REPLACE INTO`                  | `INSERT INTO ... ON CONFLICT (col) DO UPDATE SET ...`  |
+| `sqlite3.IntegrityError`                  | `sqlalchemy.exc.IntegrityError`                        |
+| `pd.read_sql_query(sql, conn)`            | `pd.read_sql(sql, conn)`                               |
+| `conn.commit()`                           | `with engine.begin() as conn:` (auto-commit)           |
+| `INTEGER PRIMARY KEY AUTOINCREMENT`       | `SERIAL PRIMARY KEY`                                   |
+| `sqlite_master` / `PRAGMA`                | `information_schema`                                   |
 
 ### 2E. `repositories/config_repo.py` — Upsert pattern
 
@@ -409,6 +417,7 @@ def save(config_name, table_name, json_data) -> tuple[bool, str]:
 ```
 
 **UUID handling notes:**
+
 - `psycopg2` automatically converts Python `uuid.UUID` ↔ PostgreSQL `UUID` type
 - Let PostgreSQL generate UUID via `DEFAULT gen_random_uuid()` when possible
 - No need for `str(uuid.uuid4())` anymore — keeps types consistent
@@ -427,15 +436,13 @@ def save(name, description, json_data, source_ds_id, target_ds_id, error_strateg
         with get_engine().begin() as conn:
             conn.execute(text("""
                 INSERT INTO pipelines (name, description, json_data,
-                    source_datasource_id, target_datasource_id, error_strategy, updated_at)
+                    error_strategy, updated_at)
                 VALUES (:name, :description, :json_data,
                     :src_ds, :tgt_ds, :strategy, CURRENT_TIMESTAMP)
                 ON CONFLICT (name) DO UPDATE SET
                     name = EXCLUDED.name,
                     description = EXCLUDED.description,
                     json_data = EXCLUDED.json_data,
-                    source_datasource_id = EXCLUDED.source_datasource_id,
-                    target_datasource_id = EXCLUDED.target_datasource_id,
                     error_strategy = EXCLUDED.error_strategy,
                     updated_at = CURRENT_TIMESTAMP
             """), {"name": name, "description": description,
@@ -484,6 +491,7 @@ def update(run_id: uuid.UUID, status: str, steps_json: str = None, error_message
 ```
 
 **Key changes:**
+
 - Return types use `uuid.UUID` instead of `str`
 - `RETURNING id` clause to get generated UUID
 - Thread-safe: each call gets its own transaction via `get_engine().begin()`
@@ -915,6 +923,7 @@ validators/
 ## Phase 6: Fix `ml_mapper.py` Streamlit Dependency (DIP)
 
 ### Current problem
+
 ```python
 # services/ml_mapper.py line 1, 35
 import streamlit as st
@@ -959,14 +968,14 @@ def get_ml_mapper():
 
 ### Current violations (10 view files import database/services directly)
 
-| Legacy View | Business Logic to Extract | New Controller |
-|-------------|--------------------------|----------------|
-| `views/schema_mapper.py` + 5 components | DB calls, config generation, datasource resolution | `controllers/schema_mapper_controller.py` |
+| Legacy View                                | Business Logic to Extract                           | New Controller                               |
+| ------------------------------------------ | --------------------------------------------------- | -------------------------------------------- |
+| `views/schema_mapper.py` + 5 components    | DB calls, config generation, datasource resolution  | `controllers/schema_mapper_controller.py`    |
 | `views/migration_engine.py` + 4 components | Datasource resolution, encoding, truncate, rollback | `controllers/migration_engine_controller.py` |
-| `views/er_diagram.py` | DB calls, graph building, schema inspection | `controllers/er_diagram_controller.py` |
-| `views/file_explorer.py` | Minimal (just reads config path) | Inline in `app.py` or trivial controller |
-| `views/settings.py` | Already superseded — **delete** | (already migrated) |
-| `views/components/shared/dialogs.py` | `db.get_config_version()` call | Move to controller callback |
+| `views/er_diagram.py`                      | DB calls, graph building, schema inspection         | `controllers/er_diagram_controller.py`       |
+| `views/file_explorer.py`                   | Minimal (just reads config path)                    | Inline in `app.py` or trivial controller     |
+| `views/settings.py`                        | Already superseded — **delete**                     | (already migrated)                           |
+| `views/components/shared/dialogs.py`       | `db.get_config_version()` call                      | Move to controller callback                  |
 
 ### 7A. `controllers/schema_mapper_controller.py`
 
@@ -1094,6 +1103,7 @@ def show_diff_dialog(diff_data: dict):
 ### 7E. Delete legacy files
 
 After refactoring is complete:
+
 - Delete `views/settings.py` (superseded by `settings_view.py` + `settings_controller.py`)
 - Keep `views/schema_mapper.py`, `views/migration_engine.py`, `views/er_diagram.py` as thin rendering shells (no business logic)
 
@@ -1102,6 +1112,7 @@ After refactoring is complete:
 ## Phase 8: `services/pipeline_service.py` — Fix DIP Violation
 
 ### Current problem
+
 ```python
 import database as db  # Direct concrete dependency
 ```
@@ -1152,13 +1163,13 @@ def _on_start_pipeline(self):
 
 ### Target: Split into focused modules
 
-| Module | Responsibility | Functions |
-|--------|---------------|-----------|
-| `services/db_connector.py` | Engine factory (thin wrapper over dialect registry) | `create_sqlalchemy_engine()` |
-| `services/connection_pool.py` | Raw DBAPI connection pool | `DatabaseConnectionPool` |
-| `services/schema_inspector.py` | Schema inspection & sampling | `get_tables()`, `get_columns()`, `get_foreign_keys()`, `get_sample_data()`, `get_column_samples()` |
-| `services/connection_tester.py` | Connection testing | `test_connection()` |
-| `dialects/` | Dialect-specific SQL generation | Per-dialect classes |
+| Module                          | Responsibility                                      | Functions                                                                                          |
+| ------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `services/db_connector.py`      | Engine factory (thin wrapper over dialect registry) | `create_sqlalchemy_engine()`                                                                       |
+| `services/connection_pool.py`   | Raw DBAPI connection pool                           | `DatabaseConnectionPool`                                                                           |
+| `services/schema_inspector.py`  | Schema inspection & sampling                        | `get_tables()`, `get_columns()`, `get_foreign_keys()`, `get_sample_data()`, `get_column_samples()` |
+| `services/connection_tester.py` | Connection testing                                  | `test_connection()`                                                                                |
+| `dialects/`                     | Dialect-specific SQL generation                     | Per-dialect classes                                                                                |
 
 ---
 
@@ -1292,8 +1303,7 @@ def migrate():
     count = migrate_table(
         source,
         "pipelines",
-        ["id", "name", "description", "json_data", "source_datasource_id",
-         "target_datasource_id", "error_strategy", "created_at", "updated_at"],
+        ["id", "name", "description", "json_data", "error_strategy", "created_at", "updated_at"],
         "name"
     )
     migrated_counts["pipelines"] = count
@@ -1333,6 +1343,7 @@ if __name__ == "__main__":
 ### 10B. `.gitignore` cleanup
 
 Remove:
+
 ```
 migration_tool.db
 migration_tool.db.backup
@@ -1462,89 +1473,90 @@ his-analyzer/
 
 ## Implementation Order
 
-| # | Phase | Task | Dependencies | Risk | Status |
-|---|-------|------|-------------|------|--------|
-| 1 | 1 | `config.py` + `.env.example` + `python-dotenv` | — | Low | ✅ Complete |
-| 2 | 1 | `repositories/connection.py` — Engine singleton | 1 | Low | ✅ Complete |
-| 3 | 2 | `repositories/base.py` — DDL (PostgreSQL) | 2 | Low | ✅ Complete |
-| 4 | 2 | `repositories/datasource_repo.py` | 3 | Low | ✅ Complete |
-| 5 | 2 | `repositories/config_repo.py` | 3 | Medium (upsert logic) | ✅ Complete |
-| 6 | 2 | `repositories/pipeline_repo.py` | 3 | Low | ✅ Complete |
-| 7 | 2 | `repositories/pipeline_run_repo.py` | 3 | Medium (thread safety) | ✅ Complete |
-| 8 | 3 | `protocols/repository.py` | — | Low (interfaces only) | ✅ Complete |
-| 9 | 4 | `dialects/` — MySQL, PostgreSQL, MSSQL | 8 | Medium (replace 20+ if/elif) | ✅ Complete |
-| 10 | 4 | Refactor `services/db_connector.py` to use dialects | 9 | Medium | ✅ Complete |
-| 11 | 5 | `data_transformers/` — Split + registry | — | Medium (refactor transformers.py) | ✅ Complete |
-| 12 | 5 | `validators/` — Split + registry | — | Low | ✅ Complete |
-| 13 | 6 | Fix `ml_mapper.py` — remove streamlit import | — | Low | ✅ Complete |
-| 14 | 8 | Fix `pipeline_service.py` — DI injection | 8, 7 | Medium | ✅ Complete |
-| 15 | 9 | Split `db_connector.py` — connection_pool, schema_inspector | 10 | Medium | ✅ **Complete (2026-04-10)** |
-| 16 | 7A | `controllers/file_explorer_controller.py` | 4 | Low | ✅ Complete |
-| 16 | 7B | `controllers/er_diagram_controller.py` | 4, 10 | Medium | ✅ Complete |
-| 16 | 7C | `controllers/schema_mapper_controller.py` | 4, 5, 13 | High (largest legacy view) | ✅ Complete |
-| 16 | 7D | `controllers/migration_engine_controller.py` | 4, 6 | High (complex wizard) | ✅ Complete |
-| 17 | 7 | Fix `views/components/shared/dialogs.py` | 5 | Low | ✅ Complete |
-| 18 | 7 | Fix all component files type hints (Python 3.12) | 16 | Medium | ✅ Complete |
-| 19 | 7 | Rename `transformers/` → `data_transformers/` (library conflict) | 11 | Medium | ✅ Complete |
-| 20 | 7 | Delete `views/settings.py` (legacy) | — | Low | ✅ Complete |
-| 21 | 10A | `scripts/migrate_sqlite_to_pg.py` | 4, 5, 6, 7 | Medium | ✅ **Complete (2026-04-10)** |
-| 22 | 10B | `.gitignore` cleanup | — | Low | ✅ **Complete (2026-04-10)** |
-| 23 | 10C | Fix `database.py` recursion error + re-export facade | 1-20 | Critical | ✅ Complete |
-| 24 | — | **Dependencies installation (Python 3.12)** | All | Critical | ✅ Complete |
-| 25 | — | **End-to-end testing** — every Streamlit page | 1-24 | Critical | ✅ Complete |
+| #   | Phase | Task                                                             | Dependencies | Risk                              | Status                       |
+| --- | ----- | ---------------------------------------------------------------- | ------------ | --------------------------------- | ---------------------------- |
+| 1   | 1     | `config.py` + `.env.example` + `python-dotenv`                   | —            | Low                               | ✅ Complete                  |
+| 2   | 1     | `repositories/connection.py` — Engine singleton                  | 1            | Low                               | ✅ Complete                  |
+| 3   | 2     | `repositories/base.py` — DDL (PostgreSQL)                        | 2            | Low                               | ✅ Complete                  |
+| 4   | 2     | `repositories/datasource_repo.py`                                | 3            | Low                               | ✅ Complete                  |
+| 5   | 2     | `repositories/config_repo.py`                                    | 3            | Medium (upsert logic)             | ✅ Complete                  |
+| 6   | 2     | `repositories/pipeline_repo.py`                                  | 3            | Low                               | ✅ Complete                  |
+| 7   | 2     | `repositories/pipeline_run_repo.py`                              | 3            | Medium (thread safety)            | ✅ Complete                  |
+| 8   | 3     | `protocols/repository.py`                                        | —            | Low (interfaces only)             | ✅ Complete                  |
+| 9   | 4     | `dialects/` — MySQL, PostgreSQL, MSSQL                           | 8            | Medium (replace 20+ if/elif)      | ✅ Complete                  |
+| 10  | 4     | Refactor `services/db_connector.py` to use dialects              | 9            | Medium                            | ✅ Complete                  |
+| 11  | 5     | `data_transformers/` — Split + registry                          | —            | Medium (refactor transformers.py) | ✅ Complete                  |
+| 12  | 5     | `validators/` — Split + registry                                 | —            | Low                               | ✅ Complete                  |
+| 13  | 6     | Fix `ml_mapper.py` — remove streamlit import                     | —            | Low                               | ✅ Complete                  |
+| 14  | 8     | Fix `pipeline_service.py` — DI injection                         | 8, 7         | Medium                            | ✅ Complete                  |
+| 15  | 9     | Split `db_connector.py` — connection_pool, schema_inspector      | 10           | Medium                            | ✅ **Complete (2026-04-10)** |
+| 16  | 7A    | `controllers/file_explorer_controller.py`                        | 4            | Low                               | ✅ Complete                  |
+| 16  | 7B    | `controllers/er_diagram_controller.py`                           | 4, 10        | Medium                            | ✅ Complete                  |
+| 16  | 7C    | `controllers/schema_mapper_controller.py`                        | 4, 5, 13     | High (largest legacy view)        | ✅ Complete                  |
+| 16  | 7D    | `controllers/migration_engine_controller.py`                     | 4, 6         | High (complex wizard)             | ✅ Complete                  |
+| 17  | 7     | Fix `views/components/shared/dialogs.py`                         | 5            | Low                               | ✅ Complete                  |
+| 18  | 7     | Fix all component files type hints (Python 3.12)                 | 16           | Medium                            | ✅ Complete                  |
+| 19  | 7     | Rename `transformers/` → `data_transformers/` (library conflict) | 11           | Medium                            | ✅ Complete                  |
+| 20  | 7     | Delete `views/settings.py` (legacy)                              | —            | Low                               | ✅ Complete                  |
+| 21  | 10A   | `scripts/migrate_sqlite_to_pg.py`                                | 4, 5, 6, 7   | Medium                            | ✅ **Complete (2026-04-10)** |
+| 22  | 10B   | `.gitignore` cleanup                                             | —            | Low                               | ✅ **Complete (2026-04-10)** |
+| 23  | 10C   | Fix `database.py` recursion error + re-export facade             | 1-20         | Critical                          | ✅ Complete                  |
+| 24  | —     | **Dependencies installation (Python 3.12)**                      | All          | Critical                          | ✅ Complete                  |
+| 25  | —     | **End-to-end testing** — every Streamlit page                    | 1-24         | Critical                          | ✅ Complete                  |
 
 ---
 
 ## Suggested PR Breakdown
 
-| PR | Steps | Scope | Description |
-|----|-------|-------|-------------|
-| **PR 1** | 1-7 | Repositories + PostgreSQL | New `repositories/` module, all CRUD working with PG |
-| **PR 2** | 8-10 | Protocols + Dialects | OCP fixes, `dialects/` module, refactor `db_connector.py` |
-| **PR 3** | 11-12 | Transformer/Validator registries | OCP fixes, split `transformers.py` into package |
-| **PR 4** | 13-15 | DIP fixes | `ml_mapper`, `pipeline_service`, split `db_connector.py` |
-| **PR 5** | 16-21 | Legacy MVC refactoring | All controllers + views cleaned, delete `database.py` |
-| **PR 6** | 22-25 | Migration script + cleanup | One-time migration, final cleanup, full E2E testing |
+| PR       | Steps | Scope                            | Description                                               |
+| -------- | ----- | -------------------------------- | --------------------------------------------------------- |
+| **PR 1** | 1-7   | Repositories + PostgreSQL        | New `repositories/` module, all CRUD working with PG      |
+| **PR 2** | 8-10  | Protocols + Dialects             | OCP fixes, `dialects/` module, refactor `db_connector.py` |
+| **PR 3** | 11-12 | Transformer/Validator registries | OCP fixes, split `transformers.py` into package           |
+| **PR 4** | 13-15 | DIP fixes                        | `ml_mapper`, `pipeline_service`, split `db_connector.py`  |
+| **PR 5** | 16-21 | Legacy MVC refactoring           | All controllers + views cleaned, delete `database.py`     |
+| **PR 6** | 22-25 | Migration script + cleanup       | One-time migration, final cleanup, full E2E testing       |
 
 ---
 
 ## SOLID Violations — Fix Summary
 
-| Violation | Location | Fix | Phase |
-|-----------|----------|-----|-------|
-| **SRP**: `database.py` God Module (8 responsibilities) | `database.py` | Split into 4 repositories | Phase 2 |
-| **SRP**: `db_connector.py` (5 responsibilities) | `services/db_connector.py` | Split into connector + pool + inspector | Phase 9 |
-| **SRP**: `transformers.py` (generic + healthcare mixed) | `services/transformers.py` | Split into `transformers/` package | Phase 5 |
-| **SRP**: Business logic in view components | `views/components/` (10 files) | Extract into controllers | Phase 7 |
-| **OCP**: Hardcoded `if db_type ==` chains (20+ locations) | `db_connector.py`, `query_builder.py` | `dialects/` registry | Phase 4 |
-| **OCP**: Static `TRANSFORMER_OPTIONS` list | `config.py` | `transformers/registry.py` | Phase 5 |
-| **OCP**: Static `VALIDATOR_OPTIONS` list | `config.py` | `validators/registry.py` | Phase 5 |
-| **OCP**: Hardcoded error strategy strings | `pipeline_service.py` | Strategy pattern (future — low priority) | — |
-| **DIP**: Controllers import concrete `database` module | `controllers/*.py` | Import protocols + inject repos | Phase 3, 7 |
-| **DIP**: `PipelineExecutor` imports concrete `database` | `services/pipeline_service.py` | Constructor injection | Phase 8 |
-| **DIP**: Views import `database` and `services` directly | `views/` (10 files) | Controllers mediate | Phase 7 |
-| **DIP**: `ml_mapper.py` imports streamlit | `services/ml_mapper.py` | Move `@st.cache_resource` to controller | Phase 6 |
-| **ISP**: `Datasource` model defined but never used | `models/datasource.py` | Use it in repositories + controllers | Phase 2 |
-| **LSP**: Return type `(bool, list \| str)` ballot pattern | `db_connector.py` | Result objects or exceptions | Phase 9 |
+| Violation                                                 | Location                              | Fix                                      | Phase      |
+| --------------------------------------------------------- | ------------------------------------- | ---------------------------------------- | ---------- |
+| **SRP**: `database.py` God Module (8 responsibilities)    | `database.py`                         | Split into 4 repositories                | Phase 2    |
+| **SRP**: `db_connector.py` (5 responsibilities)           | `services/db_connector.py`            | Split into connector + pool + inspector  | Phase 9    |
+| **SRP**: `transformers.py` (generic + healthcare mixed)   | `services/transformers.py`            | Split into `transformers/` package       | Phase 5    |
+| **SRP**: Business logic in view components                | `views/components/` (10 files)        | Extract into controllers                 | Phase 7    |
+| **OCP**: Hardcoded `if db_type ==` chains (20+ locations) | `db_connector.py`, `query_builder.py` | `dialects/` registry                     | Phase 4    |
+| **OCP**: Static `TRANSFORMER_OPTIONS` list                | `config.py`                           | `transformers/registry.py`               | Phase 5    |
+| **OCP**: Static `VALIDATOR_OPTIONS` list                  | `config.py`                           | `validators/registry.py`                 | Phase 5    |
+| **OCP**: Hardcoded error strategy strings                 | `pipeline_service.py`                 | Strategy pattern (future — low priority) | —          |
+| **DIP**: Controllers import concrete `database` module    | `controllers/*.py`                    | Import protocols + inject repos          | Phase 3, 7 |
+| **DIP**: `PipelineExecutor` imports concrete `database`   | `services/pipeline_service.py`        | Constructor injection                    | Phase 8    |
+| **DIP**: Views import `database` and `services` directly  | `views/` (10 files)                   | Controllers mediate                      | Phase 7    |
+| **DIP**: `ml_mapper.py` imports streamlit                 | `services/ml_mapper.py`               | Move `@st.cache_resource` to controller  | Phase 6    |
+| **ISP**: `Datasource` model defined but never used        | `models/datasource.py`                | Use it in repositories + controllers     | Phase 2    |
+| **LSP**: Return type `(bool, list \| str)` ballot pattern | `db_connector.py`                     | Result objects or exceptions             | Phase 9    |
 
 ---
 
 ## Risk Mitigations
 
-| Risk | Impact | Mitigation |
-|------|--------|-----------|
-| 15 files import `database` — breaking change | High | Migrate callers in batches per PR; keep `database.py` as thin re-export facade during transition |
-| `pipeline_service.py` runs in background thread | High | SQLAlchemy Engine is thread-safe; PG handles concurrent writes better than SQLite |
-| Transformer split breaks `query_builder.py` dependency | Medium | `transformers/__init__.py` re-exports `DataTransformer` class — zero change for callers |
-| `pd.read_sql_query()` to `pd.read_sql()` | Low | Identical API, just accepts engine instead of raw connection |
-| SERIAL vs AUTOINCREMENT id mismatch | Low | Both return `int` — no caller code changes needed |
-| Large PR scope | High | 6 PRs with clear boundaries; each PR is independently deployable |
+| Risk                                                   | Impact | Mitigation                                                                                       |
+| ------------------------------------------------------ | ------ | ------------------------------------------------------------------------------------------------ |
+| 15 files import `database` — breaking change           | High   | Migrate callers in batches per PR; keep `database.py` as thin re-export facade during transition |
+| `pipeline_service.py` runs in background thread        | High   | SQLAlchemy Engine is thread-safe; PG handles concurrent writes better than SQLite                |
+| Transformer split breaks `query_builder.py` dependency | Medium | `transformers/__init__.py` re-exports `DataTransformer` class — zero change for callers          |
+| `pd.read_sql_query()` to `pd.read_sql()`               | Low    | Identical API, just accepts engine instead of raw connection                                     |
+| SERIAL vs AUTOINCREMENT id mismatch                    | Low    | Both return `int` — no caller code changes needed                                                |
+| Large PR scope                                         | High   | 6 PRs with clear boundaries; each PR is independently deployable                                 |
 
 ---
 
 ## Testing Checklist
 
 ### PR 1 (Repositories)
+
 - [ ] `init_db()` creates 5 tables in PostgreSQL
 - [ ] Datasource CRUD: create, read, update, delete, unique name constraint
 - [ ] Config CRUD: save, load, delete, version history, upsert behavior
@@ -1553,22 +1565,26 @@ his-analyzer/
 - [ ] `compare_config_versions()` diff logic unchanged
 
 ### PR 2 (Dialects)
+
 - [ ] `dialects.registry.available_types()` returns 3 types
 - [ ] Engine creation works for MySQL, PostgreSQL, MSSQL dialects
 - [ ] `query_builder.py` uses dialect for quoting
 
 ### PR 3 (Transformers)
+
 - [ ] All existing transformers registered and callable
 - [ ] `DataTransformer.transform_batch()` behavior identical
 - [ ] `config.get_transformer_options()` returns same options
 - [ ] `GENERATE_HN` healthcare logic works correctly
 
 ### PR 4 (DIP fixes)
+
 - [ ] `ml_mapper` works without Streamlit runtime
 - [ ] `PipelineExecutor` receives repos via constructor
 - [ ] `db_connector.py` no longer has 5 responsibilities
 
 ### PR 5 (MVC refactoring)
+
 - [ ] Schema Mapper page works end-to-end
 - [ ] Migration Engine wizard completes all 4 steps
 - [ ] ER Diagram builds graph from datasource
@@ -1576,6 +1592,7 @@ his-analyzer/
 - [ ] `views/settings.py` deleted
 
 ### PR 6 (Migration + cleanup)
+
 - [ ] `scripts/migrate_sqlite_to_pg.py` transfers all data
 - [ ] `database.py` deleted with no remaining imports
 - [ ] `.gitignore` updated
@@ -1587,8 +1604,9 @@ his-analyzer/
 
 **Execute AFTER Phase 10 completes:**
 
-```markdown
+````markdown
 ### Data Integrity Validation
+
 - [ ] Row count validation per table
   ```python
   # scripts/validate_migration.py
@@ -1596,12 +1614,15 @@ his-analyzer/
   target_counts = get_postgres_counts()
   assert source_counts == target_counts
   ```
+````
+
 - [ ] Sample data comparison (random 10 rows per table)
 - [ ] UUID format validation (all IDs valid UUIDs)
 - [ ] Timestamp validation (all `created_at`/`updated_at` populated)
 - [ ] Foreign key integrity (all references valid)
 
 ### Functional Testing
+
 - [ ] Create new datasource via UI → verify in PostgreSQL
 - [ ] Create new config → verify version history works
 - [ ] Create new pipeline → execute → verify pipeline_runs table
@@ -1609,11 +1630,13 @@ his-analyzer/
 - [ ] Test checkpoint save/load → verify v2 format
 
 ### Performance Baseline
+
 - [ ] Measure query times: `SELECT * FROM configs`, `SELECT * FROM datasources`
 - [ ] Compare with SQLite baseline (should be similar or faster)
 - [ ] Test connection pooling under load (10 concurrent connections)
 
 ### Checkpoint Migration
+
 - [x] Run `scripts/migrate_checkpoints.py`
 - [x] Verify all v1 checkpoints converted to v2
 - [x] Test resume from migrated checkpoint
@@ -1626,12 +1649,14 @@ his-analyzer/
 ### ✅ Completed Tasks
 
 #### Phase 9A: Connection Pool Module
+
 - ✅ Created `services/connection_pool.py` - Extracted `DatabaseConnectionPool` class
 - ✅ Singleton pattern for connection management
 - ✅ Thread-safe connection handling
 - ✅ Support for MySQL, PostgreSQL, MSSQL native drivers
 
 #### Phase 9B: Schema Inspector Module
+
 - ✅ Created `services/schema_inspector.py` - All schema inspection functions
 - ✅ `get_tables_from_datasource()` - List all tables
 - ✅ `get_columns_from_table()` - Get column metadata with nullable status
@@ -1641,10 +1666,12 @@ his-analyzer/
 - ✅ SQL injection protection via `_safe_id()` validator
 
 #### Phase 9C: Connection Tester Module
+
 - ✅ Created `services/connection_tester.py` - Connection testing service
 - ✅ `test_db_connection()` - Test database connectivity
 
 #### Phase 9D: Slimmed db_connector.py
+
 - ✅ Refactored `services/db_connector.py` - SQLAlchemy engine factory only
 - ✅ Removed all connection pool, schema inspection, and testing logic
 - ✅ Backward-compatible re-exports for smooth transition
@@ -1652,22 +1679,24 @@ his-analyzer/
 
 ### 📊 Architecture Improvements
 
-| Responsibility | Before | After |
-|----------------|--------|-------|
-| **Engine Factory** | Mixed in `db_connector.py` (Part 1) | `db_connector.py` (sole focus) |
-| **Connection Pool** | Mixed in `db_connector.py` (Part 2) | `connection_pool.py` (dedicated module) |
-| **Schema Inspection** | Mixed in `db_connector.py` (Part 3) | `schema_inspector.py` (dedicated module) |
+| Responsibility         | Before                              | After                                     |
+| ---------------------- | ----------------------------------- | ----------------------------------------- |
+| **Engine Factory**     | Mixed in `db_connector.py` (Part 1) | `db_connector.py` (sole focus)            |
+| **Connection Pool**    | Mixed in `db_connector.py` (Part 2) | `connection_pool.py` (dedicated module)   |
+| **Schema Inspection**  | Mixed in `db_connector.py` (Part 3) | `schema_inspector.py` (dedicated module)  |
 | **Connection Testing** | Mixed in `db_connector.py` (Part 3) | `connection_tester.py` (dedicated module) |
 
 ### 🔧 Technical Details
 
 **File Sizes After Split:**
+
 - `services/db_connector.py`: ~120 lines (was ~420 lines)
 - `services/connection_pool.py`: ~150 lines
 - `services/schema_inspector.py`: ~330 lines
 - `services/connection_tester.py`: ~30 lines
 
 **Benefits:**
+
 1. **Single Responsibility Principle** - Each module has one clear purpose
 2. **Easier Testing** - Can test each module independently
 3. **Better Maintainability** - Changes to one concern don't affect others
@@ -1676,6 +1705,7 @@ his-analyzer/
 ### 🚀 Migration Notes
 
 All existing code continues to work due to backward-compatible re-exports in `db_connector.py`:
+
 ```python
 # Old imports still work
 from services.db_connector import test_db_connection, get_tables_from_datasource
@@ -1692,21 +1722,25 @@ from services.schema_inspector import get_tables_from_datasource
 ### ✅ Completed Tasks
 
 #### Phase 7A: File Explorer Controller
+
 - ✅ Created `controllers/file_explorer_controller.py` - Minimal controller for simple file explorer page
 - ✅ Updated `app.py` routing to use controller
 - ✅ Added proper type hints with `from __future__ import annotations`
 
 #### Phase 7B: ER Diagram Controller
+
 - ✅ Created `controllers/er_diagram_controller.py` - Full controller with graph building callbacks
 - ✅ Integrated with `services/db_connector` for schema inspection
 - ✅ Separated state management from view rendering
 
 #### Phase 7C: Schema Mapper Controller
+
 - ✅ Created `controllers/schema_mapper_controller.py` - Wrapper controller for complex schema mapping
 - ✅ Maintained backward compatibility with existing view during transition
 - ✅ Prepared structure for future extraction of business logic from components
 
 #### Phase 7D: Migration Engine Controller
+
 - ✅ Created `controllers/migration_engine_controller.py` - Multi-step wizard controller
 - ✅ Separated wizard state management from view rendering
 - ✅ Prepared structure for future extraction of migration execution logic
@@ -1714,34 +1748,43 @@ from services.schema_inspector import get_tables_from_datasource
 ### 🔧 Critical Issues Resolved
 
 #### Issue 1: Type Hints Compatibility (Python 3.9 vs 3.12)
+
 **Problem**: Union type syntax `|` not supported in Python 3.9
+
 ```
 TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
 ```
 
 **Solution**:
+
 - Added `from __future__ import annotations` to all files
 - Changed `dict | None` → `Optional[dict]` where needed
 - Applied to: `repositories/`, `controllers/`, `services/`, `views/components/`
 
 #### Issue 2: Local `transformers/` Directory Name Conflict
+
 **Problem**: Local `transformers/` directory conflicted with HuggingFace `transformers` library
+
 ```
 ModuleNotFoundError: No module named 'transformers.configuration_utils'
 ```
 
 **Solution**:
+
 - Renamed `transformers/` → `data_transformers/`
 - Updated all imports: `from transformers.` → `from data_transformers.`
 - Used `sed` for bulk replacement across codebase
 
 #### Issue 3: Recursion Error in `database.py`
+
 **Problem**: `init_db()` calling itself recursively at line 169
+
 ```
 RecursionError: maximum recursion depth exceeded
 ```
 
 **Solution**:
+
 ```python
 def init_db() -> None:
     """Initialize database schema."""
@@ -1750,13 +1793,16 @@ def init_db() -> None:
 ```
 
 #### Issue 4: Missing Dependencies for Python 3.12
+
 **Problem**: Multiple missing modules when switching to Python 3.12
+
 - `dotenv`
 - `sentence-transformers`
 - `streamlit-aggrid`
 - `streamlit-agraph`
 
 **Solution**:
+
 ```bash
 pip3.12 install python-dotenv 'transformers[torch]' sentence-transformers \
   streamlit-aggrid streamlit-agraph --break-system-packages
@@ -1764,20 +1810,21 @@ pip3.12 install python-dotenv 'transformers[torch]' sentence-transformers \
 
 ### 📊 Final Architecture Status
 
-| Component | Status | Notes |
-|-----------|--------|-------|
-| **Controllers** | ✅ 6/6 Complete | All pages use MVC pattern |
-| **Repositories** | ✅ 5/5 Complete | PostgreSQL CRUD operations |
-| **Protocols** | ✅ Complete | Protocol interfaces defined |
-| **Dialects** | ✅ Complete | MySQL, PostgreSQL, MSSQL support |
-| **Transformers** | ✅ Complete | Pluggable registry pattern |
-| **Validators** | ✅ Complete | Pluggable registry pattern |
-| **Type Hints** | ✅ Complete | Python 3.12 compatible |
-| **App Routing** | ✅ Complete | All pages use controllers |
+| Component        | Status          | Notes                            |
+| ---------------- | --------------- | -------------------------------- |
+| **Controllers**  | ✅ 6/6 Complete | All pages use MVC pattern        |
+| **Repositories** | ✅ 5/5 Complete | PostgreSQL CRUD operations       |
+| **Protocols**    | ✅ Complete     | Protocol interfaces defined      |
+| **Dialects**     | ✅ Complete     | MySQL, PostgreSQL, MSSQL support |
+| **Transformers** | ✅ Complete     | Pluggable registry pattern       |
+| **Validators**   | ✅ Complete     | Pluggable registry pattern       |
+| **Type Hints**   | ✅ Complete     | Python 3.12 compatible           |
+| **App Routing**  | ✅ Complete     | All pages use controllers        |
 
 ### 🚀 Deployment Instructions
 
 1. **Environment Setup**:
+
 ```bash
 # Install Python 3.12 dependencies
 pip3.12 install python-dotenv 'transformers[torch]' sentence-transformers \
@@ -1790,6 +1837,7 @@ pip install -r requirements.txt
 ```
 
 2. **Database Configuration**:
+
 ```bash
 # Set PostgreSQL connection
 export DATABASE_URL="postgresql://user:password@localhost:5432/his_analyzer"
@@ -1799,6 +1847,7 @@ echo "DATABASE_URL=postgresql://user:password@localhost:5432/his_analyzer" > .en
 ```
 
 3. **Run Application**:
+
 ```bash
 # Using Python 3.12
 python3.12 -m streamlit run app.py
@@ -1835,14 +1884,14 @@ While Phase 7C & 7D are complete, here are potential improvements:
 
 ## Rollback Strategy
 
-| PR | Rollback Trigger | Rollback Action | Recovery Time |
-|----|-----------------|-----------------|---------------|
-| **PR 1** | Repositories not working | Revert code; switch `DATABASE_URL` back to SQLite | 5 min |
-| **PR 2** | Dialect registry broken | Revert code; falls back to hardcoded if/elif | 10 min |
-| **PR 3** | Transformers not found | Revert code; `transformers/__init__.py` re-exports old class | 5 min |
-| **PR 4** | DI injection fails | Revert code; services import concrete repos again | 15 min |
-| **PR 5** | Views not rendering | Revert code; restore legacy view files | 20 min |
-| **PR 6** | Data migration corrupted | Restore PostgreSQL from pre-migration dump; rerun script | 30 min |
+| PR       | Rollback Trigger         | Rollback Action                                              | Recovery Time |
+| -------- | ------------------------ | ------------------------------------------------------------ | ------------- |
+| **PR 1** | Repositories not working | Revert code; switch `DATABASE_URL` back to SQLite            | 5 min         |
+| **PR 2** | Dialect registry broken  | Revert code; falls back to hardcoded if/elif                 | 10 min        |
+| **PR 3** | Transformers not found   | Revert code; `transformers/__init__.py` re-exports old class | 5 min         |
+| **PR 4** | DI injection fails       | Revert code; services import concrete repos again            | 15 min        |
+| **PR 5** | Views not rendering      | Revert code; restore legacy view files                       | 20 min        |
+| **PR 6** | Data migration corrupted | Restore PostgreSQL from pre-migration dump; rerun script     | 30 min        |
 
 **Emergency Rollback Procedure** (if entire migration fails):
 
@@ -1969,18 +2018,18 @@ DATABASE_URL=postgresql://test_user@localhost:5432/his_analyzer_test \
 
 ### ✅ Completion Status
 
-| Phase | Status | Description |
-|-------|--------|-------------|
-| **Phase 1** | ✅ Complete | PostgreSQL connection & configuration |
-| **Phase 2** | ✅ Complete | Repository pattern implementation |
-| **Phase 3** | ✅ Complete | Protocol interfaces (DIP) |
-| **Phase 4** | ✅ Complete | Database dialect registry (OCP) |
-| **Phase 5** | ✅ Complete | Transformer/Validator registries (OCP) |
-| **Phase 6** | ✅ Complete | ML Mapper refactored (DIP) |
-| **Phase 7** | ✅ Complete | MVC refactoring for all 6 pages |
-| **Phase 8** | ✅ Complete | Pipeline Service DI injection |
-| **Phase 9** | ✅ Complete | DB Connector split (SRP) |
-| **Phase 10** | ✅ Complete | Migration script & cleanup |
+| Phase        | Status      | Description                            |
+| ------------ | ----------- | -------------------------------------- |
+| **Phase 1**  | ✅ Complete | PostgreSQL connection & configuration  |
+| **Phase 2**  | ✅ Complete | Repository pattern implementation      |
+| **Phase 3**  | ✅ Complete | Protocol interfaces (DIP)              |
+| **Phase 4**  | ✅ Complete | Database dialect registry (OCP)        |
+| **Phase 5**  | ✅ Complete | Transformer/Validator registries (OCP) |
+| **Phase 6**  | ✅ Complete | ML Mapper refactored (DIP)             |
+| **Phase 7**  | ✅ Complete | MVC refactoring for all 6 pages        |
+| **Phase 8**  | ✅ Complete | Pipeline Service DI injection          |
+| **Phase 9**  | ✅ Complete | DB Connector split (SRP)               |
+| **Phase 10** | ✅ Complete | Migration script & cleanup             |
 
 ### 🏗️ Architecture Achievements
 
@@ -2002,6 +2051,7 @@ DATABASE_URL=postgresql://test_user@localhost:5432/his_analyzer_test \
 ### 🚀 Production Ready
 
 The application is now production-ready with:
+
 - Thread-safe PostgreSQL connection pooling
 - Comprehensive error handling
 - UUID-based primary keys
@@ -2026,9 +2076,9 @@ The application is now production-ready with:
 
 **Migration Status: ✅ COMPLETE**
 
-*Date: 2026-04-10*
-*Python Version: 3.12*
-*Database: PostgreSQL 18+*
+_Date: 2026-04-10_
+_Python Version: 3.12_
+_Database: PostgreSQL 18+_
 
 ---
 
@@ -2037,6 +2087,7 @@ The application is now production-ready with:
 ### ✅ Completed Tasks
 
 #### Phase 10A: Migration Script
+
 - ✅ Created `scripts/migrate_sqlite_to_pg.py` - One-time SQLite → PostgreSQL migration
 - ✅ Automatic detection of existing SQLite database
 - ✅ UUID type conversion (TEXT → native PostgreSQL UUID)
@@ -2045,6 +2096,7 @@ The application is now production-ready with:
 - ✅ Foreign key dependency order preservation
 
 **Migration Script Features:**
+
 1. **Safe Migration** - Uses transactions with automatic rollback on error
 2. **Data Validation** - Compares row counts before and after migration
 3. **UUID Handling** - Converts SQLite TEXT UUIDs to PostgreSQL native UUID type
@@ -2052,6 +2104,7 @@ The application is now production-ready with:
 5. **Fresh Install Support** - Gracefully skips migration if no SQLite DB exists
 
 **Usage:**
+
 ```bash
 # Set PostgreSQL connection
 export DATABASE_URL="postgresql://user:password@localhost:5432/his_analyzer"
@@ -2061,11 +2114,13 @@ python3.12 scripts/migrate_sqlite_to_pg.py
 ```
 
 #### Phase 10B: .gitignore Cleanup
+
 - ✅ Updated `.gitignore` to comment out SQLite database entries
 - ✅ Retained entries for reference (migration_tool.db, migration_tool.db.backup)
 - ✅ Added explanatory comment about PostgreSQL migration
 
 **.gitignore Changes:**
+
 ```gitignore
 # SQLite database (migrated to PostgreSQL)
 # Kept for backup reference only - not used in production
@@ -2074,6 +2129,7 @@ python3.12 scripts/migrate_sqlite_to_pg.py
 ```
 
 #### Phase 10C: db_connector.py Cleanup
+
 - ✅ Removed unused SQLite imports
 - ✅ Removed hardcoded dialect logic (moved to dialects/ in Phase 4)
 - ✅ Clean SQLAlchemy-only implementation
@@ -2124,7 +2180,7 @@ python3.12 scripts/migrate_sqlite_to_pg.py
 
 **Migration Status: ✅ COMPLETE**
 
-*Date: 2026-04-10*
-*Python Version: 3.12*
-*Database: PostgreSQL 18+*
-*All Phases: ✅ Complete (1-10)*
+_Date: 2026-04-10_
+_Python Version: 3.12_
+_Database: PostgreSQL 18+_
+_All Phases: ✅ Complete (1-10)_

@@ -203,8 +203,6 @@ def save_pipeline(
     """Save a new pipeline. Deprecated: use pipeline_repo.save(PipelineRecord)."""
     return _save_pipeline(PipelineRecord(
         name=name, description=description, json_data=json_data,
-        source_datasource_id=str(source_ds_id) if source_ds_id else None,
-        target_datasource_id=str(target_ds_id) if target_ds_id else None,
         error_strategy=error_strategy,
     ))
 

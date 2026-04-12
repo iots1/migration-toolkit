@@ -35,25 +35,17 @@ class PipelineRunsService(BaseService):
 
     def find_all(self, params: QueryParams) -> dict:
         """List all pipeline runs with pagination."""
-        offset = (
-            params.offset
-            if params.offset is not None
-            else (params.page - 1) * params.limit
-        )
         total_records = self.execute_db_operation(lambda: pipeline_run_repo.count_all())
         data = self.execute_db_operation(
-            lambda: pipeline_run_repo.get_all(limit=params.limit, offset=offset)
+            lambda: pipeline_run_repo.get_all(limit=params.limit, offset=0)
         )
-
         data = self._apply_query_params(data, params)
         data = self._sanitize_list(data)
-        total_pages = (
-            max(1, -(-total_records // params.limit)) if total_records > 0 else 1
-        )
+        page_data, total, total_pages = self._paginate(data, params)
 
         return {
-            "data": data,
-            "total": len(data),
+            "data": page_data,
+            "total": total,
             "total_records": total_records,
             "page": params.page,
             "page_size": params.limit,

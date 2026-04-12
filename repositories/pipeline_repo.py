@@ -39,7 +39,7 @@ def save(record: PipelineRecord) -> tuple[bool, str]:
                         error_strategy, updated_at
                     )
                     VALUES (:name, :description, :json_data,
-                            , :error_strategy,
+                            :error_strategy,
                             CURRENT_TIMESTAMP)
                     ON CONFLICT (name) DO UPDATE SET
                         description = EXCLUDED.description,
@@ -49,11 +49,11 @@ def save(record: PipelineRecord) -> tuple[bool, str]:
                 """),
                 col_params,
             )
-        return True, f"✅ Pipeline '{record.name}' บันทึกสำเร็จ"
+        return True, f"Pipeline '{record.name}' saved successfully"
     except IntegrityError:
-        return False, f"❌ Pipeline '{record.name}' มีอยู่แล้ว"
+        return False, f"Pipeline '{record.name}' already exists"
     except Exception as e:
-        return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
+        return False, f"Failed to save pipeline '{record.name}'"
 
 
 def get_list() -> pd.DataFrame:
@@ -190,7 +190,7 @@ def delete(name: str) -> tuple[bool, str]:
                 text("DELETE FROM pipelines WHERE name = :name"), {"name": name}
             )
             if result.rowcount == 0:
-                return False, f"❌ ไม่พบ pipeline '{name}'"
-        return True, f"✅ ลบ pipeline '{name}' สำเร็จ"
+                return False, f"Pipeline '{name}' not found"
+        return True, f"Pipeline '{name}' deleted successfully"
     except Exception as e:
-        return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
+        return False, f"Failed to delete pipeline '{name}'"

@@ -22,7 +22,8 @@ def _make_create_endpoint(schema, svc, router):
             str(request.url.path),
         )
 
-    return router.post("/", status_code=201)(create)
+    router.post("/", status_code=201)(create)
+    router.post("")(create)
 
 
 def _make_update_endpoint(schema, svc, router, id_param: str = "id"):
@@ -34,7 +35,7 @@ def _make_update_endpoint(schema, svc, router, id_param: str = "id"):
             svc.resource_type, updated, str(request.url.path)
         )
 
-    return router.put(f"/{{{id_param}}}")(update)
+    router.put(f"/{{{id_param}}}")(update)
 
 
 def _make_delete_endpoint(svc, router, id_param: str = "id"):
@@ -44,7 +45,7 @@ def _make_delete_endpoint(svc, router, id_param: str = "id"):
         svc.delete(id_param)
         return json_api.create_no_content_response()
 
-    return router.delete(f"/{{{id_param}}}", status_code=204)(delete)
+    router.delete(f"/{{{id_param}}}", status_code=204)(delete)
 
 
 class BaseController:
@@ -59,17 +60,18 @@ class BaseController:
         tags: list[str],
         id_param: str = "id",
     ):
-        self.router = APIRouter(prefix=f"/api/v1/{prefix}", tags=tags)
+        self.router = APIRouter(
+            prefix=f"/api/v1/{prefix}", tags=tags, redirect_slashes=False
+        )
         self.service = service
         self._prefix = prefix
         self._register_routes(create_schema, update_schema, id_param)
 
     def _register_routes(self, create_schema, update_schema, id_param: str = "id"):
-        """Register standard CRUD endpoints."""
+        """Register standard CRUD endpoints (both with and without trailing slash)."""
         router = self.router
         svc = self.service
 
-        @router.get("/")
         def find_all(request: Request, params: QueryParams = Depends()):
             result = svc.find_all(params)
             pagination = svc._build_pagination_meta(result["total"], params)
@@ -80,12 +82,15 @@ class BaseController:
                 str(request.url.path),
             )
 
-        @router.get("/{id_param}")
         def find_by_id(id_param, request: Request):
             item = svc.find_by_id(id_param)
             return json_api.create_success_response(
                 svc.resource_type, item, str(request.url.path)
             )
+
+        router.get("/")(find_all)
+        router.get("")(find_all)
+        router.get(f"/{{{id_param}}}")(find_by_id)
 
         _make_create_endpoint(create_schema, svc, router)
         _make_update_endpoint(update_schema, svc, router, id_param)

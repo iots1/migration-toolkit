@@ -34,6 +34,7 @@ app = FastAPI(
     description="REST API for hospital information system data migration toolkit",
     version="1.0.0",
     dependencies=[Depends(verify_api_key)],
+    redirect_slashes=False,
 )
 
 # Register exception handlers
@@ -72,7 +73,7 @@ def startup():
         init_db()
     except RuntimeError as e:
         # Database URL not configured, skip init
-        print(f"⚠ Database initialization skipped: {e}")
+        print(f"Database initialization skipped: {e}")
 
 
 if __name__ == "__main__":

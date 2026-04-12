@@ -77,6 +77,36 @@ TABLES_DDL = [
         deleted_by UUID,
         deleted_reason TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS pipeline_nodes (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        pipeline_id UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        config_id UUID NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
+        position_x INTEGER DEFAULT 0,
+        position_y INTEGER DEFAULT 0,
+        order_sort INTEGER DEFAULT 0,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID,
+        is_deleted BOOLEAN NOT NULL DEFAULT false,
+        deleted_at TIMESTAMP WITH TIME ZONE,
+        deleted_by UUID,
+        deleted_reason TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS pipeline_edges (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        pipeline_id UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        source_config_uuid UUID NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
+        target_config_uuid UUID NOT NULL REFERENCES configs(id) ON DELETE CASCADE,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID,
+        is_deleted BOOLEAN NOT NULL DEFAULT false,
+        deleted_at TIMESTAMP WITH TIME ZONE,
+        deleted_by UUID,
+        deleted_reason TEXT
+    )""",
     """CREATE TABLE IF NOT EXISTS pipeline_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         pipeline_id UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
@@ -130,6 +160,8 @@ def drop_all_tables() -> None:
     with engine.begin() as conn:
         tables = [
             "pipeline_runs",
+            "pipeline_edges",
+            "pipeline_nodes",
             "pipelines",
             "config_histories",
             "configs",

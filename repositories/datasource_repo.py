@@ -128,11 +128,11 @@ def save(record: DatasourceRecord) -> tuple[bool, str]:
                 """),
                 col_params,
             )
-        return True, f"✅ บันทึก '{record.name}' สำเร็จ"
+        return True, f"Datasource '{record.name}' saved successfully"
     except IntegrityError:
-        return False, f"❌ ชื่อ '{record.name}' มีอยู่แล้ว"
+        return False, f"Datasource '{record.name}' already exists"
     except Exception as e:
-        return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
+        return False, f"Failed to save datasource '{record.name}'"
 
 
 def update(ds_id, record: DatasourceRecord) -> tuple[bool, str]:
@@ -167,11 +167,11 @@ def update(ds_id, record: DatasourceRecord) -> tuple[bool, str]:
                 """),
                 {"id": ds_id, **col_params},
             )
-        return True, f"✅ อัปเดต '{record.name}' สำเร็จ"
+        return True, f"Datasource '{record.name}' updated successfully"
     except IntegrityError:
-        return False, f"❌ ชื่อ '{record.name}' มีอยู่แล้ว"
+        return False, f"Datasource '{record.name}' already exists"
     except Exception as e:
-        return False, f"❌ เกิดข้อผิดพลาด: {str(e)}"
+        return False, f"Failed to update datasource '{record.name}'"
 
 
 def delete(ds_id) -> None:

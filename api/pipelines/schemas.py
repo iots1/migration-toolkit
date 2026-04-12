@@ -2,34 +2,40 @@
 
 from __future__ import annotations
 
-import uuid
 from pydantic import BaseModel, Field
 
 
-class CreatePipelineSchema(BaseModel):
-    """Create pipeline request."""
+class PipelineNodeSchema(BaseModel):
+    config_id: str
+    position_x: int = 0
+    position_y: int = 0
+    order_sort: int = 0
 
-    name: str = Field(..., min_length=1)
+
+class PipelineEdgeSchema(BaseModel):
+    source_config_uuid: str
+    target_config_uuid: str
+
+
+class CreatePipelineSchema(BaseModel):
+    name: str = Field(default="")
     description: str = Field(default="")
-    json_data: str | dict = Field(default="{}")
-    error_strategy: str = Field(default="fail_fast")
+    nodes: list[PipelineNodeSchema] | None = None
+    edges: list[PipelineEdgeSchema] | None = None
 
 
 class UpdatePipelineSchema(BaseModel):
-    """Update pipeline request."""
-
     name: str | None = None
     description: str | None = None
-    json_data: str | dict | None = None
-    error_strategy: str | None = None
+    nodes: list[PipelineNodeSchema] | None = None
+    edges: list[PipelineEdgeSchema] | None = None
 
 
 class PipelineSchema(BaseModel):
-    """Pipeline response."""
-
     id: str
     name: str
     description: str
-    error_strategy: str
     created_at: str
     updated_at: str
+    nodes: list[dict] = Field(default_factory=list)
+    edges: list[dict] = Field(default_factory=list)

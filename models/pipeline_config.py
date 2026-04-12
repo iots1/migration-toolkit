@@ -10,6 +10,7 @@ PipelineRecord / PipelineRunRecord / PipelineRunUpdateRecord are the single
 source of truth for their table columns — pass them to the repo instead of
 flat kwargs. Adding a new column = add the field here only.
 """
+
 from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -47,7 +48,7 @@ class PipelineConfig:
     name: str
     description: str = ""
     steps: list[PipelineStep] = field(default_factory=list)
-    error_strategy: str = "fail_fast"   # fail_fast | continue_on_error | skip_dependents
+    error_strategy: str = "fail_fast"  # fail_fast | continue_on_error | skip_dependents
     batch_size: int = 1000
     truncate_targets: bool = False
     created_at: str = ""
@@ -57,7 +58,9 @@ class PipelineConfig:
     def new(cls, name: str, **kwargs) -> "PipelineConfig":
         """Convenience factory: auto-generates UUID and ISO timestamps."""
         now = datetime.now().isoformat()
-        return cls(id=str(uuid.uuid4()), name=name, created_at=now, updated_at=now, **kwargs)
+        return cls(
+            id=str(uuid.uuid4()), name=name, created_at=now, updated_at=now, **kwargs
+        )
 
     @classmethod
     def from_dict(cls, d: dict) -> "PipelineConfig":
@@ -100,6 +103,26 @@ class PipelineRecord:
     description: str = ""
     json_data: str | dict = field(default_factory=dict)
     error_strategy: str = "fail_fast"
+
+
+@dataclass
+class PipelineNodeRecord:
+    """Write model for pipeline_nodes table."""
+
+    pipeline_id: uuid.UUID
+    config_id: uuid.UUID
+    position_x: int = 0
+    position_y: int = 0
+    order_sort: int = 0
+
+
+@dataclass
+class PipelineEdgeRecord:
+    """Write model for pipeline_edges table."""
+
+    pipeline_id: uuid.UUID
+    source_config_uuid: uuid.UUID
+    target_config_uuid: uuid.UUID
 
 
 @dataclass

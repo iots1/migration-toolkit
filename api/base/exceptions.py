@@ -1,107 +1,142 @@
 """
 Custom exception classes and handlers for the FastAPI application.
 
-Mirrors NestJS AllExceptionsFilter pattern with structured error responses.
+All exception responses follow a consistent pattern:
+{
+    "status": {"code": <int>, "message": "<short summary>"},
+    "errors": [{"code": "<CODE>", "title": "<title>", "detail": "<human-readable>", "source": {...}}],
+    "meta": {"timestamp": "..."}
+}
 """
+
 from __future__ import annotations
 
 from datetime import datetime
 from fastapi import HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 
 class InvalidParameterException(HTTPException):
-    """Query parameter format error (code 400002)."""
-
     def __init__(self, errors: list[dict]):
         super().__init__(status_code=400)
-        self.validation_errors = errors  # [{"field": ..., "message": ...}]
+        self.validation_errors = errors
 
 
 class ValidationException(HTTPException):
-    """Request body validation error (code 400001)."""
-
     def __init__(self, errors: list[dict]):
         super().__init__(status_code=422)
-        self.validation_errors = errors  # [{"field": ..., "messages": [...]}]
+        self.validation_errors = errors
 
 
-# Exception handlers
-async def invalid_parameter_handler(request: Request, exc: InvalidParameterException):
-    """Handle InvalidParameterException (code 400002)."""
+_STATUS_TITLES = {
+    400: "Bad Request",
+    401: "Unauthorized",
+    403: "Forbidden",
+    404: "Not Found",
+    409: "Conflict",
+    422: "Validation Failed",
+    500: "Internal Server Error",
+}
+
+
+def _error_response(
+    status_code: int,
+    errors: list[dict],
+    message: str | None = None,
+) -> JSONResponse:
     return JSONResponse(
-        status_code=400,
+        status_code=status_code,
         content={
-            "status": {"code": 400002, "message": "Invalid Parameters"},
-            "errors": [
-                {
-                    "code": "INVALID_PARAMETER_FORMAT",
-                    "title": "Invalid Parameter Format",
-                    "detail": e["message"],
-                    "source": {"parameter": e["field"]},
-                }
-                for e in exc.validation_errors
-            ],
-            "meta": {"timestamp": datetime.utcnow().isoformat()},
-        },
-    )
-
-
-async def validation_handler(request: Request, exc: ValidationException):
-    """Handle ValidationException (code 400001)."""
-    errors = []
-    for error in exc.validation_errors:
-        for message in error.get("messages", []):
-            errors.append(
-                {
-                    "code": "VALIDATION_ERROR",
-                    "title": "Invalid Input",
-                    "detail": message,
-                    "source": {"pointer": f'/data/attributes/{error["field"]}'},
-                }
-            )
-
-    return JSONResponse(
-        status_code=422,
-        content={
-            "status": {"code": 400001, "message": "Validation Failed"},
+            "status": {
+                "code": status_code,
+                "message": message or _STATUS_TITLES.get(status_code, "Error"),
+            },
             "errors": errors,
             "meta": {"timestamp": datetime.utcnow().isoformat()},
         },
     )
 
 
+async def invalid_parameter_handler(request: Request, exc: InvalidParameterException):
+    errors = [
+        {
+            "code": "INVALID_PARAMETER",
+            "title": "Invalid query parameter",
+            "detail": e["message"],
+            "source": {"parameter": e["field"]},
+        }
+        for e in exc.validation_errors
+    ]
+    return _error_response(400, errors)
+
+
+async def validation_handler(request: Request, exc: RequestValidationError):
+    errors = []
+    for error in exc.errors():
+        loc = error.get("loc", [])
+        field_parts = [str(p) for p in loc if isinstance(p, str) and p != "body"]
+        pointer = "/".join(field_parts) if field_parts else "body"
+
+        error_type = error.get("type", "")
+        field = field_parts[-1] if field_parts else "field"
+        msg = error.get("msg", "Invalid value")
+
+        if "string_too_short" in error_type:
+            min_len = (error.get("ctx") or {}).get("min_length", 1)
+            msg = f"Must be at least {min_len} character(s) long"
+        elif "string_too_long" in error_type:
+            max_len = (error.get("ctx") or {}).get("max_length", "")
+            msg = f"Must not exceed {max_len} character(s)"
+        elif "missing" in error_type:
+            msg = f"Field '{field}' is required"
+        elif "json_invalid" in error_type:
+            msg = "Invalid JSON format in request body"
+        elif "enum" in error_type:
+            allowed = (error.get("ctx") or {}).get("allowed_values", [])
+            msg = f"Must be one of: {', '.join(str(v) for v in allowed)}"
+        elif "uuid" in error_type:
+            msg = f"Must be a valid UUID"
+        elif "int_parsing" in error_type:
+            msg = f"Must be a valid integer"
+        elif "float_parsing" in error_type:
+            msg = f"Must be a valid number"
+
+        errors.append(
+            {
+                "code": "VALIDATION_ERROR",
+                "title": "Invalid input",
+                "detail": msg,
+                "source": {"pointer": f"/{pointer}"},
+            }
+        )
+
+    return _error_response(422, errors)
+
+
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTPException (404, 409, etc.)."""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "status": {"code": exc.status_code, "message": exc.detail},
-            "errors": [
-                {
-                    "code": exc.status_code,
-                    "title": "An error occurred",
-                    "detail": exc.detail,
-                }
-            ],
-            "meta": {"timestamp": datetime.utcnow().isoformat()},
-        },
+    status_code = exc.status_code
+    title = _STATUS_TITLES.get(status_code, "Error")
+    return _error_response(
+        status_code,
+        [
+            {
+                "code": f"HTTP_{status_code}",
+                "title": title,
+                "detail": exc.detail,
+            }
+        ],
     )
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    """Handle unhandled exceptions (500)."""
-    return JSONResponse(
-        status_code=500,
-        content={
-            "status": {"code": 500, "message": "Internal Server Error"},
-            "errors": [
-                {
-                    "code": "INTERNAL_SERVER_ERROR",
-                    "title": "An unexpected error occurred",
-                    "detail": "Please try again later or contact support.",
-                }
-            ],
-            "meta": {"timestamp": datetime.utcnow().isoformat()},
-        },
+    return _error_response(
+        500,
+        [
+            {
+                "code": "INTERNAL_ERROR",
+                "title": "Something went wrong",
+                "detail": "An unexpected error occurred while processing your request.",
+            }
+        ],
     )

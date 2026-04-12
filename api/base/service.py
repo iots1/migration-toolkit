@@ -46,43 +46,35 @@ class BaseService(ABC):
         pass
 
     def execute_db_operation(self, operation, *, operation_name: str = ""):
-        """
-        Wrap DB calls to catch PostgreSQL-specific errors.
-
-        Maps PostgreSQL error codes to HTTP exceptions:
-        - 23505: Unique violation → 409 Conflict
-        - 23503: FK violation → 400 Bad Request
-        - 23502: Not-null violation → 400 Bad Request
-        - 22P02: Invalid UUID → 400 Bad Request
-        - Other: → 500 Internal Server Error
-        """
         try:
             return operation()
         except IntegrityError as e:
             pg_code = getattr(e.orig, "pgcode", None)
-            detail = str(e.orig) if e.orig else str(e)
 
             error_map = {
-                "23505": (409, f"Duplicate record in {self.resource_type}. {detail}"),
-                "23503": (400, f"Invalid reference to another record. {detail}"),
-                "23502": (400, f"A required field was left empty. {detail}"),
-                "22P02": (400, f"Invalid format for a field. {detail}"),
+                "23505": (
+                    409,
+                    f"A {self.resource_type} record with this identifier already exists.",
+                ),
+                "23503": (400, "Referenced record does not exist or has been deleted."),
+                "23502": (400, "A required field is missing from the request."),
+                "22P02": (400, "Invalid format: expected a valid UUID or identifier."),
             }
 
             if pg_code in error_map:
                 status, msg = error_map[pg_code]
                 raise HTTPException(status_code=status, detail=msg)
 
-            ctx = f" in {operation_name}" if operation_name else ""
             raise HTTPException(
-                status_code=500, detail=f"Database error{ctx}: {detail}"
+                status_code=500,
+                detail=f"Database operation failed. Please try again.",
             )
         except HTTPException:
             raise
-        except Exception as e:
-            ctx = f" in {operation_name}" if operation_name else ""
+        except Exception:
             raise HTTPException(
-                status_code=500, detail=f"Unexpected error{ctx}: {str(e)}"
+                status_code=500,
+                detail=f"An unexpected error occurred. Please try again.",
             )
 
     def _apply_query_params(self, data: list[dict], params: QueryParams) -> list[dict]:

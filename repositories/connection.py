@@ -16,6 +16,7 @@ Usage:
         conn.execute(text("INSERT INTO datasources ..."))
         # Commits on success, rolls back on exception
 """
+
 from __future__ import annotations  # Enable modern type hints
 
 from contextlib import contextmanager
@@ -48,10 +49,10 @@ def get_engine() -> Engine:
         _engine = create_engine(
             url,
             poolclass=QueuePool,
-            pool_pre_ping=True,      # Detect stale connections
-            pool_size=5,             # Connection pool size
-            max_overflow=10,         # Additional connections when pool is full
-            echo=False,              # Set True for SQL query logging
+            pool_pre_ping=True,  # Detect stale connections
+            pool_size=5,  # Connection pool size
+            max_overflow=10,  # Additional connections when pool is full
+            echo=False,  # Set True for SQL query logging
         )
     return _engine
 
@@ -146,6 +147,6 @@ def test_connection() -> tuple[bool, str]:
         with get_connection() as conn:
             result = conn.execute(text("SELECT 1"))
             result.fetchone()
-        return True, "✅ Database connection successful"
+        return True, "Database connection successful"
     except Exception as e:
-        return False, f"❌ Database connection failed: {str(e)}"
+        return False, f"Database connection failed: {str(e)}"

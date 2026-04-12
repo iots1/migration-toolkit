@@ -7,7 +7,7 @@ routes automatically on an APIRouter.
 
 from fastapi import APIRouter, Depends, Request
 from api.base.service import BaseService
-from api.base.query_params import QueryParams
+from api.base.query_params import QueryParams, get_query_params
 from api.base import json_api
 
 
@@ -78,9 +78,11 @@ class BaseController:
         router = self.router
         svc = self.service
 
-        def find_all(request: Request, params: QueryParams = Depends()):
+        def find_all(request: Request, params: QueryParams = Depends(get_query_params)):
             result = svc.find_all(params)
-            pagination = svc._build_pagination_meta(result["total"], params)
+            pagination = svc._build_pagination_meta(
+                result["total"], params, result.get("total_records")
+            )
             return json_api.create_paginated_response(
                 svc.resource_type,
                 result["data"],

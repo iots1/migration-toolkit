@@ -71,6 +71,16 @@ def get_list() -> pd.DataFrame:
         )
 
 
+def count_all() -> int:
+    with get_transaction() as conn:
+        result = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM pipelines WHERE is_deleted = false AND deleted_at IS NULL"
+            )
+        )
+        return result.scalar()
+
+
 def get_all_list() -> list[dict]:
     """Get all pipelines as a list of dicts."""
     import json as _json

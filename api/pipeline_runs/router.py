@@ -1,10 +1,11 @@
 """Pipeline runs API router."""
+
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 from api.base import json_api
-from api.base.query_params import QueryParams
+from api.base.query_params import QueryParams, get_query_params
 from api.pipeline_runs.service import PipelineRunsService
 from api.pipeline_runs.schemas import (
     CreatePipelineRunSchema,
@@ -27,9 +28,11 @@ def get_pipeline_runs_router():
         )
 
     @router.get("/")
-    def find_all(request: Request, params: QueryParams = Depends()):
+    def find_all(request: Request, params: QueryParams = Depends(get_query_params)):
         result = service.find_all(params)
-        pagination = service._build_pagination_meta(result["total"], params)
+        pagination = service._build_pagination_meta(
+            result["total"], params, result.get("total_records")
+        )
         return json_api.create_paginated_response(
             service.resource_type,
             result["data"],
@@ -40,7 +43,9 @@ def get_pipeline_runs_router():
     @router.get("/{id}")
     def find_by_id(id: str, request: Request):
         item = service.find_by_id(id)
-        return json_api.create_success_response(service.resource_type, item, str(request.url.path))
+        return json_api.create_success_response(
+            service.resource_type, item, str(request.url.path)
+        )
 
     @router.post("/", status_code=201)
     def create(data: CreatePipelineRunSchema, request: Request):
@@ -54,6 +59,8 @@ def get_pipeline_runs_router():
     @router.put("/{id}")
     def update(id: str, data: UpdatePipelineRunSchema, request: Request):
         updated = service.update(id, data.model_dump(exclude_unset=True))
-        return json_api.create_success_response(service.resource_type, updated, str(request.url.path))
+        return json_api.create_success_response(
+            service.resource_type, updated, str(request.url.path)
+        )
 
     return router

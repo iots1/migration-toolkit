@@ -19,6 +19,7 @@ class DatasourcesService(BaseService):
 
     def find_all(self, params: QueryParams) -> dict:
         """List all datasources with pagination."""
+        total_records = self.execute_db_operation(lambda: datasource_repo.count_all())
         data = self.execute_db_operation(lambda: datasource_repo.get_all_list())
         data = self._apply_query_params(data, params)
         data = self._sanitize_list(data)
@@ -27,6 +28,7 @@ class DatasourcesService(BaseService):
         return {
             "data": page_data,
             "total": total,
+            "total_records": total_records,
             "page": params.page,
             "page_size": params.limit,
             "total_pages": total_pages,

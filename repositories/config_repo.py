@@ -89,7 +89,11 @@ def save(record: ConfigRecord) -> tuple[bool, str]:
                     "INSERT INTO config_histories (config_id, version, json_data, created_at)"
                     " VALUES (:config_id, :version, :json_data, CURRENT_TIMESTAMP)"
                 ),
-                {"config_id": config_id, "version": next_version, "json_data": json_str},
+                {
+                    "config_id": config_id,
+                    "version": next_version,
+                    "json_data": json_str,
+                },
             )
         return True, f"Saved config '{record.config_name}' (version {next_version})"
     except Exception as e:
@@ -108,6 +112,16 @@ def get_list():
             if pd.api.types.is_string_dtype(df[col]):
                 df[col] = np.array(df[col].fillna("").tolist(), dtype=object)
         return df
+
+
+def count_all() -> int:
+    with get_transaction() as conn:
+        result = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM configs WHERE is_deleted = false AND deleted_at IS NULL"
+            )
+        )
+        return result.scalar()
 
 
 def get_all_list() -> list[dict]:

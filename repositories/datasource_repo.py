@@ -36,6 +36,16 @@ def get_all() -> pd.DataFrame:
         return df
 
 
+def count_all() -> int:
+    with get_transaction() as conn:
+        result = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM datasources WHERE is_deleted = false AND deleted_at IS NULL"
+            )
+        )
+        return result.scalar()
+
+
 def get_all_list() -> list[dict]:
     """Get all datasources as a list of dicts (includes password for internal use)."""
     with get_transaction() as conn:

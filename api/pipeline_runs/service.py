@@ -16,10 +16,21 @@ class PipelineRunsService(BaseService):
 
     resource_type = "pipeline-runs"
     allowed_fields = [
-        "id", "pipeline_id", "status",
-        "started_at", "completed_at", "steps_json", "error_message",
-        "created_at", "created_by", "updated_at", "updated_by",
-        "is_deleted", "deleted_at", "deleted_by", "deleted_reason",
+        "id",
+        "pipeline_id",
+        "status",
+        "started_at",
+        "completed_at",
+        "steps_json",
+        "error_message",
+        "created_at",
+        "created_by",
+        "updated_at",
+        "updated_by",
+        "is_deleted",
+        "deleted_at",
+        "deleted_by",
+        "deleted_reason",
     ]
 
     def find_all(self, params: QueryParams) -> dict:
@@ -29,18 +40,21 @@ class PipelineRunsService(BaseService):
             if params.offset is not None
             else (params.page - 1) * params.limit
         )
-        total = self.execute_db_operation(lambda: pipeline_run_repo.count_all())
+        total_records = self.execute_db_operation(lambda: pipeline_run_repo.count_all())
         data = self.execute_db_operation(
             lambda: pipeline_run_repo.get_all(limit=params.limit, offset=offset)
         )
 
         data = self._apply_query_params(data, params)
         data = self._sanitize_list(data)
-        total_pages = max(1, -(-total // params.limit)) if total > 0 else 1
+        total_pages = (
+            max(1, -(-total_records // params.limit)) if total_records > 0 else 1
+        )
 
         return {
             "data": data,
-            "total": total,
+            "total": len(data),
+            "total_records": total_records,
             "page": params.page,
             "page_size": params.limit,
             "total_pages": total_pages,

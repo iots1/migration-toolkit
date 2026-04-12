@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 from api.base.query_params import QueryParams
+from api.base.sql_query_builder import SqlQueryBuilder
 
 
 class BaseService(ABC):
@@ -78,156 +79,12 @@ class BaseService(ABC):
             )
 
     def _apply_query_params(self, data: list[dict], params: QueryParams) -> list[dict]:
-        """Apply filtering, sorting, and field selection from QueryParams."""
-        if params.fields:
-            field_set = {f.strip() for f in params.fields.split(",")}
-            data = [{k: v for k, v in item.items() if k in field_set} for item in data]
-
-        if params.filter:
-            data = self._apply_filters(data, params.filter)
-
-        if params.or_:
-            or_matches = self._apply_filters(data, params.or_)
-            data = [item for item in data if item in or_matches]
-
-        if params.s:
-            data = self._apply_search(data, params.s)
-
-        if params.sort:
-            data = self._apply_sort(data, params.sort)
-
-        if params.exclude_ids:
-            exclude_set = {eid.strip() for eid in params.exclude_ids.split(",")}
-            data = [item for item in data if str(item.get("id", "")) not in exclude_set]
-
-        return data
-
-    def _apply_filters(self, data: list[dict], filters: list[str]) -> list[dict]:
-        """Apply filter conditions in format 'field||$operator||value'."""
-        import re
-
-        pattern = re.compile(r"^(\w+)\|\|\$(\w+)\|\|(.+)$")
-        result = list(data)
-
-        for f in filters:
-            match = pattern.match(f)
-            if not match:
-                continue
-            field, operator, value = match.group(1), match.group(2), match.group(3)
-
-            filtered = []
-            for item in result:
-                item_val = item.get(field)
-                if item_val is None:
-                    continue
-
-                if operator == "eq" and str(item_val) == value:
-                    filtered.append(item)
-                elif operator == "ne" and str(item_val) != value:
-                    filtered.append(item)
-                elif operator == "contains" and value.lower() in str(item_val).lower():
-                    filtered.append(item)
-                elif operator == "gt" and str(item_val) > value:
-                    filtered.append(item)
-                elif operator == "gte" and str(item_val) >= value:
-                    filtered.append(item)
-                elif operator == "lt" and str(item_val) < value:
-                    filtered.append(item)
-                elif operator == "lte" and str(item_val) <= value:
-                    filtered.append(item)
-                else:
-                    filtered.append(item)
-
-            result = filtered
-
-        return result
-
-    def _apply_search(self, data: list[dict], search_json: str) -> list[dict]:
-        """Apply search conditions from JSON string."""
-        import json
-
-        try:
-            conditions = json.loads(search_json)
-            if not isinstance(conditions, dict):
-                return data
-        except (json.JSONDecodeError, TypeError):
-            return data
-
-        result = []
-        for item in data:
-            match = True
-            for field, condition in conditions.items():
-                item_val = item.get(field)
-                if item_val is None:
-                    match = False
-                    break
-                if isinstance(condition, dict):
-                    for op, val in condition.items():
-                        if op == ">" and not (str(item_val) > str(val)):
-                            match = False
-                        elif op == ">=" and not (str(item_val) >= str(val)):
-                            match = False
-                        elif op == "<" and not (str(item_val) < str(val)):
-                            match = False
-                        elif op == "<=" and not (str(item_val) <= str(val)):
-                            match = False
-                        elif op == "$eq" and str(item_val) != str(val):
-                            match = False
-                        elif op == "$ne" and str(item_val) == str(val):
-                            match = False
-                        elif (
-                            op == "$contains"
-                            and str(val).lower() not in str(item_val).lower()
-                        ):
-                            match = False
-                        if not match:
-                            break
-                elif str(condition).lower() not in str(item_val).lower():
-                    match = False
-                if not match:
-                    break
-            if match:
-                result.append(item)
-
-        return result
-
-    def _apply_sort(self, data: list[dict], sort_str: str) -> list[dict]:
-        """Apply sorting from 'field:direction[,field2:direction2]' format."""
-        sort_fields = []
-        for part in sort_str.split(","):
-            part = part.strip()
-            if ":" in part:
-                field, direction = part.rsplit(":", 1)
-            else:
-                field, direction = part, "asc"
-            sort_fields.append((field.strip(), direction.strip().lower() == "asc"))
-
-        def sort_key(item):
-            keys = []
-            for field, ascending in sort_fields:
-                val = item.get(field, "")
-                if val is None:
-                    val = ""
-                keys.append((str(val), ascending))
-            return keys
-
-        return sorted(data, key=sort_key)
+        return SqlQueryBuilder.build(params).apply(data)
 
     def _paginate(
         self, data: list[dict], params: QueryParams
     ) -> tuple[list[dict], int, int]:
-        """Apply pagination and return (page_data, total, total_pages)."""
-        total = len(data)
-        if params.ignore_limit:
-            return data, total, 1
-
-        limit = params.limit
-        page = params.page
-        total_pages = max(1, -(-total // limit)) if total > 0 else 1
-        offset = params.offset if params.offset is not None else (page - 1) * limit
-
-        page_data = data[offset : offset + limit]
-        return page_data, total, total_pages
+        return SqlQueryBuilder.paginate(data, params)
 
     # --- Shared helpers ---
 
@@ -259,14 +116,15 @@ class BaseService(ABC):
         if not ok:
             raise HTTPException(status_code=400, detail=message)
 
-    def _build_pagination_meta(self, total: int, params: QueryParams) -> dict:
-        """Build pagination metadata."""
+    def _build_pagination_meta(
+        self, total: int, params: QueryParams, total_records: int | None = None
+    ) -> dict:
         page_size = params.limit
         total_pages = max(1, math.ceil(total / page_size))
         return {
             "page": params.page,
             "page_size": page_size,
             "total": total,
-            "total_records": total,
+            "total_records": total_records if total_records is not None else total,
             "total_pages": total_pages,
         }

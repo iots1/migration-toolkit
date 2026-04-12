@@ -14,6 +14,18 @@ import streamlit as st
 from config import DB_TYPES
 from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
+_CHARSET_PRESETS = [
+    ("", "Default (driver default)"),
+    ("utf8mb4", "utf8mb4 — Modern UTF-8, MySQL 5.5.3+"),
+    ("utf8", "utf8 — Standard UTF-8"),
+    ("tis620", "tis620 — Thai TIS-620 (MySQL)"),
+    ("cp874", "cp874 — Windows Thai (MSSQL/MySQL)"),
+    ("TIS-620", "TIS-620 — Thai legacy (MSSQL pymssql)"),
+    ("latin1", "latin1 — Latin-1 / ISO-8859-1"),
+]
+_CHARSET_VALUES = [v for v, _ in _CHARSET_PRESETS]
+_CHARSET_LABELS = [lbl for _, lbl in _CHARSET_PRESETS]
+
 from views.components.shared.styles import inject_global_css
 from views.components.shared.dialogs import (
     generic_confirm_dialog,
@@ -56,20 +68,30 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
     # --- Grid ---
     with st.container():
         if not datasources_df.empty:
-            gb = GridOptionsBuilder.from_dataframe(datasources_df)
+            display_df = datasources_df.copy()
+            if "charset" in display_df.columns:
+                display_df["charset"] = display_df["charset"].fillna("").astype(str)
+
+            gb = GridOptionsBuilder.from_dataframe(display_df)
             gb.configure_selection("single", use_checkbox=False)
-            if "id" in datasources_df.columns:
+            if "id" in display_df.columns:
                 gb.configure_column("id", hide=True)
             gb.configure_column(
                 "name", header_name="Name", flex=1, filter=True, sortable=True
             )
-            gb.configure_column("db_type", header_name="Type", width=120)
+            gb.configure_column("db_type", header_name="Type", width=110)
             gb.configure_column("host", header_name="Host", width=150)
-            gb.configure_column("dbname", header_name="Database", width=150)
-            gb.configure_column("username", header_name="User", width=120)
+            gb.configure_column("dbname", header_name="Database", width=130)
+            gb.configure_column("username", header_name="User", width=110)
+            gb.configure_column(
+                "charset",
+                header_name="Charset",
+                width=110,
+                cellStyle={"color": "#6c757d", "fontStyle": "italic"},
+            )
 
             grid_response = AgGrid(
-                datasources_df,
+                display_df,
                 gridOptions=gb.build(),
                 data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
                 update_mode=GridUpdateMode.SELECTION_CHANGED,
@@ -106,14 +128,24 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
                 key="new_ds_type",
             )
 
-            c3, c4 = st.columns(2)
+            c3, c4, c5 = st.columns([3, 2, 2])
             ds_host = c3.text_input("Host", key="new_ds_host")
             ds_port = c4.text_input("Port (Optional)", key="new_ds_port")
+            _saved_charset = form_state.get("new_ds_charset", "")
+            _preset_idx = _CHARSET_VALUES.index(_saved_charset) if _saved_charset in _CHARSET_VALUES else 0
+            _sel_label = c5.selectbox(
+                "Charset",
+                options=_CHARSET_LABELS,
+                index=_preset_idx,
+                help="Character encoding for the DB connection. Use 'tis620' for Thai legacy HIS databases.",
+                key="_charset_selectbox",
+            )
+            ds_charset = _CHARSET_VALUES[_CHARSET_LABELS.index(_sel_label)]
 
-            c5, c6, c7 = st.columns(3)
-            ds_db = c5.text_input("DB Name", key="new_ds_db")
-            ds_user = c6.text_input("Username", key="new_ds_user")
-            ds_pass = c7.text_input("Password", type="password", key="new_ds_pass")
+            c6, c7, c8 = st.columns(3)
+            ds_db = c6.text_input("DB Name", key="new_ds_db")
+            ds_user = c7.text_input("Username", key="new_ds_user")
+            ds_pass = c8.text_input("Password", type="password", key="new_ds_pass")
 
             st.divider()
 
@@ -133,6 +165,7 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
                             ds_db,
                             ds_user,
                             ds_pass,
+                            ds_charset,
                         )
                         if not ok:
                             st.error(msg)
@@ -166,6 +199,7 @@ def _render_datasource_tab(datasources_df, form_state: dict, callbacks: dict) ->
                             ds_db,
                             ds_user,
                             ds_pass,
+                            ds_charset,
                         )
                         if not ok:
                             st.error(msg)

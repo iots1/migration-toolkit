@@ -11,6 +11,18 @@ from __future__ import annotations  # Enable modern type hints
 import streamlit as st
 from services.datasource_repository import DatasourceRepository as DSRepo
 
+_CHARSET_PRESETS = [
+    ("", "Default (driver default)"),
+    ("utf8mb4", "utf8mb4 — Modern UTF-8"),
+    ("utf8", "utf8 — Standard UTF-8"),
+    ("tis620", "tis620 — Thai TIS-620 (MySQL)"),
+    ("cp874", "cp874 — Windows Thai (MSSQL/MySQL)"),
+    ("TIS-620", "TIS-620 — Thai legacy (MSSQL pymssql)"),
+    ("latin1", "latin1 — Latin-1"),
+]
+_CHARSET_VALUES = [v for v, _ in _CHARSET_PRESETS]
+_CHARSET_LABELS = [lbl for _, lbl in _CHARSET_PRESETS]
+
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _cached_get_tables(ds_name: str):
@@ -158,15 +170,41 @@ def render_config_metadata(
                 not st.session_state.mapper_show_compare
             )
 
-    # Row 2: Batch Size
-    batch_size = st.number_input(
-        "Batch Size (records per batch)",
-        min_value=10,
-        max_value=10000,
-        value=1000,
-        step=10,
-        help="Number of records to process in each batch during migration",
-    )
-    st.session_state.mapper_batch_size = batch_size
+    # Row 2: Batch Size + Source Charset override
+    c_batch, c_charset = st.columns([1, 1])
+    with c_batch:
+        batch_size = st.number_input(
+            "Batch Size (records per batch)",
+            min_value=10,
+            max_value=10000,
+            value=st.session_state.get("mapper_batch_size", 1000),
+            step=10,
+            help="Number of records to process in each batch during migration",
+        )
+        st.session_state.mapper_batch_size = batch_size
+
+    with c_charset:
+        # Pre-populate from stored datasource charset, fallback to session value
+        _stored_charset = ""
+        if source_db_input and source_db_input != "-- Select Datasource --":
+            _ds = DSRepo.get_by_name(source_db_input)
+            if _ds:
+                _stored_charset = _ds.get("charset") or ""
+
+        _current_charset = st.session_state.get("mapper_source_charset", _stored_charset)
+        _preset_idx = (
+            _CHARSET_VALUES.index(_current_charset)
+            if _current_charset in _CHARSET_VALUES
+            else 0
+        )
+        _sel_label = st.selectbox(
+            "Source Charset",
+            options=_CHARSET_LABELS,
+            index=_preset_idx,
+            help="Character encoding for the source DB connection. Overrides the datasource setting for this session.",
+            key="mapper_charset_selectbox",
+        )
+        _charset_val = _CHARSET_VALUES[_CHARSET_LABELS.index(_sel_label)]
+        st.session_state.mapper_source_charset = _charset_val
 
     return current_config_name, is_edit_existing

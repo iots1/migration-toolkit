@@ -113,6 +113,13 @@ def create_sqlalchemy_engine(
             raise ValueError(f"Unsupported DB Type for Engine: {db_type}")
 
         # Create Engine with pool settings
+        # pool_recycle: Recycle connections older than 30 minutes (before DB firewall timeout)
+        # This is safe for long-running migrations (hours) because we don't close active connections
+        if "pool_recycle" not in engine_kwargs:
+            engine_kwargs["pool_recycle"] = 1800  # 30 minutes
+        if "pool_pre_ping" not in engine_kwargs:
+            engine_kwargs["pool_pre_ping"] = False  # Trust pool_recycle instead of SELECT 1
+
         engine = create_engine(connection_url, **engine_kwargs)
         return engine
 

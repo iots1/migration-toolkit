@@ -61,6 +61,7 @@ _DEFAULTS: dict = {
     "mapper_generate_sql_text": "",
     "_mapper_condition_widget": "",
     "_mapper_lookup_widget": "",
+    "mapper_source_charset": "",
 }
 
 
@@ -351,12 +352,20 @@ def _render_condition_lookup_sql(
                 st.warning("Connect a source datasource to execute this query.")
             else:
                 with st.spinner("Executing preview query..."):
+                    _exec_charset = st.session_state.get("mapper_source_charset") or None
                     ok, err_msg, result_df = execute_preview_sql(
-                        source_db_display, edited_sql
+                        source_db_display, edited_sql, charset=_exec_charset
                     )
                 if ok and result_df is not None:
+                    from services.encoding_helper import fix_thai_encoding
+                    result_df = fix_thai_encoding(result_df)
                     st.success(f"Query OK — {len(result_df)} rows returned")
-                    st.dataframe(result_df, use_container_width=True)
+                    st.markdown(
+                        "<div style=\"font-family:'Sarabun','Noto Sans Thai',sans-serif;\">"
+                        + result_df.to_html(index=False, border=0, classes="thai-table")
+                        + "</div>",
+                        unsafe_allow_html=True,
+                    )
 
                     new_cols = result_df.columns.tolist()
                     existing_cols = set(

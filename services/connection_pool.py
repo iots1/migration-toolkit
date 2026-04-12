@@ -30,14 +30,14 @@ class DatabaseConnectionPool:
         return cls._instance
 
     @staticmethod
-    def _generate_key(db_type: str, host: str, port: str, db_name: str, user: str) -> str:
+    def _generate_key(db_type: str, host: str, port: str, db_name: str, user: str, charset: str | None = None) -> str:
         """Generate unique key for connection based on connection parameters."""
-        key_data = f"{db_type}:{host}:{port}:{db_name}:{user}"
+        key_data = f"{db_type}:{host}:{port}:{db_name}:{user}:{charset or ''}"
         return hashlib.md5(key_data.encode()).hexdigest()
 
-    def get_connection(self, db_type: str, host: str, port: str, db_name: str, user: str, password: str):
+    def get_connection(self, db_type: str, host: str, port: str, db_name: str, user: str, password: str, charset: str | None = None):
         """Get or create a database connection."""
-        conn_key = self._generate_key(db_type, host, port, db_name, user)
+        conn_key = self._generate_key(db_type, host, port, db_name, user, charset)
 
         # Check existing connection
         if conn_key in self._connections:
@@ -52,7 +52,7 @@ class DatabaseConnectionPool:
                     del self._connections[conn_key]
 
         # Create new connection
-        conn = self._create_connection(db_type, host, port, db_name, user, password)
+        conn = self._create_connection(db_type, host, port, db_name, user, password, charset)
         self._connections[conn_key] = conn
         return conn, conn.cursor()
 
@@ -67,7 +67,7 @@ class DatabaseConnectionPool:
         except:
             return False
 
-    def _create_connection(self, db_type: str, host: str, port: str, db_name: str, user: str, password: str):
+    def _create_connection(self, db_type: str, host: str, port: str, db_name: str, user: str, password: str, charset: str | None = None):
         """Create a new database connection (Low-level drivers).
 
         Supports MySQL, PostgreSQL, and Microsoft SQL Server.
@@ -84,7 +84,7 @@ class DatabaseConnectionPool:
                 connect_args = {
                     "host": host, "user": user, "password": password,
                     "database": db_name, "connect_timeout": 5, "autocommit": True,
-                    "charset": "utf8mb4"
+                    "charset": charset if charset else "utf8mb4"
                 }
                 if port_int: connect_args["port"] = port_int
                 return pymysql.connect(**connect_args)
@@ -96,7 +96,8 @@ class DatabaseConnectionPool:
                 import pymssql
                 connect_args = {
                     "server": host, "user": user, "password": password,
-                    "database": db_name, "timeout": 5, "autocommit": True
+                    "database": db_name, "timeout": 5, "autocommit": True,
+                    "charset": charset if charset else "utf8",
                 }
                 if port_int: connect_args["port"] = port_int
                 return pymssql.connect(**connect_args)
@@ -119,9 +120,9 @@ class DatabaseConnectionPool:
 
         raise ValueError(f"Unknown Database Type: {db_type}")
 
-    def close_connection(self, db_type: str, host: str, port: str, db_name: str, user: str):
+    def close_connection(self, db_type: str, host: str, port: str, db_name: str, user: str, charset: str | None = None):
         """Close a specific connection in the pool."""
-        conn_key = self._generate_key(db_type, host, port, db_name, user)
+        conn_key = self._generate_key(db_type, host, port, db_name, user, charset)
         if conn_key in self._connections:
             try:
                 self._connections[conn_key].close()

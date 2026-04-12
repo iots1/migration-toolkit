@@ -21,11 +21,11 @@ def get_all() -> pd.DataFrame:
 
     Returns:
         pd.DataFrame: All datasources with columns:
-            [id, name, db_type, host, port, dbname, username]
+            [id, name, db_type, host, port, dbname, username, charset]
     """
     with get_transaction() as conn:
         df = pd.read_sql(
-            "SELECT id, name, db_type, host, port, dbname, username FROM datasources WHERE is_deleted = false ORDER BY name",
+            "SELECT id, name, db_type, host, port, dbname, username, charset FROM datasources WHERE is_deleted = false ORDER BY name",
             conn,
         )
         import numpy as np
@@ -41,7 +41,7 @@ def get_all_list() -> list[dict]:
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id, name, db_type, host, port, dbname, username, password FROM datasources WHERE is_deleted = false ORDER BY name"
+                "SELECT id, name, db_type, host, port, dbname, username, password, charset FROM datasources WHERE is_deleted = false ORDER BY name"
             )
         )
         return [dict(zip(result.keys(), row)) for row in result.fetchall()]
@@ -67,7 +67,7 @@ def get_by_id(ds_id) -> dict | None:
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id, name, db_type, host, port, dbname, username, password FROM datasources WHERE id = :id AND is_deleted = false"
+                "SELECT id, name, db_type, host, port, dbname, username, password, charset FROM datasources WHERE id = :id AND is_deleted = false"
             ),
             {"id": ds_id},
         )
@@ -96,7 +96,7 @@ def get_by_name(name: str) -> dict | None:
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                "SELECT id, name, db_type, host, port, dbname, username, password FROM datasources WHERE name = :name AND is_deleted = false"
+                "SELECT id, name, db_type, host, port, dbname, username, password, charset FROM datasources WHERE name = :name AND is_deleted = false"
             ),
             {"name": name},
         )
@@ -117,13 +117,14 @@ def save(record: DatasourceRecord) -> tuple[bool, str]:
         "dbname": record.dbname,
         "username": record.username,
         "password": record.password,
+        "charset": record.charset,
     }
     try:
         with get_transaction() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO datasources (name, db_type, host, port, dbname, username, password)
-                    VALUES (:name, :db_type, :host, :port, :dbname, :username, :password)
+                    INSERT INTO datasources (name, db_type, host, port, dbname, username, password, charset)
+                    VALUES (:name, :db_type, :host, :port, :dbname, :username, :password, :charset)
                 """),
                 col_params,
             )
@@ -146,6 +147,7 @@ def update(ds_id, record: DatasourceRecord) -> tuple[bool, str]:
         "dbname": record.dbname,
         "username": record.username,
         "password": record.password,
+        "charset": record.charset,
     }
     try:
         with get_transaction() as conn:
@@ -159,6 +161,7 @@ def update(ds_id, record: DatasourceRecord) -> tuple[bool, str]:
                         dbname = :dbname,
                         username = :username,
                         password = :password,
+                        charset = :charset,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE id = :id
                 """),

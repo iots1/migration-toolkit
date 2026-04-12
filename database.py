@@ -15,7 +15,11 @@ import uuid
 from typing import Any
 
 from models.datasource import DatasourceRecord
-from models.pipeline_config import PipelineRecord, PipelineRunRecord, PipelineRunUpdateRecord
+from models.pipeline_config import (
+    PipelineRecord,
+    PipelineRunRecord,
+    PipelineRunUpdateRecord,
+)
 from models.migration_config import ConfigRecord
 
 # Import the new PostgreSQL repositories
@@ -79,12 +83,21 @@ def save_datasource(
     dbname: str,
     username: str,
     password: str,
+    charset: str | None = None,
 ) -> tuple[bool, str]:
     """Save a new datasource. Deprecated: use datasource_repo.save(DatasourceRecord)."""
-    return _save_ds(DatasourceRecord(
-        name=name, db_type=db_type, host=host, port=port,
-        dbname=dbname, username=username, password=password,
-    ))
+    return _save_ds(
+        DatasourceRecord(
+            name=name,
+            db_type=db_type,
+            host=host,
+            port=port,
+            dbname=dbname,
+            username=username,
+            password=password,
+            charset=charset,
+        )
+    )
 
 
 def update_datasource(
@@ -96,12 +109,22 @@ def update_datasource(
     dbname: str,
     username: str,
     password: str,
+    charset: str | None = None,
 ) -> tuple[bool, str]:
     """Update an existing datasource. Deprecated: use datasource_repo.update(id, DatasourceRecord)."""
-    return _update_ds(ds_id, DatasourceRecord(
-        name=name, db_type=db_type, host=host, port=port,
-        dbname=dbname, username=username, password=password,
-    ))
+    return _update_ds(
+        ds_id,
+        DatasourceRecord(
+            name=name,
+            db_type=db_type,
+            host=host,
+            port=port,
+            dbname=dbname,
+            username=username,
+            password=password,
+            charset=charset,
+        ),
+    )
 
 
 def delete_datasource(ds_id) -> None:
@@ -201,10 +224,14 @@ def save_pipeline(
     error_strategy: str,
 ) -> tuple[bool, str]:
     """Save a new pipeline. Deprecated: use pipeline_repo.save(PipelineRecord)."""
-    return _save_pipeline(PipelineRecord(
-        name=name, description=description, json_data=json_data,
-        error_strategy=error_strategy,
-    ))
+    return _save_pipeline(
+        PipelineRecord(
+            name=name,
+            description=description,
+            json_data=json_data,
+            error_strategy=error_strategy,
+        )
+    )
 
 
 def delete_pipeline(name: str) -> tuple[bool, str]:
@@ -224,11 +251,15 @@ def get_pipeline_runs(pipeline_id: str) -> pd.DataFrame:
 
 def save_pipeline_run(pipeline_id: str, status: str, steps_json: str) -> str:
     """Save a new pipeline run. Deprecated: use pipeline_run_repo.save(PipelineRunRecord)."""
-    return _save_pipeline_run(PipelineRunRecord(
-        pipeline_id=uuid.UUID(pipeline_id) if isinstance(pipeline_id, str) else pipeline_id,
-        status=status,
-        steps_json=steps_json,
-    ))
+    return _save_pipeline_run(
+        PipelineRunRecord(
+            pipeline_id=uuid.UUID(pipeline_id)
+            if isinstance(pipeline_id, str)
+            else pipeline_id,
+            status=status,
+            steps_json=steps_json,
+        )
+    )
 
 
 def update_pipeline_run(

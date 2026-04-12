@@ -440,10 +440,10 @@ def build_preview_sql(config_data: dict, limit: int = 1000, db_type: str = "") -
 
 
 def execute_preview_sql(
-    datasource_name: str, sql: str
+    datasource_name: str, sql: str, charset: str | None = None
 ) -> tuple[bool, str, "pd.DataFrame | None"]:
     try:
-        engine = DSRepo.get_engine(datasource_name)
+        engine = DSRepo.get_engine(datasource_name, charset=charset or None)
         with engine.connect() as conn:
             df = pd.read_sql(text(sql), conn)
         return True, "", df

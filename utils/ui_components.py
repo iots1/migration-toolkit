@@ -5,7 +5,42 @@ def inject_global_css():
     """Injects custom CSS for buttons and dialogs globally."""
     st.markdown("""
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Sarabun:wght@400;500&display=swap');
+
         .block-container {padding-top: 1rem;}
+
+        /* Thai font support for data editor / dataframe */
+        [data-testid="stDataFrame"] *,
+        [data-testid="stDataEditor"] *,
+        .dvn-scroller *,
+        .gdg-cell,
+        .gdg-growing-entry,
+        canvas {
+            font-family: 'Sarabun', 'Noto Sans Thai', sans-serif !important;
+        }
+
+        /* Thai HTML table (used in SQL preview result) */
+        table.thai-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-family: 'Sarabun', 'Noto Sans Thai', sans-serif;
+            font-size: 0.9rem;
+        }
+        table.thai-table th {
+            background: #f0f2f6;
+            padding: 6px 10px;
+            text-align: left;
+            border-bottom: 2px solid #d0d3da;
+            white-space: nowrap;
+        }
+        table.thai-table td {
+            padding: 5px 10px;
+            border-bottom: 1px solid #e8eaed;
+            word-break: break-word;
+        }
+        table.thai-table tr:hover td {
+            background: #f7f8fc;
+        }
         
         /* --- 1. Global Primary Button (Save/Add) -> Green Filled --- */
         div[data-testid="stButton"] > button[kind="primary"] {

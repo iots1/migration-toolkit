@@ -6,6 +6,7 @@ DatasourceRecord: write model — single source of truth for datasources table c
                   Pass to datasource_repo.save() / update() instead of flat kwargs.
                   Adding a new column = add the field here only.
 """
+
 from __future__ import annotations
 from dataclasses import dataclass
 
@@ -20,6 +21,7 @@ class Datasource:
     dbname: str
     username: str
     password: str
+    charset: str | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "Datasource":
@@ -32,6 +34,7 @@ class Datasource:
             dbname=d.get("dbname", ""),
             username=d.get("username", ""),
             password=d.get("password", ""),
+            charset=d.get("charset"),
         )
 
 
@@ -52,3 +55,4 @@ class DatasourceRecord:
     dbname: str = ""
     username: str = ""
     password: str = ""
+    charset: str | None = None

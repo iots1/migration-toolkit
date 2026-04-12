@@ -43,7 +43,8 @@ def get_tables_from_datasource(
     db_name: str,
     user: str,
     password: str,
-    schema: str | None = None
+    schema: str | None = None,
+    charset: str | None = None,
 ) -> tuple[bool, list[str] | str]:
     """
     Retrieves list of tables from a datasource.
@@ -56,12 +57,13 @@ def get_tables_from_datasource(
         user: Database user
         password: Database password
         schema: Optional schema name (defaults: MySQL=None, PostgreSQL='public', MSSQL='dbo')
+        charset: Optional charset override (e.g. "tis620" for Thai legacy MySQL DBs)
 
     Returns:
         Tuple of (success: bool, tables: list[str] | error_message: str)
     """
     try:
-        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
+        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password, charset)
 
         if db_type == "MySQL":
             cursor.execute("SHOW TABLES")
@@ -96,7 +98,8 @@ def get_columns_from_table(
     user: str,
     password: str,
     table_name: str,
-    schema: str | None = None
+    schema: str | None = None,
+    charset: str | None = None,
 ) -> tuple[bool, list[dict] | str]:
     """
     Retrieves column information from a specific table, including nullable status and default values.
@@ -110,13 +113,14 @@ def get_columns_from_table(
         password: Database password
         table_name: Table name to inspect
         schema: Optional schema name
+        charset: Optional charset override (e.g. "tis620" for Thai legacy MySQL DBs)
 
     Returns:
         Tuple of (success: bool, columns: list[dict] | error_message: str)
         Each column dict has keys: name, type, is_nullable, column_default
     """
     try:
-        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
+        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password, charset)
         safe_table = _safe_id(table_name)
 
         if db_type == "MySQL":

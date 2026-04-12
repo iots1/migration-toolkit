@@ -27,6 +27,7 @@ _DEFAULTS: dict = {
     "new_ds_db": "",
     "new_ds_user": "",
     "new_ds_pass": "",
+    "new_ds_charset": "",
     "ds_form_type_index": 0,
     "is_edit_mode": False,
     "edit_ds_id": None,
@@ -54,6 +55,7 @@ def run() -> None:
         "edit_ds_id": PageState.get("edit_ds_id"),
         "ds_form_type_index": PageState.get("ds_form_type_index"),
         "ds_grid_key": PageState.get("ds_grid_key"),
+        "new_ds_charset": PageState.get("new_ds_charset", ""),
     }
 
     callbacks = {
@@ -82,6 +84,7 @@ def _reset_to_new_mode() -> None:
     PageState.set("new_ds_db", "")
     PageState.set("new_ds_user", "")
     PageState.set("new_ds_pass", "")
+    PageState.set("new_ds_charset", "")
     PageState.set("ds_form_type_index", 0)
     PageState.set("is_edit_mode", False)
     PageState.set("edit_ds_id", None)
@@ -105,6 +108,7 @@ def _on_row_select(ds_id) -> None:
     PageState.set("new_ds_db", full_data["dbname"])
     PageState.set("new_ds_user", full_data["username"])
     PageState.set("new_ds_pass", full_data["password"])
+    PageState.set("new_ds_charset", full_data.get("charset", ""))
     PageState.set("is_edit_mode", True)
     PageState.set("edit_ds_id", ds_id)
     st.rerun()
@@ -118,9 +122,12 @@ def _on_save_new(
     dbname: str,
     username: str,
     password: str,
+    charset: str | None = None,
 ) -> tuple[bool, str]:
     """Create a new datasource. Reruns on success; returns (False, msg) on failure."""
-    ok, msg = db.save_datasource(name, db_type, host, port, dbname, username, password)
+    ok, msg = db.save_datasource(
+        name, db_type, host, port, dbname, username, password, charset
+    )
     if ok:
         PageState.set("trigger_ds_reset", True)
         st.rerun()
@@ -136,10 +143,11 @@ def _on_update(
     dbname: str,
     username: str,
     password: str,
+    charset: str | None = None,
 ) -> tuple[bool, str]:
     """Update an existing datasource. Reruns on success; returns (False, msg) on failure."""
     ok, msg = db.update_datasource(
-        ds_id, name, db_type, host, port, dbname, username, password
+        ds_id, name, db_type, host, port, dbname, username, password, charset
     )
     if ok:
         PageState.set("trigger_ds_reset", True)

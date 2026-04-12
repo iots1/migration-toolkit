@@ -22,6 +22,7 @@ TABLES_DDL = [
         dbname VARCHAR(255),
         username VARCHAR(255),
         password VARCHAR(255),
+        charset VARCHAR(50),
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         created_by UUID,

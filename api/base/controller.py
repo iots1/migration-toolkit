@@ -28,23 +28,29 @@ def _make_create_endpoint(schema, svc, router):
 
 def _make_update_endpoint(schema, svc, router, id_param: str = "id"):
     """Factory that creates a PUT endpoint with correct type annotation."""
-
-    def update(id_param, data: schema, request: Request):
-        updated = svc.update(id_param, data.model_dump(exclude_unset=True))
-        return json_api.create_success_response(
-            svc.resource_type, updated, str(request.url.path)
-        )
-
+    code = f"""
+def update({id_param}: str, data: schema, request: Request):
+    updated = svc.update({id_param}, data.model_dump(exclude_unset=True))
+    return json_api.create_success_response(
+        svc.resource_type, updated, str(request.url.path)
+    )
+"""
+    namespace = {"svc": svc, "schema": schema, "Request": Request, "json_api": json_api}
+    exec(code, namespace)
+    update = namespace["update"]
     router.put(f"/{{{id_param}}}")(update)
 
 
 def _make_delete_endpoint(svc, router, id_param: str = "id"):
     """Factory that creates a DELETE endpoint."""
-
-    def delete(id_param):
-        svc.delete(id_param)
-        return json_api.create_no_content_response()
-
+    code = f"""
+def delete({id_param}: str):
+    svc.delete({id_param})
+    return json_api.create_no_content_response()
+"""
+    namespace = {"svc": svc, "json_api": json_api}
+    exec(code, namespace)
+    delete = namespace["delete"]
     router.delete(f"/{{{id_param}}}", status_code=204)(delete)
 
 
@@ -82,11 +88,16 @@ class BaseController:
                 str(request.url.path),
             )
 
-        def find_by_id(id_param, request: Request):
-            item = svc.find_by_id(id_param)
-            return json_api.create_success_response(
-                svc.resource_type, item, str(request.url.path)
-            )
+        code = f"""
+def find_by_id({id_param}: str, request: Request):
+    item = svc.find_by_id({id_param})
+    return json_api.create_success_response(
+        svc.resource_type, item, str(request.url.path)
+    )
+"""
+        namespace = {"svc": svc, "Request": Request, "json_api": json_api}
+        exec(code, namespace)
+        find_by_id = namespace["find_by_id"]
 
         router.get("/")(find_all)
         router.get("")(find_all)

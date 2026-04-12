@@ -18,22 +18,24 @@ def get_configs_router():
         create_schema=CreateConfigSchema,
         update_schema=UpdateConfigSchema,
         tags=["Configs"],
-        id_param="name",
+        id_param="id",
     )
 
     # Add extra history endpoints
-    @controller.router.get("/{name}/histories")
-    def get_history(name: str, request: Request):
-        history = service.get_history(name)
+    @controller.router.get("/{id}/histories")
+    def get_history(id: str, request: Request):
+        existing = service.find_by_id(id)
+        history = service.get_history(existing["config_name"])
         return json_api.create_collection_response(
             "config-versions",
             history,
             str(request.url.path),
         )
 
-    @controller.router.get("/{name}/histories/{version}")
-    def get_version(name: str, version: int, request: Request):
-        version_data = service.get_version(name, version)
+    @controller.router.get("/{id}/histories/{version}")
+    def get_version(id: str, version: int, request: Request):
+        existing = service.find_by_id(id)
+        version_data = service.get_version(existing["config_name"], version)
         return json_api.create_success_response(
             "config-version",
             version_data,

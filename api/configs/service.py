@@ -14,11 +14,25 @@ class ConfigsService(BaseService):
 
     resource_type = "configs"
     allowed_fields = [
-        "id", "config_name", "table_name", "json_data",
-        "datasource_source_id", "datasource_target_id",
-        "config_type", "script", "generate_sql", "condition", "lookup",
-        "created_at", "created_by", "updated_at", "updated_by",
-        "is_deleted", "deleted_at", "deleted_by", "deleted_reason",
+        "id",
+        "config_name",
+        "table_name",
+        "json_data",
+        "datasource_source_id",
+        "datasource_target_id",
+        "config_type",
+        "script",
+        "generate_sql",
+        "condition",
+        "lookup",
+        "created_at",
+        "created_by",
+        "updated_at",
+        "updated_by",
+        "is_deleted",
+        "deleted_at",
+        "deleted_by",
+        "deleted_reason",
     ]
 
     def find_all(self, params: QueryParams) -> dict:
@@ -37,8 +51,8 @@ class ConfigsService(BaseService):
         }
 
     def find_by_id(self, id: str) -> dict:
-        """Get config by name (id is treated as config_name)."""
-        result = self.execute_db_operation(lambda: config_repo.get_content(id))
+        """Get config by UUID."""
+        result = self.execute_db_operation(lambda: config_repo.get_by_id_raw(id))
         self._assert_found(result, id)
         return self._sanitize_response(result)
 
@@ -47,22 +61,30 @@ class ConfigsService(BaseService):
         record = self._to_record(data)
         ok, msg = self.execute_db_operation(lambda: config_repo.save(record))
         self._assert_success(ok, msg)
-        result = self.execute_db_operation(lambda: config_repo.get_content(record.config_name))
+        result = self.execute_db_operation(
+            lambda: config_repo.get_content(record.config_name)
+        )
         return self._sanitize_response(result)
 
     def update(self, id: str, data: dict) -> dict:
         """Update config (patch — existing values are preserved for missing fields)."""
         existing = self.find_by_id(id)
-        record = self._to_record(data, existing=existing, config_name_override=id)
+        record = self._to_record(
+            data,
+            existing=existing,
+            config_name_override=existing.get("config_name", ""),
+        )
         ok, msg = self.execute_db_operation(lambda: config_repo.save(record))
         self._assert_success(ok, msg)
-        result = self.execute_db_operation(lambda: config_repo.get_content(id))
+        result = self.execute_db_operation(lambda: config_repo.get_by_id_raw(id))
         return self._sanitize_response(result)
 
     def delete(self, id: str) -> None:
         """Delete config."""
-        self.find_by_id(id)
-        ok, msg = self.execute_db_operation(lambda: config_repo.delete(id))
+        existing = self.find_by_id(id)
+        ok, msg = self.execute_db_operation(
+            lambda: config_repo.delete(existing["config_name"])
+        )
         self._assert_success(ok, msg)
 
     def get_history(self, config_name: str) -> list[dict]:
@@ -100,8 +122,10 @@ class ConfigsService(BaseService):
             config_name=config_name_override or data.get("config_name", ""),
             table_name=data.get("table_name") or ex.get("table_name", ""),
             json_data=json_data,
-            datasource_source_id=data.get("datasource_source_id") or ex.get("datasource_source_id"),
-            datasource_target_id=data.get("datasource_target_id") or ex.get("datasource_target_id"),
+            datasource_source_id=data.get("datasource_source_id")
+            or ex.get("datasource_source_id"),
+            datasource_target_id=data.get("datasource_target_id")
+            or ex.get("datasource_target_id"),
             config_type=data.get("config_type") or ex.get("config_type", "std"),
             script=data.get("script") or ex.get("script"),
             generate_sql=data.get("generate_sql") or ex.get("generate_sql"),

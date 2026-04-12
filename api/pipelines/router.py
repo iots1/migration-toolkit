@@ -16,6 +16,6 @@ def get_pipelines_router():
         create_schema=CreatePipelineSchema,
         update_schema=UpdatePipelineSchema,
         tags=["Pipelines"],
-        id_param="name",
+        id_param="id",
     )
     return controller.router

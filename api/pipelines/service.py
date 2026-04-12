@@ -42,7 +42,7 @@ class PipelinesService(BaseService):
         }
 
     def find_by_id(self, id: str) -> dict:
-        result = self.execute_db_operation(lambda: pipeline_repo.get_by_name(id))
+        result = self.execute_db_operation(lambda: pipeline_repo.get_by_id(id))
         self._assert_found(result, id)
         result = self._sanitize_response(result)
         return self._attach_children_single(result)
@@ -73,13 +73,13 @@ class PipelinesService(BaseService):
         edges_raw = data.pop("edges", None)
 
         existing = self.find_by_id(id)
-        record = self._to_record(data, existing=existing, name_override=id)
+        record = self._to_record(
+            data, existing=existing, name_override=existing["name"]
+        )
         ok, msg = self.execute_db_operation(lambda: pipeline_repo.save(record))
         self._assert_success(ok, msg)
 
-        result = self.execute_db_operation(
-            lambda: pipeline_repo.get_by_name(record.name)
-        )
+        result = self.execute_db_operation(lambda: pipeline_repo.get_by_id(id))
         pipeline_id = uuid.UUID(result["id"])
 
         if nodes_raw is not None:
@@ -91,8 +91,10 @@ class PipelinesService(BaseService):
         return self._attach_children_single(result)
 
     def delete(self, id: str) -> None:
-        self.find_by_id(id)
-        ok, msg = self.execute_db_operation(lambda: pipeline_repo.delete(id))
+        existing = self.find_by_id(id)
+        ok, msg = self.execute_db_operation(
+            lambda: pipeline_repo.delete(existing["name"])
+        )
         self._assert_success(ok, msg)
 
     # ------------------------------------------------------------------

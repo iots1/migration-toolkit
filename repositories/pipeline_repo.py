@@ -111,7 +111,13 @@ def get_all_list() -> list[dict]:
 
 
 def get_by_id(pipeline_id: str) -> dict | None:
-    """Get pipeline by UUID — returns clean DB row with json_data parsed to dict."""
+    """Get pipeline by UUID with nodes (JOIN configs) and edges (JOIN configs).
+
+    Returns pipeline row with two extra properties:
+        nodes: [{id, pipeline_id, config_id, config_name, position_x, position_y, order_sort}, ...]
+        edges: [{id, pipeline_id, source_config_uuid, target_config_uuid,
+                 source_config_name, target_config_name}, ...]
+    """
     import json as _json
 
     with get_transaction() as conn:
@@ -135,6 +141,46 @@ def get_by_id(pipeline_id: str) -> dict | None:
             )
         except (_json.JSONDecodeError, TypeError):
             data["json_data"] = {}
+
+        nodes_result = conn.execute(
+            text("""
+            SELECT pn.id::text AS id,
+                   pn.pipeline_id::text AS pipeline_id,
+                   pn.config_id::text AS config_id,
+                   c.config_name,
+                   pn.position_x, pn.position_y, pn.order_sort
+            FROM pipeline_nodes pn
+            JOIN configs c ON c.id = pn.config_id
+            WHERE pn.pipeline_id = :id
+              AND pn.is_deleted = false
+            ORDER BY pn.order_sort ASC
+            """),
+            {"id": pipeline_id},
+        )
+        data["nodes"] = [
+            dict(zip(nodes_result.keys(), r)) for r in nodes_result.fetchall()
+        ]
+
+        edges_result = conn.execute(
+            text("""
+            SELECT pe.id::text AS id,
+                   pe.pipeline_id::text AS pipeline_id,
+                   pe.source_config_uuid::text AS source_config_uuid,
+                   pe.target_config_uuid::text AS target_config_uuid,
+                   src_c.config_name AS source_config_name,
+                   tgt_c.config_name AS target_config_name
+            FROM pipeline_edges pe
+            JOIN configs src_c ON src_c.id = pe.source_config_uuid
+            JOIN configs tgt_c ON tgt_c.id = pe.target_config_uuid
+            WHERE pe.pipeline_id = :id
+              AND pe.is_deleted = false
+            """),
+            {"id": pipeline_id},
+        )
+        data["edges"] = [
+            dict(zip(edges_result.keys(), r)) for r in edges_result.fetchall()
+        ]
+
         return data
 
 

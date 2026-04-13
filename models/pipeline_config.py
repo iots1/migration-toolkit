@@ -48,6 +48,8 @@ class PipelineConfig:
     name: str
     description: str = ""
     steps: list[PipelineStep] = field(default_factory=list)
+    nodes: list[dict] = field(default_factory=list)
+    edges: list[dict] = field(default_factory=list)
     error_strategy: str = "fail_fast"  # fail_fast | continue_on_error | skip_dependents
     batch_size: int = 1000
     truncate_targets: bool = False
@@ -69,6 +71,8 @@ class PipelineConfig:
             name=d.get("name", ""),
             description=d.get("description", ""),
             steps=[PipelineStep.from_dict(s) for s in d.get("steps", [])],
+            nodes=d.get("nodes", []),
+            edges=d.get("edges", []),
             error_strategy=d.get("error_strategy", "fail_fast"),
             batch_size=d.get("batch_size", 1000),
             truncate_targets=d.get("truncate_targets", False),
@@ -82,6 +86,8 @@ class PipelineConfig:
             "name": self.name,
             "description": self.description,
             "steps": [s.to_dict() for s in self.steps],
+            "nodes": self.nodes,
+            "edges": self.edges,
             "error_strategy": self.error_strategy,
             "batch_size": self.batch_size,
             "truncate_targets": self.truncate_targets,
@@ -136,6 +142,7 @@ class PipelineRunRecord:
     pipeline_id: uuid.UUID
     status: str = "pending"
     steps_json: str | dict = field(default_factory=dict)
+    job_id: uuid.UUID | None = None
 
 
 @dataclass

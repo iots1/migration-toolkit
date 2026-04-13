@@ -16,6 +16,7 @@ import uuid
 from models.migration_config import ConfigRecord
 from models.datasource import DatasourceRecord
 from models.pipeline_config import PipelineRecord, PipelineRunRecord, PipelineRunUpdateRecord
+from models.job import JobRecord, JobUpdateRecord
 
 
 @runtime_checkable
@@ -119,4 +120,21 @@ class PipelineRunRepository(Protocol):
 
     def get_latest(self, pipeline_id: uuid.UUID) -> dict | None:
         """Get latest run for a pipeline."""
+        ...
+
+
+@runtime_checkable
+class JobRepository(Protocol):
+    """Protocol for job CRUD operations."""
+
+    def save(self, record: JobRecord) -> uuid.UUID:
+        """Insert a new job. Returns generated UUID."""
+        ...
+
+    def update(self, job_id: uuid.UUID, patch: JobUpdateRecord) -> None:
+        """Patch job status / error_message."""
+        ...
+
+    def get_by_id(self, job_id: uuid.UUID) -> dict | None:
+        """Get job by UUID."""
         ...

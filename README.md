@@ -1,11 +1,13 @@
 # HIS Database Migration Toolkit
 
-[![Version](https://img.shields.io/badge/version-8.0-blue.svg)](https://github.com/yourusername/his-analyzer)
+[![Version](https://img.shields.io/badge/version-9.0-blue.svg)](https://github.com/yourusername/his-analyzer)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Shell](https://img.shields.io/badge/bash-4.0%2B-orange.svg)](https://www.gnu.org/software/bash/)
-[![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115-green.svg)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18+-336791.svg)](https://www.postgresql.org/)
 
-A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migrating Hospital Information System (HIS) databases. This centralized dashboard provides end-to-end capabilities from database analysis and profiling to schema mapping and configuration generation with live database connectivity.
+A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migrating Hospital Information System (HIS) databases. Features a dual-interface architecture with both a Streamlit dashboard and a FastAPI REST API with real-time Socket.IO events for background pipeline execution.
 
 ## ✨ Features
 
@@ -19,9 +21,18 @@ A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migratin
 - **📈 HTML Reports**: Beautiful, interactive reports with DataTables integration
 - **🔧 Configuration Generator**: Export migration configs in TypeScript/JSON format
 
-### New in v8.0
+### New in v9.0
 
-- **🗄️ Datasource Management**: Centralized database connection profiles with SQLite storage
+- **🔌 REST API**: Full CRUD API via FastAPI with JSON:API responses
+- **📡 Socket.IO**: Real-time job events (batch progress, errors, completion)
+- **🚀 Background Jobs**: POST /api/v1/jobs triggers pipeline in background thread
+- **🔗 Per-Step Datasource Resolution**: Each pipeline step resolves its own source/target datasource from UUID FK
+- **📊 Pipeline Nodes & Edges**: Visual workflow graph with dependency-based topological sort
+- **📋 generate_sql Priority**: Custom SQL queries take priority over auto-generated SELECT
+
+### v8.0 Features
+
+- **🗄️ Datasource Management**: Centralized database connection profiles with PostgreSQL storage
 - **🔌 Connection Pooling**: Singleton pattern for efficient connection reuse across requests
 - **🗺️ Enhanced Schema Mapper**: Dual-mode source selection (Run ID or Live Datasource)
 - **📡 Live Schema Discovery**: Dynamic table and column loading from connected databases
@@ -58,70 +69,94 @@ A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migratin
 
 ## 🏗️ Architecture
 
-The codebase follows an MVC-inspired layered architecture where models, services, and views are strictly separated.
+The codebase follows Clean Architecture with a dual-interface pattern: Streamlit (MVC dashboard) and FastAPI (REST API).
 
 ```
 his-analyzer/
 ├── app.py                          # Streamlit routing + sidebar navigation
 ├── config.py                       # Constants: TRANSFORMER_OPTIONS, VALIDATOR_OPTIONS, DB_TYPES
-├── database.py                     # SQLite CRUD (datasources, configs, config_histories)
+├── database.py                     # Legacy facade (deprecated, being removed)
+│
+├── api/                            # FastAPI REST API + Socket.IO
+│   ├── main.py                     # App setup, CORS, router registration, /ws mount
+│   ├── socket_manager.py           # Async Socket.IO server + emit_from_thread()
+│   ├── base/                       # Shared API infrastructure
+│   │   ├── controller.py           # BaseController (generic CRUD)
+│   │   ├── service.py              # BaseService with pagination/sanitize
+│   │   ├── exceptions.py           # JSON API error handlers
+│   │   └── json_api.py             # JSON:API response builder
+│   ├── datasources/                # /api/v1/datasources
+│   ├── configs/                    # /api/v1/configs (+ /histories, /versions)
+│   ├── pipelines/                  # /api/v1/pipelines (with nodes/edges)
+│   ├── pipeline_runs/              # /api/v1/pipeline-runs
+│   └── jobs/                       # /api/v1/jobs (POST → trigger background pipeline)
 │
 ├── models/                         # Data classes (pure Python, no I/O)
 │   ├── datasource.py               #   Datasource dataclass
-│   └── migration_config.py         #   MigrationConfig + MappingItem dataclasses
+│   ├── migration_config.py         #   ConfigRecord, MigrationConfig, MappingItem
+│   ├── job.py                      #   JobRecord, JobUpdateRecord
+│   └── pipeline_config.py          #   PipelineConfig, PipelineStep, PipelineNodeRecord,
+│                                   #     PipelineEdgeRecord, PipelineRunRecord
+│
+├── protocols/                      # Protocol interfaces (DIP)
+│   └── repository.py               #   Repository protocol interfaces
+│
+├── repositories/                   # Data access layer (PostgreSQL)
+│   ├── connection.py               #   SQLAlchemy engine singleton
+│   ├── base.py                     #   DDL + init_db()
+│   ├── datasource_repo.py          #   Datasource CRUD
+│   ├── config_repo.py              #   Config CRUD + versioning
+│   ├── pipeline_repo.py            #   Pipeline CRUD + get_by_id (JOIN nodes/edges/configs)
+│   ├── pipeline_node_repo.py       #   Pipeline node CRUD
+│   ├── pipeline_edge_repo.py       #   Pipeline edge CRUD
+│   ├── pipeline_run_repo.py        #   Pipeline Run CRUD
+│   └── job_repo.py                 #   Job CRUD
 │
 ├── services/                       # Business logic (no Streamlit imports)
-│   ├── datasource_repository.py    #   DatasourceRepository facade (test/connect/tables/cols)
+│   ├── datasource_repository.py    #   DatasourceRepository facade
 │   ├── db_connector.py             #   SQLAlchemy engine factory (MySQL, PG, MSSQL)
 │   ├── ml_mapper.py                #   SmartMapper: HIS dictionary + semantic matching
 │   ├── transformers.py             #   DataTransformer: vectorised Pandas transformations
 │   ├── checkpoint_manager.py       #   Checkpoint save/load/clear for resumable migrations
-│   ├── migration_logger.py         #   Per-run ETL log files with multi-encoding fallback
-│   ├── encoding_helper.py          #   clean_value / clean_dataframe for Thai legacy data
-│   └── query_builder.py            #   SELECT builder, batch transform, dtype map, bulk insert
+│   ├── migration_logger.py         #   Per-run ETL log files
+│   ├── encoding_helper.py          #   clean_dataframe for Thai legacy data
+│   ├── migration_executor.py       #   Single-table ETL engine (generate_sql priority)
+│   ├── pipeline_service.py         #   Pipeline orchestration + per-step datasource resolution
+│   └── query_builder.py            #   SELECT builder, batch transform, bulk insert
 │
-├── views/                          # Streamlit page orchestrators (thin, delegate to components)
-│   ├── schema_mapper.py            #   Schema Mapper page (~120 lines)
-│   ├── migration_engine.py         #   Migration Engine page (~50 lines)
-│   └── settings.py                 #   Datasource & config history management
+├── dialects/                       # Database dialects (OCP)
+│   ├── mysql.py, postgresql.py, mssql.py
+│   └── registry.py                 #   Dialect registry
 │
-├── views/components/               # Reusable UI components
-│   ├── shared/
-│   │   └── dialogs.py              #   show_json_preview, show_diff_dialog (@st.dialog)
-│   ├── schema_mapper/
-│   │   ├── source_selector.py      #   Source mode tabs (Run ID / Datasource / Config / File)
-│   │   ├── metadata_editor.py      #   Config name, target DB/table selectors, batch size
-│   │   ├── mapping_editor.py       #   AgGrid mapping table + Quick Edit panel
-│   │   ├── config_actions.py       #   Validate / Preview JSON / Save buttons + JSON builder
-│   │   └── history_viewer.py       #   Config history panel + version comparison
-│   └── migration/
-│       ├── step_config.py          #   Step 1: load config from DB or upload JSON
-│       ├── step_connections.py     #   Step 2: source/target DB profile + charset selection
-│       ├── step_review.py          #   Step 3: review config, checkpoint resume, exec settings
-│       └── step_execution.py       #   Step 4: full ETL pipeline with streaming logs
+├── data_transformers/              # Data transformations (OCP)
+│   ├── text.py, dates.py, healthcare.py, names.py, data_type.py, lookup.py
+│   └── registry.py                 #   @register_transformer decorator
 │
-├── utils/
-│   ├── helpers.py                  #   format_row_count, safe_filename, resolve_dbname, …
-│   └── state_manager.py            #   PageState: init defaults, trigger/flush deferred rerun
+├── validators/                     # Data validators (OCP)
+│   ├── not_null.py, unique.py, range_check.py
+│   └── registry.py                 #   @register_validator decorator
+│
+├── controllers/                    # MVC Controllers (6/6)
+│   ├── settings_controller.py
+│   ├── pipeline_controller.py
+│   ├── file_explorer_controller.py
+│   ├── er_diagram_controller.py
+│   ├── schema_mapper_controller.py
+│   └── migration_engine_controller.py
+│
+├── views/                          # MVC Views (pure rendering)
+│   └── components/                 # Reusable UI components
+│       ├── schema_mapper/          # Source selector, mapping editor, config actions
+│       ├── migration/              # Step config, connections, execution
+│       └── shared/                 # Dialogs, styles
+│
+├── scripts/                        # Utility scripts
+│   ├── migrate_sqlite_to_pg.py     # One-time SQLite → PostgreSQL migration
+│   └── migrate_add_jobs_table.py   # Create jobs table + job_id FK
 │
 ├── tests/                          # pytest test suite
-│   ├── conftest.py                 #   tmp_dir fixture
-│   ├── test_checkpoint_manager.py
-│   ├── test_encoding_helper.py
-│   ├── test_helpers.py
-│   ├── test_migration_logger.py
-│   ├── test_models.py
-│   └── test_query_builder.py
-│
-├── analysis_report/                # Database Analysis Engine (Shell Script)
-│   ├── config.json                 #   DB credentials
-│   ├── unified_db_analyzer.sh      #   Core Bash analyser (MySQL, PG, MSSQL)
-│   ├── csv_to_html.py              #   HTML report generator
-│   └── migration_report/           #   Output: YYYYMMDD_HHMM/{ddl_schema/, data_profile/}
-│
-├── migration_logs/                 # ETL execution logs (migration_NAME_TIMESTAMP.log)
-├── migration_checkpoints/          # Checkpoint JSON files for resumable migrations
-└── mini_his/                       # Mock HIS data (full_his_mockup.sql + generator)
+├── analysis_report/                # Database Analysis Engine (Shell)
+└── mini_his/                       # Mock HIS data
 ```
 
 ### Layer Responsibilities
@@ -134,49 +169,45 @@ his-analyzer/
 | `views/components/` | Reusable UI widgets — read/write `session_state`, render widgets |
 | `utils/` | Stateless pure helpers + `PageState` session abstraction |
 
-### Data Flow Architecture (v8.0)
+### Data Flow Architecture (v9.0)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    ANALYSIS PHASE (Bash)                        │
 ├─────────────────────────────────────────────────────────────────┤
 │  Source DB → unified_db_analyzer.sh → CSV/HTML Reports          │
-│              • Profile data quality                             │
-│              • Extract schema (DDL)                             │
-│              • Calculate statistics                             │
 └─────────────────────────────────────────────────────────────────┘
-                            ↓
+                             ↓
 ┌─────────────────────────────────────────────────────────────────┐
 │                   MAPPING PHASE (Python + AI)                   │
 ├─────────────────────────────────────────────────────────────────┤
-│  Schema Mapper (Streamlit)                                      │
-│  ├── Load: CSV Report OR Live Datasource                        │
+│  Schema Mapper (Streamlit) + REST API                          │
 │  ├── AI Auto-Map: ML Model suggests column mappings             │
 │  ├── Manual Review: User confirms/modifies                      │
 │  ├── Transformer Selection: Date conv, trim, etc.              │
-│  └── Save: Config → SQLite (with versioning)                    │
+│  ├── generate_sql: Custom SELECT (optional, priority)          │
+│  └── Save: Config → PostgreSQL (with versioning)                │
 └─────────────────────────────────────────────────────────────────┘
-                            ↓
+                             ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                  MIGRATION PHASE (Python ETL)                   │
+│              PIPELINE PHASE (FastAPI + Background)              │
 ├─────────────────────────────────────────────────────────────────┤
-│  Migration Engine                                               │
-│  ├── Load Config: From SQLite or JSON file                      │
-│  ├── Connect: Source & Target via datasource profiles           │
-│  ├── Extract: Batch streaming (pandas + SQLAlchemy)            │
-│  ├── Transform: Apply transformers to each batch               │
-│  ├── Load: Bulk insert to target (to_sql)                      │
-│  └── Log: Real-time progress + persistent logs                 │
+│  POST /api/v1/jobs { pipeline_id } → 202 Accepted              │
+│  ├── PipelineExecutor resolves nodes + edges (topological sort) │
+│  ├── Per-step datasource resolution (UUID → engine per step)    │
+│  ├── Each step: extract → transform → load                      │
+│  │   ├── generate_sql (priority) or build_select_query (fallback)│
+│  │   └── Transformers applied after pd.read_sql()               │
+│  ├── Socket.IO events: job:batch, job:error, job:completed      │
+│  └── Frontend receives real-time progress                       │
 └─────────────────────────────────────────────────────────────────┘
-                            ↓
+                             ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│                  VERSIONING & AUDIT (SQLite)                    │
+│                  STORAGE (PostgreSQL)                           │
 ├─────────────────────────────────────────────────────────────────┤
-│  migration_tool.db                                              │
-│  ├── datasources: Connection profiles                          │
-│  ├── configs: Current mapping configurations                   │
-│  ├── config_histories: All versions with timestamps            │
-│  └── Version comparison & rollback support                     │
+│  datasources → configs (FK) → pipeline_nodes → pipeline_edges  │
+│  jobs → pipeline_runs → pipeline_steps (JSON)                   │
+│  config_histories (versioning)                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1426,7 +1457,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ### Completed ✅
 
-- [x] Datasource management with SQLite storage (v8.0)
+- [x] Datasource management with PostgreSQL storage (v8.0)
 - [x] Connection pooling and reuse (v8.0)
 - [x] Dual-mode schema mapper (Run ID / Datasource) (v8.0)
 - [x] Live schema discovery (v8.0)
@@ -1439,16 +1470,17 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - [x] AI-powered column mapping (v8.0)
 - [x] Healthcare-specific ML dictionary (v8.0)
 - [x] Automatic transformer suggestions (v8.0)
+- [x] FastAPI REST API with full CRUD (v9.0)
+- [x] Socket.IO real-time job events (v9.0)
+- [x] Background pipeline execution (v9.0)
+- [x] Pipeline nodes & edges with topological sort (v9.0)
+- [x] Per-step datasource resolution (v9.0)
+- [x] generate_sql priority over dynamic SELECT (v9.0)
 
 ### Planned
 
-- [ ] Support for Oracle Database
-- [ ] REST API for programmatic access
 - [ ] Docker containerization
 - [ ] CI/CD pipeline integration
-- [ ] Data anonymization features
-- [ ] Real-time migration progress metrics
-- [ ] Database-level transaction rollback
 - [ ] Data validation dashboard with anomaly detection
 - [ ] Scheduled migration jobs (cron-like)
 - [ ] Multi-datasource data lineage tracking

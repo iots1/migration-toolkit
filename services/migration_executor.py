@@ -124,7 +124,9 @@ def run_single_migration(
             df_batch = clean_dataframe(df_batch)
 
             try:
-                df_batch, bit_columns = transform_batch(df_batch, config)
+                df_batch, bit_columns, val_warnings = transform_batch(df_batch, config)
+                for w in val_warnings:
+                    log(f"Batch {batch_num} — {w}", "⚠️")
             except Exception as e:
                 log(f"Transformation Error in Batch {batch_num}: {e}", "⚠️")
                 continue

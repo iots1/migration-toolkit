@@ -28,12 +28,13 @@ def save(record: PipelineRunRecord) -> uuid.UUID:
     with get_transaction() as conn:
         result = conn.execute(
             text("""
-                INSERT INTO pipeline_runs (pipeline_id, status, started_at, steps_json)
-                VALUES (:pipeline_id, :status, CURRENT_TIMESTAMP, :steps_json)
+                INSERT INTO pipeline_runs (pipeline_id, job_id, status, started_at, steps_json)
+                VALUES (:pipeline_id, :job_id, :status, CURRENT_TIMESTAMP, :steps_json)
                 RETURNING id
             """),
             {
                 "pipeline_id": record.pipeline_id,
+                "job_id": record.job_id,
                 "status": record.status,
                 "steps_json": steps_str,
             },

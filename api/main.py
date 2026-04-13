@@ -25,6 +25,8 @@ from api.datasources.router import get_datasources_router
 from api.configs.router import get_configs_router
 from api.pipelines.router import get_pipelines_router
 from api.pipeline_runs.router import get_pipeline_runs_router
+from api.jobs.router import get_jobs_router
+from api.socket_manager import sio, socket_asgi, set_event_loop
 
 from repositories.base import init_db
 
@@ -58,6 +60,13 @@ app.include_router(get_datasources_router())
 app.include_router(get_configs_router())
 app.include_router(get_pipelines_router())
 app.include_router(get_pipeline_runs_router())
+app.include_router(get_jobs_router())
+
+# Wrap FastAPI with Socket.IO so path /ws/socket.io/ is handled correctly.
+# socket_asgi uses socketio_path="ws/socket.io", so it intercepts requests
+# whose PATH_INFO starts with /ws/socket.io/ and forwards everything else
+# to the FastAPI app.
+socket_asgi.other_asgi_app = app
 
 
 # Health check endpoint
@@ -66,9 +75,11 @@ def health():
     return {"status": "ok"}
 
 
-# Initialize database on startup
+# Initialize database on startup and capture event loop for socket.io thread emits
 @app.on_event("startup")
-def startup():
+async def startup():
+    import asyncio
+    set_event_loop(asyncio.get_event_loop())
     try:
         init_db()
     except RuntimeError as e:

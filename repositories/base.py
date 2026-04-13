@@ -107,9 +107,25 @@ TABLES_DDL = [
         deleted_by UUID,
         deleted_reason TEXT
     )""",
+    """CREATE TABLE IF NOT EXISTS jobs (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        pipeline_id UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        status VARCHAR(50) DEFAULT 'running',
+        completed_at TIMESTAMP WITH TIME ZONE,
+        error_message TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        created_by UUID,
+        updated_by UUID,
+        is_deleted BOOLEAN NOT NULL DEFAULT false,
+        deleted_at TIMESTAMP WITH TIME ZONE,
+        deleted_by UUID,
+        deleted_reason TEXT
+    )""",
     """CREATE TABLE IF NOT EXISTS pipeline_runs (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         pipeline_id UUID NOT NULL REFERENCES pipelines(id) ON DELETE CASCADE,
+        job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
         status VARCHAR(50) DEFAULT 'pending',
         started_at TIMESTAMP WITH TIME ZONE,
         completed_at TIMESTAMP WITH TIME ZONE,
@@ -160,6 +176,7 @@ def drop_all_tables() -> None:
     with engine.begin() as conn:
         tables = [
             "pipeline_runs",
+            "jobs",
             "pipeline_edges",
             "pipeline_nodes",
             "pipelines",

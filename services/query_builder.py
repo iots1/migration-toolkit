@@ -58,12 +58,13 @@ def build_select_query(config: dict, source_table: str, db_type: str = "MySQL") 
 # Batch Transformation
 # ---------------------------------------------------------------------------
 
-def transform_batch(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, list[str]]:
+def transform_batch(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, list[str], list[str]]:
     """
-    Apply transformers, rename source→target columns, drop ignored columns.
+    Apply transformers, rename source→target columns, drop ignored columns,
+    then run validators and collect warnings.
 
     Returns:
-        (transformed DataFrame, list of BIT column names in target schema)
+        (transformed DataFrame, list of BIT column names, list of validation warning strings)
     """
     df = DataTransformer.apply_transformers_to_batch(df, config)
 
@@ -107,7 +108,47 @@ def transform_batch(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, list[
                 lambda x: "1" if x in (True, 1, "1") or str(x).lower() == "true" else "0"
             )
 
-    return df, bit_columns
+    # ---------------------------------------------------------------------------
+    # Validators — run after transformers so we validate the final output value
+    # ---------------------------------------------------------------------------
+    validation_warnings: list[str] = []
+    _run_validators(df, config, validation_warnings)
+
+    return df, bit_columns, validation_warnings
+
+
+def _run_validators(df: pd.DataFrame, config: dict, warnings: list[str]) -> None:
+    """Run registered validators for each mapping that has validators configured.
+
+    Appends human-readable warning strings to *warnings* in-place.
+    Never raises — validator errors are captured as warnings so migration continues.
+    """
+    import validators as _vld_pkg  # noqa: F401 — side-effect: registers all validators
+    from validators.registry import get_validator
+
+    for m in config.get("mappings", []):
+        if m.get("ignore", False):
+            continue
+        validator_names: list[str] = m.get("validators", [])
+        if not validator_names:
+            continue
+        col = m.get("target", m.get("source", "")).lower()
+        if col not in df.columns:
+            continue
+        for v_name in validator_names:
+            try:
+                validator_fn = get_validator(v_name)
+                result = validator_fn(df[col])
+                if not result.get("valid", True):
+                    errs = "; ".join(result.get("errors", []))
+                    invalid_count = result.get("invalid_count", 0)
+                    warnings.append(
+                        f"[{col}] {v_name}: {errs} ({invalid_count:,} invalid rows)"
+                    )
+            except ValueError:
+                warnings.append(f"[{col}] Unknown validator '{v_name}' — skipped")
+            except Exception as exc:
+                warnings.append(f"[{col}] {v_name} error: {exc}")
 
 
 # ---------------------------------------------------------------------------

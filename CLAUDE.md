@@ -29,9 +29,12 @@ python3.11 -c "from repositories.base import init_db; init_db()"
 ### Run the App
 
 ```bash
+# Streamlit dashboard (MVC frontend)
 streamlit run app.py
-# With hot-reload:
 python3.11 -m streamlit run app.py --server.runOnSave true
+
+# FastAPI backend (REST API + Socket.IO)
+python3.11 -m uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 ### Database Analysis (Bash)
@@ -54,47 +57,49 @@ python test_column_analysis.py   # Column analysis tests
 ### Migration (SQLite → PostgreSQL)
 
 ```bash
-# If migrating from legacy SQLite database
 DATABASE_URL=postgresql://user:password@localhost:5432/his_analyzer \
     python3.11 scripts/migrate_sqlite_to_pg.py
 ```
 
 ## Architecture Overview
 
-This is a Streamlit-based HIS (Hospital Information System) database migration toolkit with Clean Architecture + SOLID principles:
+Dual-interface HIS (Hospital Information System) database migration toolkit with Clean Architecture + SOLID principles.
 
-**Stack**: PostgreSQL + SQLAlchemy + Streamlit + Python 3.11
+**Stack**: PostgreSQL + SQLAlchemy + FastAPI + Streamlit + Socket.IO + Python 3.11
 
-**Architecture**: Clean Architecture with MVC pattern, Repository pattern, and SOLID principles
+**Architecture**: Clean Architecture with MVC pattern, Repository pattern, REST API, and SOLID principles
 
 **Key Achievements**:
 
-- ✅ Migrated from SQLite to PostgreSQL (Phase 1-10 complete)
+- ✅ PostgreSQL backend with full CRUD API (FastAPI)
+- ✅ Streamlit MVC dashboard (6 pages)
+- ✅ Pipeline workflow with visual node/edge graph (React Flow frontend)
+- ✅ Background job execution with Socket.IO real-time events
+- ✅ Per-step datasource resolution (mixed PostgreSQL/MSSQL pipelines)
 - ✅ SOLID principles fully implemented
 - ✅ Repository pattern for data access
 - ✅ Protocol interfaces for DI (Dependency Inversion)
 - ✅ Registry patterns for transformers/validators/dialects (Open/Closed)
-- ✅ Strict MVC separation for all pages
-- ✅ Thread-safe connection pooling
 
-### Directory Structure (PostgreSQL + SOLID)
+### Directory Structure
 
 ```
-├── app.py                          # Router: delegates to controllers
+├── app.py                          # Streamlit router: delegates to controllers
 ├── config.py                       # Environment configuration
 ├── database.py                     # Legacy facade (deprecated, being removed)
 ├── .env.example                    # Environment variables template
 │
 ├── models/                         # Domain models (dataclasses, pure Python)
 │   ├── datasource.py               # Datasource connection profile
-│   ├── migration_config.py         # MigrationConfig & MappingItem
-│   └── pipeline_config.py          # PipelineConfig & PipelineStep
+│   ├── migration_config.py         # ConfigRecord, MigrationConfig, MappingItem
+│   ├── job.py                      # JobRecord, JobUpdateRecord
+│   └── pipeline_config.py          # PipelineConfig, PipelineStep, PipelineNodeRecord,
+│                                   #   PipelineEdgeRecord, PipelineRunRecord
 │
 ├── protocols/                      # Protocol interfaces (DIP - Dependency Inversion)
 │   ├── __init__.py
-│   ├── repository.py               # Repository protocol interfaces
-│   ├── database_dialect.py         # Database dialect protocol
-│   └── transformer.py              # Transformer protocol
+│   └── repository.py               # DatasourceRepository, ConfigRepository,
+│                                   #   PipelineRepository, PipelineRunRepository, JobRepository
 │
 ├── repositories/                   # Data access layer (PostgreSQL)
 │   ├── __init__.py
@@ -102,11 +107,29 @@ This is a Streamlit-based HIS (Hospital Information System) database migration t
 │   ├── base.py                     # DDL + init_db()
 │   ├── datasource_repo.py          # Datasource CRUD
 │   ├── config_repo.py              # Config CRUD + versioning
-│   ├── pipeline_repo.py            # Pipeline CRUD
-│   └── pipeline_run_repo.py        # Pipeline Run CRUD
+│   ├── pipeline_repo.py            # Pipeline CRUD + get_by_id (JOIN nodes/edges/configs)
+│   ├── pipeline_node_repo.py       # Pipeline node CRUD
+│   ├── pipeline_edge_repo.py       # Pipeline edge CRUD
+│   ├── pipeline_run_repo.py        # Pipeline Run CRUD
+│   └── job_repo.py                 # Job CRUD
+│
+├── api/                            # FastAPI REST API + Socket.IO
+│   ├── main.py                     # App setup, CORS, router registration, /ws mount
+│   ├── socket_manager.py           # Async Socket.IO server + emit_from_thread()
+│   ├── base/                       # Shared API infrastructure
+│   │   ├── controller.py           # BaseController (generic CRUD)
+│   │   ├── service.py              # BaseService with pagination/sanitize
+│   │   ├── exceptions.py           # JSON API error handlers
+│   │   ├── auth.py                 # API key verification
+│   │   ├── query_params.py         # Pagination params
+│   │   └── json_api.py             # JSON:API response builder
+│   ├── datasources/                # /api/v1/datasources
+│   ├── configs/                    # /api/v1/configs (+ /histories, /{id}/versions/{version})
+│   ├── pipelines/                  # /api/v1/pipelines (with nodes/edges sub-resources)
+│   ├── pipeline_runs/              # /api/v1/pipeline-runs
+│   └── jobs/                       # /api/v1/jobs (POST → trigger background pipeline)
 │
 ├── dialects/                       # Database dialects (OCP - Open/Closed)
-│   ├── __init__.py
 │   ├── registry.py                 # Dialect registry
 │   ├── base.py                     # BaseDialect ABC
 │   ├── mysql.py                    # MySQL dialect
@@ -114,7 +137,6 @@ This is a Streamlit-based HIS (Hospital Information System) database migration t
 │   └── mssql.py                    # MSSQL dialect
 │
 ├── data_transformers/              # Data transformations (OCP - pluggable)
-│   ├── __init__.py
 │   ├── registry.py                 # @register_transformer decorator
 │   ├── base.py                     # DataTransformer class
 │   ├── text.py                     # Text transformers (TRIM, UPPER, etc.)
@@ -125,100 +147,100 @@ This is a Streamlit-based HIS (Hospital Information System) database migration t
 │   └── lookup.py                   # Lookup transformers
 │
 ├── validators/                     # Data validators (OCP - pluggable)
-│   ├── __init__.py
 │   ├── registry.py                 # @register_validator decorator
 │   ├── not_null.py                 # NOT_NULL validator
 │   ├── unique.py                   # UNIQUE_CHECK validator
 │   └── range_check.py              # RANGE_CHECK validator
 │
-├── services/                       # Business logic (pure Python)
-│   ├── db_connector.py             # SQLAlchemy engine factory (slim)
+├── services/                       # Business logic (pure Python, no Streamlit)
+│   ├── db_connector.py             # SQLAlchemy engine factory (MySQL, PG, MSSQL)
 │   ├── connection_pool.py          # Raw DBAPI connection pool
 │   ├── connection_tester.py        # Connection testing
 │   ├── schema_inspector.py         # Schema inspection & sampling
-│   ├── ml_mapper.py                # AI semantic column mapping (no Streamlit)
-│   ├── migration_executor.py       # ETL execution engine
-│   ├── pipeline_service.py         # Pipeline orchestration (DI-compliant)
+│   ├── ml_mapper.py                # AI semantic column mapping
+│   ├── migration_executor.py       # ETL execution (single-table)
+│   ├── pipeline_service.py         # Pipeline orchestration with per-step datasource resolution
 │   ├── checkpoint_manager.py       # Migration resumability
 │   ├── encoding_helper.py          # Character encoding detection
 │   ├── migration_logger.py         # Logging service
-│   ├── query_builder.py            # SQL query builder
-│   └── datasource_repository.py    # Datasource query helper
+│   ├── query_builder.py            # SQL query builder + batch transform
+│   └── datasource_repository.py    # Datasource query helper (legacy facade)
 │
 ├── controllers/                    # MVC Controllers (6/6 complete)
-│   ├── __init__.py
-│   ├── settings_controller.py      # ✅ Settings page
-│   ├── pipeline_controller.py      # ✅ Data Pipeline page
-│   ├── file_explorer_controller.py # ✅ File Explorer page
-│   ├── er_diagram_controller.py    # ✅ ER Diagram page
-│   ├── schema_mapper_controller.py # ✅ Schema Mapper page
-│   └── migration_engine_controller.py # ✅ Migration Engine page
+│   ├── settings_controller.py      # Settings page
+│   ├── pipeline_controller.py      # Data Pipeline page
+│   ├── file_explorer_controller.py # File Explorer page
+│   ├── er_diagram_controller.py    # ER Diagram page
+│   ├── schema_mapper_controller.py # Schema Mapper page
+│   └── migration_engine_controller.py # Migration Engine page
 │
 ├── views/                          # MVC Views (pure rendering)
-│   ├── settings_view.py            # ✅ Settings page rendering
-│   ├── pipeline_view.py            # ✅ Data Pipeline rendering
-│   ├── file_explorer.py            # ✅ File Explorer rendering
-│   ├── er_diagram.py               # ✅ ER Diagram rendering
-│   ├── schema_mapper.py            # ✅ Schema Mapper rendering
-│   ├── migration_engine.py         # ✅ Migration Engine rendering
+│   ├── settings_view.py, pipeline_view.py, file_explorer.py
+│   ├── er_diagram.py, schema_mapper.py, migration_engine.py
 │   └── components/                 # Reusable UI components
-│       ├── shared/                 # Shared components
-│       │   ├── dialogs.py          # Generic dialogs
-│       │   └── styles.py           # Global CSS utilities
-│       ├── schema_mapper/          # Schema mapper components
-│       └── migration/              # Migration engine components
+│       ├── shared/                 # dialogs, styles
+│       ├── schema_mapper/          # source_selector, mapping_editor, config_actions, ...
+│       └── migration/              # step_config, step_connections, step_execution, ...
 │
 ├── scripts/                        # Utility scripts
-│   └── migrate_sqlite_to_pg.py     # One-time SQLite → PostgreSQL migration
+│   ├── migrate_sqlite_to_pg.py     # One-time SQLite → PostgreSQL migration
+│   └── migrate_add_jobs_table.py   # Create jobs table + add job_id to pipeline_runs
 │
 └── tests/                          # Test suite
-    ├── test_pipeline_service.py
-    └── ...
+    └── test_pipeline_service.py
 ```
 
 ### Key Files & Their Status
 
-| File                           | Role                   | Status          | Notes                                    |
-| ------------------------------ | ---------------------- | --------------- | ---------------------------------------- |
-| `app.py`                       | Router                 | ✅ Complete     | Routes to all 6 controllers              |
-| `database.py`                  | Legacy facade          | 🚧 Deprecated   | Being removed, use repositories directly |
-| `repositories/*.py`            | Data access layer      | ✅ Complete     | PostgreSQL CRUD operations               |
-| `protocols/*.py`               | Protocol interfaces    | ✅ Complete     | DIP compliance                           |
-| `dialects/*.py`                | DB dialects            | ✅ Complete     | OCP compliance                           |
-| `data_transformers/*.py`       | Transformers           | ✅ Complete     | OCP compliance                           |
-| `validators/*.py`              | Validators             | ✅ Complete     | OCP compliance                           |
-| `controllers/*.py`             | MVC Controllers        | ✅ 6/6 Complete | All pages refactored                     |
-| `services/pipeline_service.py` | Pipeline orchestration | ✅ Complete     | DI-compliant (Phase 8)                   |
+| File                           | Role                        | Status        |
+| ------------------------------ | --------------------------- | ------------- |
+| `app.py`                       | Streamlit router            | ✅ Complete   |
+| `api/main.py`                  | FastAPI app + Socket.IO      | ✅ Complete   |
+| `api/jobs/router.py`           | POST /jobs → trigger pipeline | ✅ Complete   |
+| `api/socket_manager.py`        | Socket.IO emit from thread  | ✅ Complete   |
+| `database.py`                  | Legacy facade               | 🚧 Deprecated |
+| `repositories/pipeline_repo.py`| Pipeline CRUD + nodes/edges  | ✅ Complete   |
+| `repositories/job_repo.py`     | Job CRUD                    | ✅ Complete   |
+| `repositories/pipeline_node_repo.py` | Pipeline node CRUD     | ✅ Complete   |
+| `repositories/pipeline_edge_repo.py` | Pipeline edge CRUD     | ✅ Complete   |
+| `services/pipeline_service.py` | Pipeline orchestration     | ✅ Complete   |
+| `services/migration_executor.py` | Single-table ETL engine   | ✅ Complete   |
 
 ### Data Flow
 
-**PostgreSQL Architecture**:
+**Dual Interface**:
 
-- **Connection pooling**: Thread-safe via SQLAlchemy Engine singleton
-- **Repositories**: Handle all PostgreSQL operations via `repositories/connection.py`
-- **Transactions**: Use `get_transaction()` context manager for auto-commit
-- **Thread safety**: Each thread gets its own connection from the pool
+- **Streamlit** (`app.py` → controllers → views) — Dashboard for config, mapping, pipeline design
+- **FastAPI** (`api/main.py` → routers) — REST API for frontend + job triggering
 
-**Config Storage**:
+**Pipeline Execution Flow**:
 
-- **Mapping configs** → Saved as JSON in PostgreSQL `configs` table
-- **Version history** → Stored in `config_histories` table
-- **Pipelines** → Stored in `pipelines` table with UUID primary keys
-- **Pipeline runs** → Stored in `pipeline_runs` table with status tracking
+```
+Frontend (React Flow) → POST /api/v1/jobs {pipeline_id}
+    → pipeline_repo.get_by_id() — loads pipeline + nodes (JOIN configs) + edges (JOIN configs)
+    → PipelineExecutor.execute()
+        → _resolve_order_from_edges() — topological sort from edges
+        → For each node:
+            → config_repo.get_content(config_name)
+            → _resolve_conn_configs_for_step(config) — resolve datasource UUIDs → db_type → engine
+            → run_single_migration(config, src_conn, tgt_conn)
+                → generate_sql (priority) or build_select_query (fallback)
+                → pd.read_sql() → transform_batch() → batch_insert()
+        → Socket.IO events: job:batch, job:error, job:completed
+```
 
-**Migration Engine**:
+**Per-Step Datasource Resolution**:
 
-- **Checkpoints** → Stored in `migration_checkpoints/` (versioned format v2)
-- **Logs** → Written to `migration_logs/migration_NAME_TIMESTAMP.log`
+Each pipeline node points to a config via `pipeline_nodes.config_id`. Each config has
+`datasource_source_id` and `datasource_target_id` (UUID FK → datasources). The executor
+resolves these per-step, so a single pipeline can mix PostgreSQL and MSSQL datasources.
 
 ### Config JSON Structure
 
-Core data structure passed between Schema Mapper and Migration Engine:
-
 ```json
 {
-  "source": { "database": "<datasource_id>", "table": "<table>" },
-  "target": { "database": "<datasource_id>", "table": "<table>" },
+  "source": { "database": "<display_name>", "table": "<table>" },
+  "target": { "database": "<display_name>", "table": "<table>" },
   "mappings": [
     {
       "source": "col_a",
@@ -231,35 +253,47 @@ Core data structure passed between Schema Mapper and Migration Engine:
 }
 ```
 
+**generate_sql** (optional): If set, used as SELECT query instead of auto-generated one.
+Transformers still apply after `pd.read_sql(generate_sql)`.
+
+### PostgreSQL Schema
+
+**Tables** (all in PostgreSQL):
+
+| Table              | PK           | Description                                    |
+| ------------------ | ------------ | ---------------------------------------------- |
+| `datasources`      | SERIAL       | Connection profiles (name, db_type, host, port) |
+| `configs`          | UUID         | Migration configs (json_data, versioning)      |
+| `config_histories` | UUID         | Config version snapshots                       |
+| `pipelines`        | UUID         | Pipeline definitions                            |
+| `pipeline_nodes`   | UUID         | Nodes — each links to a config (config_id FK)   |
+| `pipeline_edges`   | UUID         | Edges — source_config_uuid → target_config_uuid |
+| `pipeline_runs`    | UUID         | Run tracking (status, steps_json, job_id FK)   |
+| `jobs`             | UUID         | Job requests (pipeline_id FK, status)          |
+
+**Key Relationships**:
+
+- `pipeline_nodes.config_id` → `configs.id` (each node = one migration config)
+- `pipeline_edges.source_config_uuid` → `configs.id` (dependency graph)
+- `pipeline_edges.target_config_uuid` → `configs.id`
+- `pipeline_runs.job_id` → `jobs.id` ON DELETE SET NULL
+- `jobs.pipeline_id` → `pipelines.id` ON DELETE CASCADE
+- `configs.datasource_source_id` → `datasources.id` (source DB for config)
+- `configs.datasource_target_id` → `datasources.id` (target DB for config)
+
 ### Healthcare Domain Notes
 
 - `ml_mapper.py` — Thai HIS dictionary with acronyms: `HN` (hospital number), `VN` (visit number), `CID` (citizen ID), etc.
 - Transformer `BUDDHIST_TO_ISO` — converts Thai Buddhist years (BE = CE + 543)
 - `mini_his/full_his_mockup.sql` — 884KB PostgreSQL schema with mock patient/visit data
 
-### PostgreSQL Schema
-
-**Tables** (all in PostgreSQL):
-
-- `datasources` — Datasource connection profiles (SERIAL PK)
-- `configs` — Migration configurations (UUID PK)
-- `config_histories` — Config version history (UUID PK)
-- `pipelines` — Pipeline definitions (UUID PK)
-- `pipeline_runs` — Pipeline execution runs (UUID PK)
-
-**Connection String**:
-
-```bash
-DATABASE_URL=postgresql://user:password@localhost:5432/his_analyzer
-```
-
 ## SOLID Principles Implementation
 
 ### ✅ Single Responsibility Principle (SRP)
 
-- Each repository handles ONE domain (datasource, config, pipeline, pipeline_run)
-- Services split into focused modules (db_connector, connection_pool, schema_inspector, connection_tester)
-- Controllers own ONE page's logic
+- Each repository handles ONE domain (datasource, config, pipeline, pipeline_run, job)
+- Services split into focused modules (db_connector, connection_pool, migration_executor, pipeline_service)
+- Controllers own ONE page's logic; API routers own ONE resource
 
 ### ✅ Open/Closed Principle (OCP)
 
@@ -281,80 +315,13 @@ DATABASE_URL=postgresql://user:password@localhost:5432/his_analyzer
 
 - Controllers depend on protocol interfaces, not concrete implementations
 - `PipelineExecutor` receives repositories via constructor injection
-- `ml_mapper` has no Streamlit dependencies (moved caching to controller)
-
-## Migration Status
-
-**All 10 phases complete** ✅
-
-| Phase    | Description                            | Status      |
-| -------- | -------------------------------------- | ----------- |
-| Phase 1  | PostgreSQL connection setup            | ✅ Complete |
-| Phase 2  | Repository pattern                     | ✅ Complete |
-| Phase 3  | Protocol interfaces (DIP)              | ✅ Complete |
-| Phase 4  | Database dialect registry (OCP)        | ✅ Complete |
-| Phase 5  | Transformer/Validator registries (OCP) | ✅ Complete |
-| Phase 6  | ML Mapper refactored (DIP)             | ✅ Complete |
-| Phase 7  | MVC refactoring (6/6 pages)            | ✅ Complete |
-| Phase 8  | Pipeline Service DI injection          | ✅ Complete |
-| Phase 9  | DB Connector split (SRP)               | ✅ Complete |
-| Phase 10 | Migration script + cleanup             | ✅ Complete |
-
-See `plan/migrate-sqlite-to-postgresql.md` for detailed implementation notes.
-
-## Development Guidelines
-
-### Adding New Transformers
-
-```python
-# In data_transformers/text.py (or new file)
-from data_transformers.registry import register
-
-@register("MY_TRANSFORMER", "My Transformer", "Description")
-def my_transformer(series, params=None):
-    return series.astype(str).str.upper()
-```
-
-### Adding New Validators
-
-```python
-# In validators/new_validator.py
-from validators.registry import register_validator
-
-@register_validator("MY_VALIDATOR", "My Validator")
-def my_validator(series, params=None):
-    # Validation logic
-    pass
-```
-
-### Creating New Controllers
-
-Follow `CODE_OF_CONTRACT.md` for strict MVC conventions:
-
-1. Controller owns all session state
-2. Controller fetches all data
-3. Controller defines all callbacks
-4. View does pure rendering only
-
-### Testing
-
-```bash
-# Unit tests
-python3.11 -m pytest tests/test_pipeline_service.py -v
-
-# Integration tests
-python3.11 -m pytest tests/integration/ -v
-
-# Coverage
-python3.11 -m pytest --cov=repositories --cov=services
-```
+- `ml_mapper` has no Streamlit dependencies
 
 ## Important Notes
 
 ⚠️ **Database.py Facade Being Removed**
 
-- The `database.py` file is a legacy re-export facade
-- Import from repositories directly instead:
+- Import from repositories directly:
   - ❌ `import database as db; db.get_datasources()`
   - ✅ `from repositories.datasource_repo import get_all`
 
@@ -370,10 +337,22 @@ python3.11 -m pytest --cov=repositories --cov=services
 - Pass `uuid.UUID` objects, not strings
 - Let PostgreSQL generate UUIDs via `gen_random_uuid()` default
 
+⚠️ **Datasource Resolution in Pipelines**
+
+- Pipeline executor resolves datasource connections **per-step** from `config._datasource_source_id` / `_datasource_target_id`
+- Do NOT pass a single `source_conn_config`/`target_conn_config` for the whole pipeline — each step may use different databases (e.g., PostgreSQL source + MSSQL source in same pipeline)
+- Datasource lookup is always by UUID, never by display name
+
+⚠️ **generate_sql Priority**
+
+- If `config.generate_sql` is set and non-empty, it is used as the SELECT query
+- Dynamic `build_select_query()` is only used as fallback when `generate_sql` is null
+- Transformers still apply after `pd.read_sql()` regardless of which SELECT is used
+
 ---
 
-**Last Updated**: 2026-04-10
+**Last Updated**: 2026-04-14
 **Python Version**: 3.11
 **Database**: PostgreSQL 18+
-**Architecture**: Clean Architecture + SOLID + MVC
+**Architecture**: Clean Architecture + SOLID + MVC + REST API
 **Status**: ✅ Production Ready

@@ -18,6 +18,7 @@ class PipelineRunsService(BaseService):
     allowed_fields = [
         "id",
         "pipeline_id",
+        "job_id",
         "status",
         "started_at",
         "completed_at",
@@ -68,8 +69,10 @@ class PipelineRunsService(BaseService):
         if isinstance(steps_json, dict):
             steps_json = json.dumps(steps_json, ensure_ascii=False)
 
+        raw_job_id = data.get("job_id")
         record = PipelineRunRecord(
             pipeline_id=uuid.UUID(data.get("pipeline_id", "")),
+            job_id=uuid.UUID(raw_job_id) if raw_job_id else None,
             status=data.get("status", "pending"),
             steps_json=steps_json,
         )

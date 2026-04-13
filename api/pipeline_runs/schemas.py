@@ -8,6 +8,7 @@ class CreatePipelineRunSchema(BaseModel):
     """Create pipeline run request."""
 
     pipeline_id: str = Field(..., min_length=1)
+    job_id: str | None = Field(default=None)
     status: str = Field(default="pending")
     steps_json: str | dict = Field(default="{}")
 
@@ -25,6 +26,7 @@ class PipelineRunSchema(BaseModel):
 
     id: str
     pipeline_id: str
+    job_id: str | None
     status: str
     started_at: str | None
     completed_at: str | None

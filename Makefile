@@ -76,12 +76,12 @@ api-reload:
 	@echo "🚀 Starting FastAPI with hot-reload on http://localhost:8000"
 	@echo "   Docs: http://localhost:8000/docs"
 	@echo ""
-	. $(BIN)/activate && uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+	. $(BIN)/activate && uvicorn api.main:socket_asgi --host 0.0.0.0 --port 8000 --reload
 
 api-prod:
 	@echo "🚀 Starting FastAPI (production mode) on http://localhost:8000"
 	@echo ""
-	. $(BIN)/activate && uvicorn api.main:app --host 0.0.0.0 --port 8000
+	. $(BIN)/activate && uvicorn api.main:socket_asgi --host 0.0.0.0 --port 8000
 
 test:
 	@echo "🧪 Running all unit tests..."

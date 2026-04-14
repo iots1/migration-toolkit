@@ -320,6 +320,8 @@ def generate_json_config(params: dict, mappings_df: pd.DataFrame) -> dict:
     for _, row in mappings_df.iterrows():
         src_col = row["Source Column"]
         is_ignored = row.get("Ignore", False)
+        if is_ignored:
+            continue
 
         item: dict = {
             "source": src_col,

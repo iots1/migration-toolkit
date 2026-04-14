@@ -149,18 +149,7 @@ def _run_migration(add_log, status_box, metric_processed, metric_batch, metric_t
 
     if result.status == "failed":
         status_box.update(label="Migration Failed", state="error", expanded=True)
-        short_msg, failed_sql = _parse_db_error(result.error_message or "")
-        st.error(f"**Migration Failed:** {short_msg}")
-        if failed_sql:
-            with st.expander("🔍 Failed SQL Query", expanded=True):
-                st.code(failed_sql, language="sql")
-        with st.expander("📋 Full Error Details"):
-            st.code(result.error_message or "No details", language="text")
-        col_err1, _ = st.columns(2)
-        with col_err1:
-            if st.button("🗑️ Emergency Truncate Target Table", key="emergency_truncate"):
-                tgt_engine = DSRepo.get_engine(st.session_state.migration_tgt_profile)
-                _emergency_truncate(tgt_engine, target_table, add_log)
+        _render_migration_error(result.error_message or "", target_table, add_log)
     else:
         progress_bar.progress(100)
         status_box.update(label="Migration Complete!", state="complete", expanded=False)
@@ -272,17 +261,92 @@ def _reset_and_restart() -> None:
     st.rerun()
 
 
+def _render_migration_error(raw_error: str, target_table: str, add_log) -> None:
+    """
+    Render a user-friendly error panel for migration failures.
+
+    Handles three error types:
+    - Truncation (executor-enriched): structured column breakdown
+    - Raw DB error (psycopg2/pymssql): extracted summary + optional SQL
+    - Generic: plain message
+    """
+    # ── Truncation error (already enriched by executor) ───────────────────────
+    if raw_error.startswith("Data too long:"):
+        st.error("**Migration Failed: Data too long for target column(s)**")
+        _render_truncation_details(raw_error)
+        _render_error_actions(target_table, add_log)
+        return
+
+    # ── Raw DB error ──────────────────────────────────────────────────────────
+    short_msg, failed_sql = _parse_db_error(raw_error)
+    st.error(f"**Migration Failed:** {short_msg}")
+    if failed_sql:
+        with st.expander("🔍 Failed SQL Query", expanded=True):
+            st.code(failed_sql, language="sql")
+    with st.expander("📋 Full Error Details"):
+        st.code(raw_error or "No details", language="text")
+    _render_error_actions(target_table, add_log)
+
+
+def _render_truncation_details(error_msg: str) -> None:
+    """
+    Parse and display the structured truncation error from migration_executor.
+
+    Handles two formats produced by the executor:
+
+    Full scan (schema found):
+        Data too long: [col] limit=10, actual=35, overflow_rows=42; ... . Suggestion
+
+    Fallback scan (schema inspect failed, best-effort):
+        Data too long: [col] limit=10, actual=35, overflow_rows=unknown. Suggestion
+    """
+    import re
+
+    body = error_msg.removeprefix("Data too long:").strip()
+    parts = body.rsplit(". ", 1)
+    columns_part = parts[0]
+    suggestion = parts[1] if len(parts) > 1 else "Increase column size in target DB or add TRUNCATE_TO transformer"
+
+    # Match both "overflow_rows=42" and "overflow_rows=unknown"
+    pattern = r"\[([^\]]+)\]\s*limit=(\d+),\s*actual=(\d+),\s*overflow_rows=(\w+)"
+    matches = re.findall(pattern, columns_part)
+
+    if not matches:
+        st.warning(error_msg)
+        return
+
+    st.markdown("**Columns exceeding target size limit:**")
+    for col, limit, actual, overflow in matches:
+        overflow_label = f"{overflow} rows affected" if overflow.isdigit() else "affected rows unknown"
+        excess = int(actual) - int(limit)
+        st.markdown(
+            f"| | |\n|---|---|\n"
+            f"| **Column** | `{col}` |\n"
+            f"| **Target limit** | {limit} chars |\n"
+            f"| **Longest value found** | **{actual} chars** (+{excess} over limit) |\n"
+            f"| **Affected rows** | {overflow_label} |"
+        )
+
+    st.info(f"💡 **Suggestion:** {suggestion}")
+
+    with st.expander("📋 Full Error Details"):
+        st.code(error_msg, language="text")
+
+
+def _render_error_actions(target_table: str, add_log) -> None:
+    """Render action buttons shown after any migration failure."""
+    col_err1, _ = st.columns(2)
+    with col_err1:
+        if st.button("🗑️ Emergency Truncate Target Table", key="emergency_truncate"):
+            tgt_engine = DSRepo.get_engine(st.session_state.migration_tgt_profile)
+            _emergency_truncate(tgt_engine, target_table, add_log)
+
+
 def _parse_db_error(raw: str) -> tuple[str, str | None]:
     """
-    Extract a readable summary and the failed SQL from a SQLAlchemy/pymssql error string.
+    Extract a readable summary and the failed SQL from a raw SQLAlchemy/DB error string.
 
     Returns (short_summary, failed_sql | None).
-
-    Raw pymssql format:
-        (pymssql.exceptions.ProgrammingError) (207, b"Invalid column name 'old_hn'.
-        DB-Lib error message 20018, severity 16:\\nGeneral SQL Server error...\\n" * N)
-        [SQL: SELECT ...]
-        (Background on this error at: ...)
     """
     import re
 
@@ -300,20 +364,24 @@ def _parse_db_error(raw: str) -> tuple[str, str | None]:
             sql_end = len(raw)
         failed_sql = raw[sql_start:sql_end].strip().rstrip("]").strip()
 
-    # ── Build short summary ───────────────────────────────────────────────────
     first_line = raw.split("\n")[0]
+
+    # psycopg2 truncation: (psycopg2.errors.StringDataRightTruncation) value too long...
+    if "StringDataRightTruncation" in first_line or (
+        "psycopg2" in first_line and "truncat" in first_line.lower()
+    ):
+        limit_match = re.search(r"character varying\((\d+)\)", first_line)
+        limit_info = f" (limit: {limit_match.group(1)} chars)" if limit_match else ""
+        return f"Data too long for a VARCHAR column{limit_info} — check column mappings", failed_sql
 
     # pymssql pattern: (207, b"Invalid column name 'old_hn'.DB-Lib...)
     match = re.search(r'\((\d+),\s*b[\'"](.+?)(?:DB-Lib|\\n|[\'"])', first_line)
     if match:
         code = match.group(1)
         msg = match.group(2).rstrip(".").strip()
-        # Exception class name from e.g. "(pymssql.exceptions.ProgrammingError)"
         cls_match = re.search(r'\([\w.]*?(\w+Error)\)', first_line)
         exc = cls_match.group(1) if cls_match else "DatabaseError"
-        short_summary = f"{exc} [{code}]: {msg}"
-    else:
-        # Generic fallback — first 200 chars of the first line
-        short_summary = first_line[:200]
+        return f"{exc} [{code}]: {msg}", failed_sql
 
-    return short_summary, failed_sql
+    # Generic fallback
+    return first_line[:200], failed_sql

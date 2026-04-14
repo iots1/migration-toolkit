@@ -398,13 +398,9 @@ class PipelineExecutor:
         """
         try:
             result = self.execute()
-            steps_json = json.dumps(self._steps_to_json(result.steps))
             self._run_repo.update(
                 self._run_id,
-                PipelineRunUpdateRecord(
-                    status=result.status,
-                    steps_json=steps_json,
-                ),
+                PipelineRunUpdateRecord(status=result.status),
             )
             if self._completion_callback:
                 self._completion_callback(
@@ -418,11 +414,7 @@ class PipelineExecutor:
             try:
                 self._run_repo.update(
                     self._run_id,
-                    PipelineRunUpdateRecord(
-                        status="failed",
-                        steps_json="{}",
-                        error_message=str(e),
-                    ),
+                    PipelineRunUpdateRecord(status="failed", error_message=str(e)),
                 )
             except Exception as repo_err:
                 print(f"[JOB ERROR] Failed to update run status: {repo_err}")
@@ -440,13 +432,19 @@ class PipelineExecutor:
     def _resolve_execution_order(self) -> list:
         """Return steps in a valid execution order using Kahn's BFS algorithm.
 
-        When pipeline edges are available, builds the dependency graph from
-        edges (source_config_name → target_config_name means target depends
-        on source) and nodes (for ordering tiebreak via order_sort).
-        Otherwise falls back to PipelineStep.depends_on.
+        Priority:
+        1. Edges present  → topological sort via _resolve_order_from_edges()
+        2. Nodes present, no edges → single/isolated nodes run in order_sort order
+           (handles single-node pipelines or pipelines not yet wired with edges)
+        3. Neither → legacy PipelineStep.depends_on fallback
         """
         if self._pipeline.edges:
             return self._resolve_order_from_edges()
+        if self._pipeline.nodes:
+            return sorted(
+                self._pipeline.nodes,
+                key=lambda n: n.get("order_sort", 0),
+            )
         return self._resolve_order_from_steps()
 
     def _resolve_order_from_edges(self) -> list[dict]:
@@ -627,26 +625,6 @@ class PipelineExecutor:
         }
         return src_conn, tgt_conn
 
-        failed_or_skipped = {
-            name
-            for name, r in results.items()
-            if r.status in ("failed", "skipped_dependency")
-        }
-
-        if self._pipeline.edges:
-            for edge in self._pipeline.edges:
-                if edge.get("target_config_name") == config_name:
-                    dep = edge.get("source_config_name", "")
-                    if dep in failed_or_skipped:
-                        return True, f"Dependency '{dep}' failed or was skipped"
-        else:
-            step_map = {s.config_name: s for s in self._pipeline.steps}
-            step = step_map.get(config_name)
-            if step:
-                for dep in step.depends_on:
-                    if dep in failed_or_skipped:
-                        return True, f"Dependency '{dep}' failed or was skipped"
-
         return False, ""
 
     # ------------------------------------------------------------------
@@ -790,10 +768,7 @@ class PipelineExecutor:
             return
         self._run_repo.update(
             self._run_id,
-            PipelineRunUpdateRecord(
-                status="running",
-                steps_json=json.dumps(self._steps_to_json(results)),
-            ),
+            PipelineRunUpdateRecord(status="running"),
         )
 
     @staticmethod

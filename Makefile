@@ -76,11 +76,13 @@ api-reload:
 	@echo "🚀 Starting FastAPI with hot-reload on http://localhost:8000"
 	@echo "   Docs: http://localhost:8000/docs"
 	@echo ""
+	@lsof -ti :8000 | xargs kill -9 2>/dev/null || true
 	. $(BIN)/activate && uvicorn api.main:socket_asgi --host 0.0.0.0 --port 8000 --reload
 
 api-prod:
 	@echo "🚀 Starting FastAPI (production mode) on http://localhost:8000"
 	@echo ""
+	@lsof -ti :8000 | xargs kill -9 2>/dev/null || true
 	. $(BIN)/activate && uvicorn api.main:socket_asgi --host 0.0.0.0 --port 8000
 
 test:

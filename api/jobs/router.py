@@ -134,16 +134,21 @@ def create_job(body: CreateJobSchema):
 
     config_repo = ConfigRepositoryAdapter()
 
-    latest = pipeline_run_repo.get_latest(uuid.UUID(pc.id))
-    if latest and latest["status"] == "running":
+    # Check if there's already a running job for this pipeline
+    recent_jobs = job_repo.get_by_pipeline(uuid.UUID(pc.id), limit=1)
+    if recent_jobs and recent_jobs[0]["status"] == "running":
         raise HTTPException(
             status_code=409,
-            detail="A run is already in progress for this pipeline",
+            detail="A job is already running for this pipeline",
         )
+
+    # Count configs (nodes) in the pipeline for progress tracking
+    total_config = len(pc.nodes) if pc.nodes else 0
 
     job_record = JobRecord(
         pipeline_id=uuid.UUID(pc.id),
         status="running",
+        total_config=total_config,
     )
     job_id: uuid.UUID = job_repo.save(job_record)
     job_id_str = str(job_id)
@@ -156,33 +161,22 @@ def create_job(body: CreateJobSchema):
         rows_processed: int,
         error: str | None = None,
     ) -> None:
+        """
+        Called after each batch completes (for socket.io + job updates).
+
+        Note: The actual batch record is already saved by PipelineExecutor._save_batch_record()
+        This callback is just for job status updates and socket.io notifications.
+        """
         if error:
+            # Update job record to mark error
             try:
                 job_repo.update(
                     job_id, JobUpdateRecord(status="running", error_message=error)
                 )
             except Exception:
                 pass
-            try:
-                pipeline_run_repo.update(
-                    uuid.UUID(run_id),
-                    PipelineRunUpdateRecord(
-                        status="running",
-                        steps_json=json.dumps(
-                            {
-                                step_name: {
-                                    "status": "failed",
-                                    "batch_num": batch_num,
-                                    "rows_processed": rows_processed,
-                                    "error_message": error,
-                                }
-                            }
-                        ),
-                        error_message=error,
-                    ),
-                )
-            except Exception:
-                pass
+
+            # Emit socket.io error event
             emit_from_thread(
                 "job:error",
                 {
@@ -195,24 +189,8 @@ def create_job(body: CreateJobSchema):
                 },
             )
         else:
-            try:
-                pipeline_run_repo.update(
-                    uuid.UUID(run_id),
-                    PipelineRunUpdateRecord(
-                        status="running",
-                        steps_json=json.dumps(
-                            {
-                                step_name: {
-                                    "status": "running",
-                                    "batch_num": batch_num,
-                                    "rows_processed": rows_processed,
-                                }
-                            }
-                        ),
-                    ),
-                )
-            except Exception:
-                pass
+            # Emit socket.io batch complete event
+            # (batch record already saved in _save_batch_record)
             emit_from_thread(
                 "job:batch",
                 {

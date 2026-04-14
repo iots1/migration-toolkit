@@ -12,15 +12,22 @@ import uuid
 
 @dataclass
 class JobRecord:
-    """Write model for INSERT into jobs. Single source of truth for writable columns."""
+    """
+    Write model for INSERT into jobs.
+
+    Single source of truth for writable columns.
+    total_config: Number of configs in the pipeline being executed.
+    """
 
     pipeline_id: uuid.UUID
     status: str = "running"
+    total_config: int = 0
 
 
 @dataclass
 class JobUpdateRecord:
-    """Write model for patching jobs status / error_message."""
+    """Write model for patching jobs (status, error_message, total_config)."""
 
     status: str
     error_message: str | None = None
+    total_config: int | None = None

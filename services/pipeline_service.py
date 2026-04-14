@@ -84,12 +84,8 @@ class PipelineRunRepositoryAdapter:
     def save(self, record: PipelineRunRecord) -> str:
         """Save a new pipeline run. Injects job_id if set. Returns generated run_id."""
         if self._job_id is not None and record.job_id is None:
-            record = PipelineRunRecord(
-                pipeline_id=record.pipeline_id,
-                status=record.status,
-                steps_json=record.steps_json,
-                job_id=self._job_id,
-            )
+            # Inject job_id into the record
+            record.job_id = self._job_id
         return run_save(record)
 
     def update(self, run_id, patch: PipelineRunUpdateRecord) -> None:
@@ -298,6 +294,7 @@ class PipelineExecutor:
                     log_callback=self._log_callback,
                     progress_callback=self._progress_callback,
                     checkpoint_callback=self._update_step_checkpoint,
+                    batch_insert_callback=self._save_batch_record,
                 )
             except Exception as exc:
                 err_msg = str(exc)
@@ -374,15 +371,13 @@ class PipelineExecutor:
         """Challenge 3: Launch execute() in a daemon thread.
 
         Returns run_id immediately so the caller can store it and poll
-        self._run_repo.get_latest(run_id) for progress.
+        progress via batch records (each batch creates a pipeline_runs record).
+
+        Note: With batch-level records, we don't create an initial record here.
+        Batch records are created by _save_batch_record() after each batch.
+        This run_id is just a UUID for correlation with job_id.
         """
-        self._run_id = self._run_repo.save(
-            PipelineRunRecord(
-                pipeline_id=uuid.UUID(self._pipeline.id),
-                status="running",
-                steps_json="{}",
-            )
-        )
+        self._run_id = str(uuid.uuid4())
         thread = threading.Thread(
             target=self._background_run,
             daemon=True,
@@ -702,6 +697,81 @@ class PipelineExecutor:
             "rows_processed": rows,
         }
         save_pipeline_checkpoint(self._pipeline.name, checkpoint["steps"])
+
+    def _save_batch_record(
+        self,
+        config_name: str,
+        batch_round: int,
+        rows_in_batch: int,
+        rows_cumulative: int,
+        batch_size: int,
+        total_records_in_config: int,
+        status: str,
+        error_message: str | None = None,
+        transformation_warnings: str | None = None,
+    ) -> None:
+        """
+        Save a batch-level record to pipeline_runs table.
+
+        Called after each batch completes (success or failure).
+        This is the new callback from migration_executor.py for batch-level tracking.
+
+        Args:
+            config_name: Name of the config being migrated
+            batch_round: Batch number (0-indexed)
+            rows_in_batch: Rows inserted in THIS batch (0 if failed)
+            rows_cumulative: Total rows from batch 0 to this batch
+            batch_size: Configured batch size
+            total_records_in_config: Total records in this config
+            status: 'success' or 'failed'
+            error_message: Error text if status='failed'
+            transformation_warnings: JSON string of warnings
+        """
+        try:
+            from models.pipeline_config import PipelineRunRecord
+
+            # Get job_id if available (from run_repo._job_id if using adapter)
+            job_id = None
+            if hasattr(self._run_repo, "_job_id"):
+                job_id = self._run_repo._job_id
+
+            # Get pipeline_id
+            pipeline_id = uuid.UUID(self._pipeline.id)
+
+            # Create batch record
+            record = PipelineRunRecord(
+                pipeline_id=pipeline_id,
+                config_name=config_name,
+                batch_round=batch_round,
+                rows_in_batch=rows_in_batch,
+                rows_cumulative=rows_cumulative,
+                batch_size=batch_size,
+                total_records_in_config=total_records_in_config,
+                status=status,
+                job_id=job_id,
+                error_message=error_message,
+                transformation_warnings=transformation_warnings,
+            )
+
+            # Save to database
+            self._run_repo.save(record)
+
+            # Also fire batch_event_callback if set (for socket.io, etc.)
+            if self._batch_event_callback and self._run_id:
+                try:
+                    self._batch_event_callback(
+                        str(self._run_id),
+                        config_name,
+                        batch_round,
+                        rows_in_batch,
+                        error_message if status == "failed" else None,
+                    )
+                except Exception:
+                    pass  # Never let callback failure break migration
+
+        except Exception as e:
+            # Log but don't fail the migration
+            self._log(f"Warning: Failed to save batch record for {config_name}: {e}", "⚠️")
 
     # ------------------------------------------------------------------
     # Private — misc helpers

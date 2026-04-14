@@ -134,25 +134,35 @@ class PipelineEdgeRecord:
 @dataclass
 class PipelineRunRecord:
     """
-    Write model for INSERT into pipeline_runs.
+    Write model for INSERT into pipeline_runs (1 record per batch).
 
-    Pass to pipeline_run_repo.save() instead of 3 flat params.
+    Each batch execution creates a new record with flat columns.
+    Example: 2 configs × 5 batches each = 10 records in pipeline_runs.
+
+    Pass to pipeline_run_repo.save() instead of flat params.
     """
 
     pipeline_id: uuid.UUID
-    status: str = "pending"
-    steps_json: str | dict = field(default_factory=dict)
+    config_name: str
+    batch_round: int
+    rows_in_batch: int = 0
+    rows_cumulative: int = 0
+    batch_size: int = 1000
+    total_records_in_config: int = 0
+    status: str = "success"  # success | failed
     job_id: uuid.UUID | None = None
+    error_message: str | None = None
+    transformation_warnings: str | None = None  # JSON string or semicolon-delimited
 
 
 @dataclass
 class PipelineRunUpdateRecord:
     """
-    Write model for patching pipeline_runs status.
+    Write model for patching pipeline_runs (rare, mainly for status changes).
 
-    Pass to pipeline_run_repo.update() instead of 4 flat params.
+    Since each batch is a separate INSERT record, patches are minimal.
+    Primarily used to change status after batch completes.
     """
 
     status: str
-    steps_json: str | None = None
     error_message: str | None = None

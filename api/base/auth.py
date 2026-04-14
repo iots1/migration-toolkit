@@ -16,12 +16,15 @@ async def verify_api_key(
     """Verify X-API-Key header.
 
     If API_KEY env var is not set, authentication is skipped (dev mode).
-    Health endpoint is always excluded.
+    Health endpoint and CORS preflight requests are always excluded.
     """
     if not _EXPECTED_KEY:
         return
 
     if request.url.path == "/health":
+        return
+
+    if request.method == "OPTIONS":
         return
 
     if api_key != _EXPECTED_KEY:

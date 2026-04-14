@@ -45,6 +45,7 @@ def run_single_migration(
     log_callback=None,
     progress_callback=None,
     checkpoint_callback=None,
+    batch_insert_callback=None,
 ) -> MigrationResult:
     """
     Run a full single-table migration and return a MigrationResult.
@@ -56,7 +57,10 @@ def run_single_migration(
         log_callback:        fn(message: str, icon: str)
         progress_callback:   fn(batch_num: int, rows_processed: int, rows_in_batch: int)
         checkpoint_callback: fn(config_name: str, batch_num: int, rows: int)
-                             — additional hook for PipelineExecutor (2D checkpoint)
+                             — legacy hook for resumable checkpoints
+        batch_insert_callback: fn(config_name, batch_round, rows_in_batch, rows_cumulative,
+                                  batch_size, total_records_in_config, status, error_message, warnings)
+                             — save batch record to pipeline_runs after each batch
     """
     def log(msg: str, icon: str = "ℹ️") -> None:
         if log_callback:
@@ -106,6 +110,15 @@ def run_single_migration(
         log(f"SELECT Query: {select_query}", "🔍")
         log(f"Starting Batch Processing (Size: {batch_size})...", "🚀")
 
+        # Get total record count in source (for batch tracking)
+        total_records_in_config = 0
+        try:
+            count_query = f"SELECT COUNT(*) FROM {source_table}"
+            count_result = src_engine.execute(text(count_query))
+            total_records_in_config = count_result.scalar() or 0
+        except Exception:
+            total_records_in_config = 0  # If count fails, proceed anyway
+
         data_iterator = pd.read_sql(select_query, src_engine, chunksize=batch_size, coerce_float=False)
         total_rows = 0
         batch_num = 0
@@ -123,8 +136,10 @@ def run_single_migration(
 
             df_batch = clean_dataframe(df_batch)
 
+            transformation_warnings = []
             try:
                 df_batch, bit_columns, val_warnings = transform_batch(df_batch, config)
+                transformation_warnings = val_warnings
                 for w in val_warnings:
                     log(f"Batch {batch_num} — {w}", "⚠️")
             except Exception as e:
@@ -141,12 +156,52 @@ def run_single_migration(
                     checkpoint_callback(config_name, batch_num, total_rows)
                 if progress_callback:
                     progress_callback(batch_num, total_rows, rows_in_batch)
+
+                # NEW: Save batch record to pipeline_runs (if callback provided)
+                if batch_insert_callback:
+                    try:
+                        import json as _json
+                        warnings_str = _json.dumps(transformation_warnings, ensure_ascii=False) if transformation_warnings else None
+                        batch_insert_callback(
+                            config_name=config_name,
+                            batch_round=batch_num - 1,  # 0-indexed
+                            rows_in_batch=rows_in_batch,
+                            rows_cumulative=total_rows,
+                            batch_size=batch_size,
+                            total_records_in_config=total_records_in_config,
+                            status="success",
+                            error_message=None,
+                            transformation_warnings=warnings_str
+                        )
+                    except Exception as cb_err:
+                        log(f"Warning: Failed to record batch to pipeline_runs: {cb_err}", "⚠️")
+
                 log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
 
             except Exception as e:
                 save_checkpoint(config_name, batch_num - 1, total_rows)
                 short_err = str(e).split("[SQL:")[0].strip()[:300]
                 error_message = short_err
+
+                # NEW: Save failed batch record (if callback provided)
+                if batch_insert_callback:
+                    try:
+                        import json as _json
+                        warnings_str = _json.dumps(transformation_warnings, ensure_ascii=False) if transformation_warnings else None
+                        batch_insert_callback(
+                            config_name=config_name,
+                            batch_round=batch_num - 1,  # 0-indexed
+                            rows_in_batch=0,  # Failed, no rows inserted
+                            rows_cumulative=total_rows,  # Previous cumulative
+                            batch_size=batch_size,
+                            total_records_in_config=total_records_in_config,
+                            status="failed",
+                            error_message=short_err,
+                            transformation_warnings=warnings_str
+                        )
+                    except Exception as cb_err:
+                        log(f"Warning: Failed to record failed batch to pipeline_runs: {cb_err}", "⚠️")
+
                 log(f"Insert Failed at Batch {batch_num}: {short_err}", "❌")
                 migration_failed = True
                 break

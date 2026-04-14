@@ -157,7 +157,7 @@ def run_single_migration(
         log(f"SELECT Query: {select_query}", "🔍")
         log(f"Starting Batch Processing (Size: {batch_size})...", "🚀")
 
-        total_source_rows = _count_source_rows(src_engine, source_table)
+        total_source_rows = _count_source_rows(src_engine, select_query, source_table)
 
         total_rows, batch_num, error_message = _process_batches(
             src_engine=src_engine,
@@ -231,6 +231,28 @@ def run_single_migration(
         tgt_engine.dispose()
 
 
+# Save a checkpoint to disk every N successful batches.
+# Reduces disk I/O by ~10x while keeping resume granularity acceptable.
+# Error checkpoints always save (regardless of interval).
+_CHECKPOINT_INTERVAL = 10
+
+
+# ---------------------------------------------------------------------------
+# SQL identifier safety
+# ---------------------------------------------------------------------------
+
+
+def _quote_identifier(name: str) -> str:
+    """Double-quote each part of a dotted identifier to prevent SQL injection.
+
+    Examples:
+        "cnPatientDudeeV1"      → '"cnPatientDudeeV1"'
+        "public.test_patients"  → '"public"."test_patients"'
+        "dbo.patients"          → '"dbo"."patients"'
+    """
+    return ".".join(f'"{part.strip().strip(chr(34))}"' for part in name.split("."))
+
+
 # ---------------------------------------------------------------------------
 # Phase helpers — each handles one phase of the migration (SRP)
 # ---------------------------------------------------------------------------
@@ -261,11 +283,27 @@ def _prepare_select_query(
     return build_select_query(config, source_table, src_db_type), config
 
 
-def _count_source_rows(engine, source_table: str) -> int:
-    """Count total rows in source table (best-effort, returns 0 on failure)."""
+def _count_source_rows(engine, select_query: str, source_table: str) -> int:
+    """Count rows from the actual SELECT query (subquery), fallback to table count.
+
+    When generate_sql has JOINs or WHERE filters, the result count differs
+    from the raw source table count. Using the real query ensures accurate
+    progress reporting via total_records_in_config.
+    """
+    # Try counting from the actual query first (accurate for filtered/joined queries)
     try:
         with engine.connect() as conn:
-            result = conn.execute(text(f"SELECT COUNT(*) FROM {source_table}"))
+            count_sql = f"SELECT COUNT(*) FROM ({select_query}) AS _src_count"
+            result = conn.execute(text(count_sql))
+            return result.scalar() or 0
+    except Exception:
+        pass
+    # Fallback: raw table count (when subquery wrapping fails, e.g. MSSQL TOP clause)
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(
+                text(f"SELECT COUNT(*) FROM {_quote_identifier(source_table)}")
+            )
             return result.scalar() or 0
     except Exception:
         return 0
@@ -415,7 +453,10 @@ def _process_single_batch(
 
     # --- Success bookkeeping ---
     total_rows += rows_in_batch
-    save_checkpoint(config_name, batch_num, total_rows)
+    # Save checkpoint every N batches to reduce disk I/O.
+    # Error path (above) always saves so resume works correctly.
+    if batch_num % _CHECKPOINT_INTERVAL == 0:
+        save_checkpoint(config_name, batch_num, total_rows)
 
     if checkpoint_callback:
         checkpoint_callback(config_name, batch_num, total_rows)
@@ -571,8 +612,9 @@ def _build_truncation_fallback(
 
 def _get_row_count(engine, table: str, log: LogCallback) -> int:
     try:
+        quoted = _quote_identifier(table)
         with engine.connect() as conn:
-            result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
+            result = conn.execute(text(f"SELECT COUNT(*) FROM {quoted}"))
             count = result.scalar() or 0
         log(f"Pre-migration count: {count:,} rows in `{table}`", "📊")
         return count
@@ -583,15 +625,16 @@ def _get_row_count(engine, table: str, log: LogCallback) -> int:
 
 def _truncate_table(engine, table: str, log: LogCallback) -> None:
     log(f"Cleaning target table: {table}...", "🧹")
+    quoted = _quote_identifier(table)
     try:
         with engine.begin() as conn:
-            conn.execute(text(f"TRUNCATE TABLE {table}"))
+            conn.execute(text(f"TRUNCATE TABLE {quoted}"))
         log("Target table truncated successfully.", "✅")
     except Exception as e:
         log(f"TRUNCATE failed, trying DELETE FROM... ({e})", "⚠️")
         try:
             with engine.begin() as conn:
-                conn.execute(text(f"DELETE FROM {table}"))
+                conn.execute(text(f"DELETE FROM {quoted}"))
             log("Target table cleared using DELETE.", "✅")
         except Exception as e2:
             log(f"Failed to clean table: {e2}", "❌")
@@ -662,7 +705,7 @@ def _init_hn_counter(
             try:
                 with tgt_engine.connect() as conn:
                     result = conn.execute(
-                        text(f'SELECT MAX("{hn_col}") FROM {target_table}')
+                        text(f'SELECT MAX("{hn_col}") FROM {_quote_identifier(target_table)}')
                     )
                     max_val = result.scalar()
                 if max_val:
@@ -755,8 +798,9 @@ def _verify_post_migration(
 ) -> int:
     """Returns post_count, or -1 if the verify query fails (non-fatal)."""
     try:
+        quoted = _quote_identifier(target_table)
         with tgt_engine.connect() as conn:
-            result = conn.execute(text(f"SELECT COUNT(*) FROM {target_table}"))
+            result = conn.execute(text(f"SELECT COUNT(*) FROM {quoted}"))
             post_count = result.scalar() or 0
         actual_inserted = post_count - pre_count
         log(

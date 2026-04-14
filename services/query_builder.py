@@ -183,21 +183,77 @@ def build_dtype_map(bit_columns: list[str], df: pd.DataFrame, db_type: str) -> d
 # Batch Insert
 # ---------------------------------------------------------------------------
 
+
+def _make_pg_copy_method(target_table: str):
+    """
+    Returns a pandas to_sql 'method' callable that uses PostgreSQL COPY FROM STDIN.
+
+    COPY streams data as text — no SQL parameter limit, 5-10x faster than INSERT.
+    Uses CSV format so Python's csv module handles all quoting/escaping automatically.
+    NULL values (Python None) are written as unquoted empty fields, which COPY CSV
+    maps to SQL NULL.
+
+    target_table is captured in the closure so the COPY statement uses the correct
+    schema-qualified, double-quoted identifier even if pandas strips the schema.
+    """
+    import io
+    import csv as _csv
+
+    quoted = ".".join(
+        f'"{p.strip().strip(chr(34))}"' for p in target_table.split(".")
+    )
+
+    def _pg_copy(table, conn, keys, data_iter):
+        buf = io.StringIO()
+        writer = _csv.writer(buf, lineterminator="\n")
+        writer.writerows(data_iter)
+        buf.seek(0)
+        cols = ", ".join(f'"{k}"' for k in keys)
+        dbapi_conn = conn.connection  # psycopg2 DBAPI connection
+        with dbapi_conn.cursor() as cur:
+            cur.copy_expert(f"COPY {quoted} ({cols}) FROM STDIN WITH CSV", buf)
+
+    return _pg_copy
+
+
 def batch_insert(df: pd.DataFrame, target_table: str, engine, dtype_map: dict = None) -> int:
     """
-    Bulk-insert a DataFrame batch using pandas multi-row INSERT.
+    Bulk-insert a DataFrame batch into the target table.
+
+    PostgreSQL → COPY FROM STDIN (CSV): streams data directly, no parameter limit,
+    5-10x faster than INSERT. dtype_map is not used (PG casts text inputs automatically).
+
+    MySQL / MSSQL → multi-row INSERT with parameter-safe chunksize:
+    PostgreSQL's 65,535 parameter limit doesn't apply, but we guard MySQL/MSSQL too.
 
     Returns number of rows inserted (0 if DataFrame is empty).
     """
     if df.empty:
         return 0
-    df.to_sql(
-        name=target_table,
-        con=engine,
-        if_exists="append",
-        index=False,
-        method="multi",
-        chunksize=2000,
-        dtype=dtype_map or None,
-    )
+
+    is_pg = "postgresql" in str(engine.url)
+
+    if is_pg:
+        df.to_sql(
+            name=target_table,
+            con=engine,
+            if_exists="append",
+            index=False,
+            method=_make_pg_copy_method(target_table),
+            dtype=dtype_map or None,
+        )
+    else:
+        # Guard against parameter-count limits on MySQL / MSSQL
+        n_cols = max(len(df.columns), 1)
+        safe_chunksize = max(1, 60_000 // n_cols)
+        df.to_sql(
+            name=target_table,
+            con=engine,
+            if_exists="append",
+            index=False,
+            method="multi",
+            chunksize=min(safe_chunksize, 2000),
+            dtype=dtype_map or None,
+        )
+
     return len(df)

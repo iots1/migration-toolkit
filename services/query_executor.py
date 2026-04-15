@@ -97,7 +97,7 @@ class QueryExecutor:
                 exc,
             )
             raise SqlValidationError(
-                "Query execution failed. Please check your SQL and try again."
+                f"Query execution failed: {str(exc)}"
             )
         finally:
             if cursor:

@@ -48,7 +48,8 @@ class SqlValidator:
         self._reject_stacked_queries(stripped)
         self._reject_forbidden_keywords(stripped)
         self._enforce_select_only(stripped)
-        return stripped
+        # Strip trailing semicolons to prevent issues when wrapping queries
+        return stripped.rstrip(";").strip()
 
     def _strip_comments(self, sql: str) -> str:
         sql = self._BLOCK_COMMENT_PATTERN.sub("", sql)

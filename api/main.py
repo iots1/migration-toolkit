@@ -26,6 +26,7 @@ from api.configs.router import get_configs_router
 from api.pipelines.router import get_pipelines_router
 from api.pipeline_runs.router import get_pipeline_runs_router
 from api.jobs.router import get_jobs_router
+from api.data_explorers.router import get_data_explorers_router
 from api.socket_manager import sio, socket_asgi, set_event_loop
 
 from repositories.base import init_db
@@ -61,6 +62,7 @@ app.include_router(get_configs_router())
 app.include_router(get_pipelines_router())
 app.include_router(get_pipeline_runs_router())
 app.include_router(get_jobs_router())
+app.include_router(get_data_explorers_router())
 
 # Wrap FastAPI with Socket.IO so path /ws/socket.io/ is handled correctly.
 # socket_asgi uses socketio_path="ws/socket.io", so it intercepts requests
@@ -79,6 +81,7 @@ def health():
 @app.on_event("startup")
 async def startup():
     import asyncio
+
     set_event_loop(asyncio.get_event_loop())
     try:
         init_db()

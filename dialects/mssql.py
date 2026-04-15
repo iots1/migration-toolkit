@@ -1,4 +1,5 @@
 """Microsoft SQL Server dialect implementation."""
+
 from sqlalchemy import URL
 from dialects.base import BaseDialect
 
@@ -17,7 +18,7 @@ class MSSQLDialect(BaseDialect):
         dbname: str,
         username: str,
         password: str,
-        charset: str | None = None
+        charset: str | None = None,
     ) -> str:
         """Build MSSQL connection URL with pymssql driver."""
         url = URL.create(
@@ -26,7 +27,7 @@ class MSSQLDialect(BaseDialect):
             password=password,
             host=host,
             port=int(port),
-            database=dbname
+            database=dbname,
         )
         return str(url)
 
@@ -43,3 +44,7 @@ class MSSQLDialect(BaseDialect):
         if offset == 0:
             return f"OFFSET 0 ROWS FETCH NEXT {limit} ROWS ONLY"
         return f"OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY"
+
+    def wrap_query_with_limit(self, sql: str, limit: int) -> str:
+        """MSSQL uses TOP clause before column list."""
+        return f"SELECT TOP {limit} * FROM ({sql}) AS _data_explorer_subq"

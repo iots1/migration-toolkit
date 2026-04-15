@@ -1,4 +1,5 @@
 """MySQL dialect implementation."""
+
 from sqlalchemy import URL
 from dialects.base import BaseDialect
 
@@ -17,7 +18,7 @@ class MySQLDialect(BaseDialect):
         dbname: str,
         username: str,
         password: str,
-        charset: str | None = None
+        charset: str | None = None,
     ) -> str:
         """Build MySQL connection URL with pymysql driver."""
         charset = charset or self.default_charset
@@ -28,7 +29,7 @@ class MySQLDialect(BaseDialect):
             host=host,
             port=int(port),
             database=dbname,
-            query={"charset": charset}
+            query={"charset": charset},
         )
         return str(url)
 
@@ -45,3 +46,11 @@ class MySQLDialect(BaseDialect):
         if offset == 0:
             return f"LIMIT {limit}"
         return f"LIMIT {offset}, {limit}"
+
+    def wrap_query_with_limit(self, sql: str, limit: int) -> str:
+        """MySQL uses subquery + LIMIT."""
+        return f"SELECT * FROM ({sql}) AS _data_explorer_subq LIMIT {limit}"
+
+    def get_timeout_statement(self, timeout_seconds: int) -> str | None:
+        """MySQL uses max_execution_time (milliseconds)."""
+        return f"SET SESSION max_execution_time = {timeout_seconds * 1000}"

@@ -1,4 +1,5 @@
 """PostgreSQL dialect implementation."""
+
 from sqlalchemy import URL
 from dialects.base import BaseDialect
 
@@ -17,7 +18,7 @@ class PostgreSQLDialect(BaseDialect):
         dbname: str,
         username: str,
         password: str,
-        charset: str | None = None
+        charset: str | None = None,
     ) -> str:
         """Build PostgreSQL connection URL with psycopg2 driver."""
         url = URL.create(
@@ -26,7 +27,7 @@ class PostgreSQLDialect(BaseDialect):
             password=password,
             host=host,
             port=int(port),
-            database=dbname
+            database=dbname,
         )
         return str(url)
 
@@ -43,3 +44,11 @@ class PostgreSQLDialect(BaseDialect):
         if offset == 0:
             return f"LIMIT {limit}"
         return f"LIMIT {limit} OFFSET {offset}"
+
+    def wrap_query_with_limit(self, sql: str, limit: int) -> str:
+        """PostgreSQL uses subquery + LIMIT."""
+        return f"SELECT * FROM ({sql}) AS _data_explorer_subq LIMIT {limit}"
+
+    def get_timeout_statement(self, timeout_seconds: int) -> str | None:
+        """PostgreSQL uses statement_timeout (milliseconds)."""
+        return f"SET statement_timeout = '{timeout_seconds * 1000}'"

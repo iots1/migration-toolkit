@@ -4,6 +4,7 @@ Base dialect class - Abstract base class for all database dialects.
 All dialect implementations must inherit from BaseDialect and implement
 all abstract methods.
 """
+
 from abc import ABC, abstractmethod
 from sqlalchemy import URL
 
@@ -48,7 +49,7 @@ class BaseDialect(ABC):
         dbname: str,
         username: str,
         password: str,
-        charset: str | None = None
+        charset: str | None = None,
     ) -> str:
         """
         Build SQLAlchemy connection URL.
@@ -101,3 +102,34 @@ class BaseDialect(ABC):
         if offset == 0:
             return f"LIMIT {limit}"
         return f"LIMIT {limit} OFFSET {offset}"
+
+    def wrap_query_with_limit(self, sql: str, limit: int) -> str:
+        """
+        Wrap a SELECT query with a row limit using dialect-specific syntax.
+
+        Default implementation uses subquery + LIMIT (PostgreSQL/MySQL style).
+        Override for dialects that use TOP (e.g., MSSQL).
+
+        Args:
+            sql: The SELECT query to wrap
+            limit: Maximum number of rows to return
+
+        Returns:
+            str: Wrapped SQL query
+        """
+        return f"SELECT * FROM ({sql}) AS _data_explorer_subq LIMIT {limit}"
+
+    def get_timeout_statement(self, timeout_seconds: int) -> str | None:
+        """
+        Get SQL statement to set query execution timeout.
+
+        Default implementation returns None (no timeout support).
+        Override for dialects that support statement-level timeouts.
+
+        Args:
+            timeout_seconds: Timeout in seconds
+
+        Returns:
+            str | None: SQL statement to execute, or None if not supported
+        """
+        return None

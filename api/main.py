@@ -27,6 +27,8 @@ from api.pipelines.router import get_pipelines_router
 from api.pipeline_runs.router import get_pipeline_runs_router
 from api.jobs.router import get_jobs_router
 from api.data_explorers.router import get_data_explorers_router
+from api.transformers.router import get_transformers_router
+from api.validators.router import get_validators_router
 from api.socket_manager import sio, socket_asgi, set_event_loop
 
 from repositories.base import init_db
@@ -63,6 +65,8 @@ app.include_router(get_pipelines_router())
 app.include_router(get_pipeline_runs_router())
 app.include_router(get_jobs_router())
 app.include_router(get_data_explorers_router())
+app.include_router(get_transformers_router())
+app.include_router(get_validators_router())
 
 # Wrap FastAPI with Socket.IO so path /ws/socket.io/ is handled correctly.
 # socket_asgi uses socketio_path="ws/socket.io", so it intercepts requests

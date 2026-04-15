@@ -74,9 +74,8 @@ class ConfigsService(BaseService):
         record = self._to_record(
             data,
             existing=existing,
-            config_name_override=existing.get("config_name", ""),
         )
-        ok, msg = self.execute_db_operation(lambda: config_repo.save(record))
+        ok, msg = self.execute_db_operation(lambda: config_repo.save(record, id))
         self._assert_success(ok, msg)
         result = self.execute_db_operation(lambda: config_repo.get_by_id_raw(id))
         return self._sanitize_response(result)

@@ -6,7 +6,7 @@ from repositories.connection import get_transaction
 from models.migration_config import ConfigRecord
 
 
-def save(record: ConfigRecord) -> tuple[bool, str]:
+def save(record: ConfigRecord, config_id: str | None = None) -> tuple[bool, str]:
     """Save or update a config. Pass a ConfigRecord — no flat kwargs."""
     import json as _json
 
@@ -17,6 +17,7 @@ def save(record: ConfigRecord) -> tuple[bool, str]:
     # Single params dict derived from ConfigRecord — the ONLY place to update
     # when a new column is added to the configs table.
     col_params: dict = {
+        "config_name": record.config_name,
         "table_name": record.table_name,
         "json_data": json_str,
         "datasource_source_id": record.datasource_source_id,
@@ -30,16 +31,25 @@ def save(record: ConfigRecord) -> tuple[bool, str]:
 
     try:
         with get_transaction() as conn:
-            result = conn.execute(
-                text("SELECT id FROM configs WHERE config_name = :name"),
-                {"name": record.config_name},
-            )
+            # If config_id is provided, we're updating by ID (allows renaming)
+            # Otherwise, we look up by config_name (existing behavior)
+            if config_id:
+                result = conn.execute(
+                    text("SELECT id FROM configs WHERE id = :id"),
+                    {"id": config_id},
+                )
+            else:
+                result = conn.execute(
+                    text("SELECT id FROM configs WHERE config_name = :name"),
+                    {"name": record.config_name},
+                )
             existing = result.fetchone()
             if existing:
                 config_id = existing[0]
                 conn.execute(
                     text(
                         """UPDATE configs SET
+                               config_name = :config_name,
                                table_name = :table_name,
                                json_data = :json_data,
                                datasource_source_id = :datasource_source_id,
@@ -69,7 +79,7 @@ def save(record: ConfigRecord) -> tuple[bool, str]:
                                CURRENT_TIMESTAMP
                            )"""
                     ),
-                    {"config_name": record.config_name, **col_params},
+                    col_params,
                 )
                 result = conn.execute(
                     text("SELECT id FROM configs WHERE config_name = :name"),

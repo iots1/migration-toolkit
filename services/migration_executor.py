@@ -121,9 +121,39 @@ def run_single_migration(
             log_callback(msg, icon)
 
     config_name = config.get("config_name", "migration")
-    source_table = config["source"]["table"]
-    target_table = config["target"]["table"]
+    source_table = config.get("source", {}).get("table", "")
+    target_table = config.get("target", {}).get("table", "")
     start_time = time.time()
+
+    # Custom scripts only need the target engine — skip source entirely.
+    if config.get("config_type") == "custom":
+        tgt_engine = connector.create_sqlalchemy_engine(
+            **target_conn_config, pool_pre_ping=True, pool_recycle=3600
+        )
+        try:
+            log(f"Target connected: {target_conn_config.get('db_type', '')}", "✅")
+            result = _run_custom_script(
+                config=config,
+                tgt_engine=tgt_engine,
+                start_time=start_time,
+                log=log,
+            )
+        finally:
+            tgt_engine.dispose()
+
+        _safe_notify_callback(
+            batch_insert_callback,
+            config_name=config_name,
+            batch_round=result.batch_count,
+            rows_in_batch=result.rows_processed,
+            rows_cumulative=result.rows_processed,
+            batch_size=batch_size,
+            total_records_in_config=result.rows_processed,
+            status=result.status,
+            error_message=result.error_message or None,
+            transformation_warnings=None,
+        )
+        return result
 
     src_engine = connector.create_sqlalchemy_engine(
         **source_conn_config, pool_pre_ping=True, pool_recycle=3600
@@ -251,6 +281,139 @@ def _quote_identifier(name: str) -> str:
         "dbo.patients"          → '"dbo"."patients"'
     """
     return ".".join(f'"{part.strip().strip(chr(34))}"' for part in name.split("."))
+
+
+# ---------------------------------------------------------------------------
+# SQL statement splitter (dollar-quote aware)
+# ---------------------------------------------------------------------------
+
+
+def _split_sql_statements(script: str) -> list[str]:
+    """Split a SQL script into individual statements on `;` boundaries.
+
+    Ignores semicolons that appear inside dollar-quoted blocks such as
+    PostgreSQL's ``DO $$ ... $$`` or ``$body$ ... $body$``, so PL/pgSQL
+    anonymous blocks are kept intact as a single statement.
+    """
+    statements: list[str] = []
+    buf: list[str] = []
+    i = 0
+    n = len(script)
+    in_dollar_quote = False
+    dollar_tag = ""
+
+    while i < n:
+        # --- Enter/exit a dollar-quoted block ---
+        if script[i] == "$":
+            end = script.find("$", i + 1)
+            if end != -1:
+                tag = script[i : end + 1]  # e.g. "$$" or "$body$"
+                if in_dollar_quote:
+                    if tag == dollar_tag:
+                        buf.append(tag)
+                        i = end + 1
+                        in_dollar_quote = False
+                        dollar_tag = ""
+                        continue
+                else:
+                    buf.append(tag)
+                    i = end + 1
+                    in_dollar_quote = True
+                    dollar_tag = tag
+                    continue
+
+        # --- Statement boundary (only outside dollar-quoted blocks) ---
+        if not in_dollar_quote and script[i] == ";":
+            stmt = "".join(buf).strip()
+            if stmt:
+                statements.append(stmt)
+            buf = []
+            i += 1
+            continue
+
+        buf.append(script[i])
+        i += 1
+
+    # Trailing statement without a closing semicolon
+    stmt = "".join(buf).strip()
+    if stmt:
+        statements.append(stmt)
+
+    return statements
+
+
+# ---------------------------------------------------------------------------
+# Custom script executor (config_type == "custom")
+# ---------------------------------------------------------------------------
+
+
+def _run_custom_script(
+    config: dict,
+    tgt_engine,
+    start_time: float,
+    log: LogCallback,
+) -> MigrationResult:
+    """Execute config["script"] directly against the target database.
+
+    Used when config_type == "custom".  The script may contain multiple
+    statements separated by semicolons; each non-empty statement is executed
+    in its own transaction so that a failure in one statement is isolated and
+    reported clearly.
+    """
+    config_name = config.get("config_name", "custom")
+    script: str = (config.get("script") or "").strip()
+
+    if not script:
+        msg = f"[{config_name}] config_type=custom but script is empty"
+        log(msg, "❌")
+        return MigrationResult(
+            status="failed",
+            rows_processed=0,
+            batch_count=0,
+            duration_seconds=time.time() - start_time,
+            error_message=msg,
+        )
+
+    # Split on semicolons, respecting dollar-quoted blocks (DO $$ ... $$)
+    statements = _split_sql_statements(script)
+    log(f"[{config_name}] Running custom script ({len(statements)} statement(s))", "📝")
+
+    # Use AUTOCOMMIT so that DO $$ ... COMMIT ... $$ blocks can manage their
+    # own transactions without hitting "invalid transaction termination".
+    # Also disable statement_timeout so long-running scripts are not cancelled.
+    rows_affected = 0
+    with tgt_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        conn.execute(text("SET statement_timeout = 0"))
+        for idx, stmt in enumerate(statements, start=1):
+            try:
+                result = conn.execute(text(stmt))
+                affected = result.rowcount if result.rowcount != -1 else 0
+                rows_affected += max(affected, 0)
+                log(f"  Statement {idx}/{len(statements)}: OK (rows affected: {affected})", "✅")
+            except Exception as e:
+                short_err = str(e).split("[SQL:")[0].strip()[:300]
+                msg = f"Statement {idx} failed: {short_err}"
+                log(f"[{config_name}] {msg}", "❌")
+                return MigrationResult(
+                    status="failed",
+                    rows_processed=rows_affected,
+                    batch_count=idx,
+                    duration_seconds=time.time() - start_time,
+                    error_message=msg,
+                )
+
+    duration = time.time() - start_time
+    log(
+        f"[{config_name}] Custom script completed in {duration:.1f}s "
+        f"(total rows affected: {rows_affected})",
+        "✅",
+    )
+    return MigrationResult(
+        status="success",
+        rows_processed=rows_affected,
+        batch_count=len(statements),
+        duration_seconds=duration,
+    )
 
 
 # ---------------------------------------------------------------------------

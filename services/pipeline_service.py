@@ -588,19 +588,36 @@ class PipelineExecutor:
         Each config can point to different datasources, so we resolve per-step.
         Returns (src_conn_config, tgt_conn_config) or an error message string.
         """
+        is_custom = config.get("config_type") == "custom"
+
         src_ds_id = config.get("_datasource_source_id")
         tgt_ds_id = config.get("_datasource_target_id")
-        if not src_ds_id:
+
+        if not src_ds_id and not is_custom:
             return f"Config '{config.get('config_name', '')}' missing source datasource"
         if not tgt_ds_id:
             return f"Config '{config.get('config_name', '')}' missing target datasource"
 
-        src_ds = ds_get_by_id(src_ds_id)
-        if not src_ds:
-            return f"Source datasource (id={src_ds_id}) not found"
         tgt_ds = ds_get_by_id(tgt_ds_id)
         if not tgt_ds:
             return f"Target datasource (id={tgt_ds_id}) not found"
+
+        tgt_conn = {
+            "db_type": tgt_ds["db_type"],
+            "host": tgt_ds["host"],
+            "port": tgt_ds["port"],
+            "db_name": tgt_ds["dbname"],
+            "user": tgt_ds["username"],
+            "password": tgt_ds["password"],
+        }
+
+        # Custom scripts skip source entirely — return empty dict as placeholder.
+        if is_custom:
+            return {}, tgt_conn
+
+        src_ds = ds_get_by_id(src_ds_id)
+        if not src_ds:
+            return f"Source datasource (id={src_ds_id}) not found"
 
         charset = config.get("source", {}).get("charset")
         if src_ds["db_type"] == "PostgreSQL" and charset == "tis620":
@@ -614,14 +631,6 @@ class PipelineExecutor:
             "user": src_ds["username"],
             "password": src_ds["password"],
             "charset": charset,
-        }
-        tgt_conn = {
-            "db_type": tgt_ds["db_type"],
-            "host": tgt_ds["host"],
-            "port": tgt_ds["port"],
-            "db_name": tgt_ds["dbname"],
-            "user": tgt_ds["username"],
-            "password": tgt_ds["password"],
         }
         return src_conn, tgt_conn
 

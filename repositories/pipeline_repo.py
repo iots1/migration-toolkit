@@ -45,6 +45,8 @@ def save(record: PipelineRecord) -> tuple[bool, str]:
                         description = EXCLUDED.description,
                         json_data = EXCLUDED.json_data,
                         error_strategy = EXCLUDED.error_strategy,
+                        is_deleted = false,
+                        deleted_at = NULL,
                         updated_at = CURRENT_TIMESTAMP
                 """),
                 col_params,
@@ -126,7 +128,7 @@ def get_by_id(pipeline_id: str) -> dict | None:
             SELECT id::text AS id, name, description, json_data,
                    error_strategy, created_at, created_by, updated_at, updated_by,
                    is_deleted, deleted_at, deleted_by, deleted_reason
-            FROM pipelines WHERE id = :id
+            FROM pipelines WHERE id = :id AND is_deleted = false
             """),
             {"id": pipeline_id},
         )
@@ -222,31 +224,32 @@ def get_by_name(name: str) -> dict | None:
         return data
 
 
-def delete(name: str) -> tuple[bool, str]:
+def delete(pipeline_id: str) -> tuple[bool, str]:
     """
-    Delete a pipeline and all its runs.
-
-    Args:
-        name: Pipeline name to delete
-
-    Returns:
-        tuple[bool, str]: (success, message)
+    Soft-delete a pipeline by ID (sets is_deleted = true).
 
     Note:
-        This will cascade delete all pipeline_runs for this pipeline.
+        Soft delete keeps the row but marks it invisible. Hard cascade
+        (nodes/edges/jobs/runs) is NOT triggered here — those rows remain
+        until the pipeline is hard-deleted or cleaned up separately.
+        Use delete_hard() if you need cascade removal.
 
     Example:
-        >>> ok, msg = delete("Old Pipeline")
+        >>> ok, msg = delete("848ab041-448a-47f7-bd19-c98b26a290cb")
         >>> if ok:
         ...     print("Deleted!")
     """
     try:
         with get_transaction() as conn:
             result = conn.execute(
-                text("DELETE FROM pipelines WHERE name = :name"), {"name": name}
+                text(
+                    "UPDATE pipelines SET is_deleted = true, deleted_at = CURRENT_TIMESTAMP"
+                    " WHERE id = :id AND is_deleted = false"
+                ),
+                {"id": pipeline_id},
             )
             if result.rowcount == 0:
-                return False, f"Pipeline '{name}' not found"
-        return True, f"Pipeline '{name}' deleted successfully"
-    except Exception as e:
-        return False, f"Failed to delete pipeline '{name}'"
+                return False, f"Pipeline '{pipeline_id}' not found"
+        return True, f"Pipeline '{pipeline_id}' deleted successfully"
+    except Exception:
+        return False, f"Failed to delete pipeline '{pipeline_id}'"

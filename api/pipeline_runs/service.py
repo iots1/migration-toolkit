@@ -19,11 +19,15 @@ class PipelineRunsService(BaseService):
         "id",
         "pipeline_id",
         "job_id",
+        "config_name",
+        "batch_round",
+        "rows_in_batch",
+        "rows_cumulative",
+        "batch_size",
+        "total_records_in_config",
         "status",
-        "started_at",
-        "completed_at",
-        "steps_json",
         "error_message",
+        "transformation_warnings",
         "created_at",
         "created_by",
         "updated_at",
@@ -65,14 +69,24 @@ class PipelineRunsService(BaseService):
 
     def create(self, data: dict) -> dict:
         """Create new pipeline run."""
+        try:
+            pipeline_id = uuid.UUID(data.get("pipeline_id", ""))
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID: {data.get('pipeline_id')}")
+
         steps_json = data.get("steps_json", "{}")
         if isinstance(steps_json, dict):
             steps_json = json.dumps(steps_json, ensure_ascii=False)
 
         raw_job_id = data.get("job_id")
+        try:
+            job_id = uuid.UUID(raw_job_id) if raw_job_id else None
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID: {raw_job_id}")
+
         record = PipelineRunRecord(
-            pipeline_id=uuid.UUID(data.get("pipeline_id", "")),
-            job_id=uuid.UUID(raw_job_id) if raw_job_id else None,
+            pipeline_id=pipeline_id,
+            job_id=job_id,
             status=data.get("status", "pending"),
             steps_json=steps_json,
         )

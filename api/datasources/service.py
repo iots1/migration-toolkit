@@ -63,13 +63,13 @@ class DatasourcesService(BaseService):
         """Update datasource (patch — missing fields fall back to existing values)."""
         existing = self.find_by_id(id)
         record = DatasourceRecord(
-            name=data.get("name") or existing.get("name", ""),
-            db_type=data.get("db_type") or existing.get("db_type", ""),
-            host=data.get("host") or existing.get("host", ""),
-            port=data.get("port") or existing.get("port", ""),
-            dbname=data.get("dbname") or existing.get("dbname", ""),
-            username=data.get("username") or existing.get("username", ""),
-            password=data.get("password") or existing.get("password", ""),
+            name=data.get("name") if "name" in data else existing.get("name", ""),
+            db_type=data.get("db_type") if "db_type" in data else existing.get("db_type", ""),
+            host=data.get("host") if "host" in data else existing.get("host", ""),
+            port=data.get("port") if "port" in data else existing.get("port", ""),
+            dbname=data.get("dbname") if "dbname" in data else existing.get("dbname", ""),
+            username=data.get("username") if "username" in data else existing.get("username", ""),
+            password=data.get("password") if "password" in data else existing.get("password", ""),
         )
         ok, msg = self.execute_db_operation(lambda: datasource_repo.update(id, record))
         self._assert_success(ok, msg)

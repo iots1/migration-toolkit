@@ -23,7 +23,7 @@ def _make_create_endpoint(schema, svc, router):
         )
 
     router.post("/", status_code=201)(create)
-    router.post("")(create)
+    router.post("", status_code=201)(create)
 
 
 def _make_update_endpoint(schema, svc, router, id_param: str = "id"):

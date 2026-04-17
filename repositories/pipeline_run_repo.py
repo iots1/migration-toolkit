@@ -286,3 +286,38 @@ def get_by_job(job_id: uuid.UUID) -> list[dict]:
                 data["job_id"] = str(data["job_id"])
             batches.append(data)
         return batches
+
+
+def get_running_runs() -> list[dict]:
+    """
+    Get all currently running pipeline runs.
+
+    Returns:
+        list[dict]: All pipeline runs with status='running'
+
+    Example:
+        >>> runs = get_running_runs()
+        >>> print(f"Currently running: {len(runs)} pipelines")
+    """
+    with get_transaction() as conn:
+        result = conn.execute(
+            text("""
+            SELECT id, pipeline_id, job_id, config_name, batch_round,
+                   rows_in_batch, rows_cumulative, batch_size, total_records_in_config,
+                   status, error_message, transformation_warnings,
+                   created_at, created_by, updated_at, updated_by,
+                   is_deleted, deleted_at, deleted_by, deleted_reason
+            FROM pipeline_runs
+            WHERE status = 'running'
+            ORDER BY created_at DESC
+        """)
+        )
+        runs = []
+        for row in result.fetchall():
+            data = dict(zip(result.keys(), row))
+            data["id"] = str(data["id"])
+            data["pipeline_id"] = str(data["pipeline_id"])
+            if data.get("job_id"):
+                data["job_id"] = str(data["job_id"])
+            runs.append(data)
+        return runs

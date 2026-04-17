@@ -238,10 +238,22 @@ def get_by_id_raw(config_id: str) -> dict | None:
 
 
 def delete(config_name: str):
+    """
+    Soft-delete a config by name (sets is_deleted = true).
+
+    Note:
+        Soft delete keeps the row but marks it invisible. Hard cascade
+        (pipeline_nodes/edges) is NOT triggered here — those rows remain
+        until the config is hard-deleted or cleaned up separately.
+        Use delete_hard() if you need cascade removal.
+    """
     try:
         with get_transaction() as conn:
             result = conn.execute(
-                text("DELETE FROM configs WHERE config_name = :name"),
+                text(
+                    "UPDATE configs SET is_deleted = true, deleted_at = CURRENT_TIMESTAMP"
+                    " WHERE config_name = :name AND is_deleted = false"
+                ),
                 {"name": config_name},
             )
             if result.rowcount == 0:

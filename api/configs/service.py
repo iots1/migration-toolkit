@@ -115,21 +115,23 @@ class ConfigsService(BaseService):
         """Build a ConfigRecord from request data, falling back to existing values."""
         ex = existing or {}
 
-        json_data = data.get("json_data") or ex.get("json_data", "{}")
+        json_data = data.get("json_data") if "json_data" in data else ex.get("json_data", "{}")
         if isinstance(json_data, dict):
             json_data = json.dumps(json_data, ensure_ascii=False)
 
         return ConfigRecord(
             config_name=config_name_override or data.get("config_name", ""),
-            table_name=data.get("table_name") or ex.get("table_name", ""),
+            table_name=data.get("table_name") if "table_name" in data else ex.get("table_name", ""),
             json_data=json_data,
             datasource_source_id=data.get("datasource_source_id")
-            or ex.get("datasource_source_id"),
+            if "datasource_source_id" in data
+            else ex.get("datasource_source_id"),
             datasource_target_id=data.get("datasource_target_id")
-            or ex.get("datasource_target_id"),
-            config_type=data.get("config_type") or ex.get("config_type", "std"),
-            script=data.get("script") or ex.get("script"),
-            generate_sql=data.get("generate_sql") or ex.get("generate_sql"),
-            condition=data.get("condition") or ex.get("condition"),
-            lookup=data.get("lookup") or ex.get("lookup"),
+            if "datasource_target_id" in data
+            else ex.get("datasource_target_id"),
+            config_type=data.get("config_type") if "config_type" in data else ex.get("config_type", "std"),
+            script=data.get("script") if "script" in data else ex.get("script"),
+            generate_sql=data.get("generate_sql") if "generate_sql" in data else ex.get("generate_sql"),
+            condition=data.get("condition") if "condition" in data else ex.get("condition"),
+            lookup=data.get("lookup") if "lookup" in data else ex.get("lookup"),
         )

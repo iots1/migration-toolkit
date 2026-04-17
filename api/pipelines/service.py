@@ -93,10 +93,8 @@ class PipelinesService(BaseService):
         return self._attach_children_single(result)
 
     def delete(self, id: str) -> None:
-        existing = self.find_by_id(id)
-        ok, msg = self.execute_db_operation(
-            lambda: pipeline_repo.delete(existing["name"])
-        )
+        self.find_by_id(id)
+        ok, msg = self.execute_db_operation(lambda: pipeline_repo.delete(id))
         self._assert_success(ok, msg)
 
     # ------------------------------------------------------------------

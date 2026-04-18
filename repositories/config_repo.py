@@ -135,18 +135,45 @@ def count_all() -> int:
 
 
 def get_all_list() -> list[dict]:
-    """Get all configs as a list of dicts."""
+    """Get all configs as a list of dicts with datasource details."""
     import json as _json
 
     with get_transaction() as conn:
         result = conn.execute(
             text(
-                """SELECT id::text AS id, config_name, table_name, json_data,
-                   datasource_source_id::text, datasource_target_id::text,
-                   config_type, script, generate_sql, condition, lookup,
-                   created_at, created_by, updated_at, updated_by,
-                   is_deleted, deleted_at, deleted_by, deleted_reason
-                   FROM configs WHERE is_deleted = false ORDER BY updated_at DESC"""
+                """SELECT
+                   c.id::text AS id,
+                   c.config_name,
+                   c.table_name,
+                   c.json_data,
+                   c.datasource_source_id::text,
+                   c.datasource_target_id::text,
+                   c.config_type,
+                   c.script,
+                   c.generate_sql,
+                   c.condition,
+                   c.lookup,
+                   c.created_at,
+                   c.created_by,
+                   c.updated_at,
+                   c.updated_by,
+                   c.is_deleted,
+                   c.deleted_at,
+                   c.deleted_by,
+                   c.deleted_reason,
+                   -- Source datasource details
+                   ds_src.name AS datasource_source_name,
+                   ds_src.db_type AS datasource_source_db_type,
+                   ds_src.dbname AS datasource_source_dbname,
+                   -- Target datasource details
+                   ds_tgt.name AS datasource_target_name,
+                   ds_tgt.db_type AS datasource_target_db_type,
+                   ds_tgt.dbname AS datasource_target_dbname
+                   FROM configs c
+                   LEFT JOIN datasources ds_src ON c.datasource_source_id = ds_src.id
+                   LEFT JOIN datasources ds_tgt ON c.datasource_target_id = ds_tgt.id
+                   WHERE c.is_deleted = false
+                   ORDER BY c.updated_at DESC"""
             )
         )
         rows = []

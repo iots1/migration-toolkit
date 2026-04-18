@@ -33,6 +33,12 @@ class ConfigsService(BaseService):
         "deleted_at",
         "deleted_by",
         "deleted_reason",
+        "datasource_source_name",
+        "datasource_source_db_type",
+        "datasource_source_dbname",
+        "datasource_target_name",
+        "datasource_target_db_type",
+        "datasource_target_dbname",
     ]
 
     def find_all(self, params: QueryParams) -> dict:

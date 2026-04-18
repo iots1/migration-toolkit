@@ -45,3 +45,11 @@ class ConfigSchema(BaseModel):
     config_name: str
     table_name: str
     updated_at: str
+    datasource_source_id: str | None
+    datasource_target_id: str | None
+    datasource_source_name: str | None
+    datasource_source_db_type: str | None
+    datasource_source_dbname: str | None
+    datasource_target_name: str | None
+    datasource_target_db_type: str | None
+    datasource_target_dbname: str | None

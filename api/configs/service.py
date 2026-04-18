@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from api.base.service import BaseService
 from api.base.query_params import QueryParams
+from api.base.exceptions import BusinessRuleValidationException
 from repositories import config_repo
+from repositories import pipeline_node_repo
 from models.migration_config import ConfigRecord
 
 
@@ -87,8 +89,35 @@ class ConfigsService(BaseService):
         return self._sanitize_response(result)
 
     def delete(self, id: str) -> None:
-        """Delete config."""
+        """
+        Delete config with validation check.
+
+        Validates that the config is not being used in any active pipelines
+        before proceeding with deletion.
+        """
         existing = self.find_by_id(id)
+
+        # Check if config is in use by any pipelines
+        pipelines = self.execute_db_operation(
+            lambda: pipeline_node_repo.get_pipelines_using_config(id)
+        )
+
+        if pipelines:
+            # Build error message with pipeline details
+            pipeline_details = []
+            for pipeline in pipelines:
+                pipeline_details.append(
+                    f"  - {pipeline['pipeline_name']} (ID: {pipeline['pipeline_id']})"
+                )
+
+            error_msg = (
+                "Config is in use by the following pipelines:\n"
+                + "\n".join(pipeline_details)
+                + "\nPlease remove it from these pipelines first."
+            )
+            raise BusinessRuleValidationException(error_msg)
+
+        # Proceed with deletion
         ok, msg = self.execute_db_operation(
             lambda: config_repo.delete(existing["config_name"])
         )

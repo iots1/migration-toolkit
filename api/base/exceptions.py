@@ -29,6 +29,14 @@ class ValidationException(HTTPException):
         self.validation_errors = errors
 
 
+class BusinessRuleValidationException(HTTPException):
+    """Exception raised when a business rule validation fails."""
+
+    def __init__(self, message: str):
+        super().__init__(status_code=409, detail=message)
+        self.message = message
+
+
 _STATUS_TITLES = {
     400: "Bad Request",
     401: "Unauthorized",
@@ -124,6 +132,19 @@ async def http_exception_handler(request: Request, exc: HTTPException):
                 "code": f"HTTP_{status_code}",
                 "title": title,
                 "detail": exc.detail,
+            }
+        ],
+    )
+
+
+async def business_rule_validation_handler(request: Request, exc: BusinessRuleValidationException):
+    return _error_response(
+        409,
+        [
+            {
+                "code": "BUSINESS_RULE_VIOLATION",
+                "title": "Business Rule Violation",
+                "detail": exc.message,
             }
         ],
     )

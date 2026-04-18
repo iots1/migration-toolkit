@@ -273,6 +273,8 @@ def delete(config_name: str):
         (pipeline_nodes/edges) is NOT triggered here — those rows remain
         until the config is hard-deleted or cleaned up separately.
         Use delete_hard() if you need cascade removal.
+
+    The service layer should check if the config is in use before calling this.
     """
     try:
         with get_transaction() as conn:

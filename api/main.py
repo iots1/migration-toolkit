@@ -15,9 +15,11 @@ from api.base.auth import verify_api_key
 from api.base.exceptions import (
     InvalidParameterException,
     ValidationException,
+    BusinessRuleValidationException,
     invalid_parameter_handler,
     validation_handler,
     http_exception_handler,
+    business_rule_validation_handler,
     unhandled_exception_handler,
 )
 
@@ -45,6 +47,7 @@ app = FastAPI(
 # Register exception handlers
 app.add_exception_handler(InvalidParameterException, invalid_parameter_handler)
 app.add_exception_handler(ValidationException, validation_handler)
+app.add_exception_handler(BusinessRuleValidationException, business_rule_validation_handler)
 app.add_exception_handler(RequestValidationError, validation_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)

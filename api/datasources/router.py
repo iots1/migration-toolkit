@@ -69,6 +69,22 @@ def get_datasources_router():
 
     @router.get("/{datasource_id}/tables/{table_name}/columns", tags=["Datasources"])
     def list_columns(datasource_id: str, table_name: str):
+        """
+        Get detailed column information for a table.
+
+        Returns columns with the following properties:
+        - name: Column name
+        - type: Full data type (including length/precision)
+        - is_nullable: Whether the column accepts NULL values
+        - column_default: Default value expression
+        - is_primary: Whether the column is a primary key
+        - length: Character/byte maximum length (if applicable)
+        - precision: Numeric precision (if applicable)
+        - scale: Numeric scale (if applicable)
+        - comment: Column comment/description
+        - constraints: Array of constraints (name, type)
+        - indexes: Array of indexes (name, unique, primary)
+        """
         ds = _resolve_datasource(datasource_id)
         _safe_id(table_name)
         kw = _datasource_kwargs(ds)

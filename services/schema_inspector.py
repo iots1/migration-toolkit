@@ -102,7 +102,7 @@ def get_columns_from_table(
     charset: str | None = None,
 ) -> tuple[bool, list[dict] | str]:
     """
-    Retrieves column information from a specific table, including nullable status and default values.
+    Retrieves detailed column information from a specific table.
 
     Args:
         db_type: Database type
@@ -117,57 +117,250 @@ def get_columns_from_table(
 
     Returns:
         Tuple of (success: bool, columns: list[dict] | error_message: str)
-        Each column dict has keys: name, type, is_nullable, column_default
+        Each column dict has keys: name, type, is_nullable, column_default, is_primary,
+                                length, precision, scale, comment, constraints, indexes
     """
     try:
         _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password, charset)
         safe_table = _safe_id(table_name)
+        schema_filter = _safe_id(schema) if schema else ('public' if db_type == "PostgreSQL" else None)
 
+        # Fetch primary keys
+        primary_keys = set()
         if db_type == "MySQL":
-            cursor.execute(f"DESCRIBE `{safe_table}`")
-            columns = [
-                {
-                    "name": row[0],
-                    "type": row[1],
-                    "is_nullable": row[2].upper() == "YES",
-                    "column_default": row[4] if len(row) > 4 else None
-                }
-                for row in cursor.fetchall()
-            ]
+            cursor.execute(f"SHOW KEYS FROM `{safe_table}` WHERE Key_name = 'PRIMARY'")
+            primary_keys = {row[4] for row in cursor.fetchall()}
+        elif db_type == "PostgreSQL":
+            cursor.execute(
+                f"SELECT a.attname FROM pg_index i "
+                f"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+                f"JOIN pg_class c ON c.oid = i.indrelid "
+                f"JOIN pg_namespace n ON n.oid = c.relnamespace "
+                f"WHERE i.indisprimary AND c.relname = '{safe_table}' AND n.nspname = '{schema_filter}'"
+            )
+            primary_keys = {row[0] for row in cursor.fetchall()}
         elif db_type == "Microsoft SQL Server":
             schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(
-                f"SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT "
-                f"FROM INFORMATION_SCHEMA.COLUMNS "
+                f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE "
                 f"WHERE TABLE_NAME = '{safe_table}' AND TABLE_SCHEMA = '{schema_filter}' "
+                f"AND OBJECTPROPERTY(OBJECT_ID(CONSTRAINT_SCHEMA + '.' + CONSTRAINT_NAME), 'IsPrimaryKey') = 1"
+            )
+            primary_keys = {row[0] for row in cursor.fetchall()}
+
+        # Fetch indexes
+        indexes_by_column = {}
+        if db_type == "MySQL":
+            cursor.execute(f"SHOW INDEX FROM `{safe_table}`")
+            for row in cursor.fetchall():
+                col_name = row[4]
+                index_name = row[2]
+                is_unique = row[1] == 0
+                if col_name not in indexes_by_column:
+                    indexes_by_column[col_name] = []
+                indexes_by_column[col_name].append({
+                    "name": index_name,
+                    "unique": is_unique
+                })
+        elif db_type == "PostgreSQL":
+            cursor.execute(
+                f"SELECT a.attname, i.relname, ix.indisunique, ix.indisprimary "
+                f"FROM pg_index ix "
+                f"JOIN pg_class t ON t.oid = ix.indrelid "
+                f"JOIN pg_class i ON i.oid = ix.indexrelid "
+                f"JOIN pg_namespace n ON n.oid = t.relnamespace "
+                f"JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey) "
+                f"WHERE t.relname = '{safe_table}' AND n.nspname = '{schema_filter}'"
+            )
+            for row in cursor.fetchall():
+                col_name, index_name, is_unique, is_primary = row
+                if col_name not in indexes_by_column:
+                    indexes_by_column[col_name] = []
+                indexes_by_column[col_name].append({
+                    "name": index_name,
+                    "unique": is_unique,
+                    "primary": is_primary
+                })
+        elif db_type == "Microsoft SQL Server":
+            schema_filter = _safe_id(schema) if schema else 'dbo'
+            cursor.execute(
+                f"SELECT c.name, i.name, i.is_unique, i.is_primary_key "
+                f"FROM sys.indexes i "
+                f"JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id "
+                f"JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id "
+                f"JOIN sys.tables t ON i.object_id = t.object_id "
+                f"JOIN sys.schemas s ON t.schema_id = s.schema_id "
+                f"WHERE t.name = '{safe_table}' AND s.name = '{schema_filter}'"
+            )
+            for row in cursor.fetchall():
+                col_name, index_name, is_unique, is_primary = row
+                if col_name not in indexes_by_column:
+                    indexes_by_column[col_name] = []
+                indexes_by_column[col_name].append({
+                    "name": index_name,
+                    "unique": bool(is_unique),
+                    "primary": bool(is_primary)
+                })
+
+        # Fetch constraints (NOT NULL, UNIQUE, CHECK, etc.)
+        constraints_by_column = {}
+        if db_type == "PostgreSQL":
+            cursor.execute(
+                f"SELECT a.attname, con.conname, con.contype "
+                f"FROM pg_constraint con "
+                f"JOIN pg_class c ON c.oid = con.conrelid "
+                f"JOIN pg_namespace n ON n.oid = c.relnamespace "
+                f"JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(con.conkey) "
+                f"WHERE c.relname = '{safe_table}' AND n.nspname = '{schema_filter}'"
+            )
+            for row in cursor.fetchall():
+                col_name, constr_name, constr_type = row
+                if col_name not in constraints_by_column:
+                    constraints_by_column[col_name] = []
+                constraints_by_column[col_name].append({
+                    "name": constr_name,
+                    "type": {'c': 'CHECK', 'f': 'FOREIGN KEY', 'p': 'PRIMARY KEY', 'u': 'UNIQUE', 'x': 'EXCLUSION'}.get(constr_type, 'UNKNOWN')
+                })
+        elif db_type == "MySQL":
+            cursor.execute(
+                f"SELECT k.COLUMN_NAME, tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE "
+                f"FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
+                f"JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE k ON tc.CONSTRAINT_NAME = k.CONSTRAINT_NAME "
+                f"WHERE tc.TABLE_NAME = '{safe_table}' AND tc.TABLE_SCHEMA = '{db_name}'"
+            )
+            for row in cursor.fetchall():
+                col_name, constr_name, constr_type = row
+                if col_name not in constraints_by_column:
+                    constraints_by_column[col_name] = []
+                constraints_by_column[col_name].append({
+                    "name": constr_name,
+                    "type": constr_type
+                })
+        elif db_type == "Microsoft SQL Server":
+            schema_filter = _safe_id(schema) if schema else 'dbo'
+            cursor.execute(
+                f"SELECT c.name, con.name, con.type_desc "
+                f"FROM sys.constraints con "
+                f"JOIN sys.columns c ON con.parent_object_id = c.object_id AND con.parent_column_id = c.column_id "
+                f"JOIN sys.tables t ON con.parent_object_id = t.object_id "
+                f"JOIN sys.schemas s ON t.schema_id = s.schema_id "
+                f"WHERE t.name = '{safe_table}' AND s.name = '{schema_filter}'"
+            )
+            for row in cursor.fetchall():
+                col_name, constr_name, constr_type = row
+                if col_name not in constraints_by_column:
+                    constraints_by_column[col_name] = []
+                constraints_by_column[col_name].append({
+                    "name": constr_name,
+                    "type": constr_type.replace('_CONSTRAINT', '').upper()
+                })
+
+        # Fetch column details
+        if db_type == "MySQL":
+            cursor.execute(
+                f"SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
+                f"CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, COLUMN_COMMENT "
+                f"FROM INFORMATION_SCHEMA.COLUMNS "
+                f"WHERE TABLE_NAME = '{safe_table}' AND TABLE_SCHEMA = '{db_name}' "
                 f"ORDER BY ORDINAL_POSITION"
             )
-            columns = [
-                {
-                    "name": row[0],
+            columns = []
+            for row in cursor.fetchall():
+                col_name = row[0]
+                columns.append({
+                    "id": f"{safe_table}.{col_name}",  # Add unique ID for JSON API
+                    "name": col_name,
                     "type": row[1],
                     "is_nullable": row[2].upper() == "YES",
-                    "column_default": row[3]
-                }
-                for row in cursor.fetchall()
-            ]
-        elif db_type == "PostgreSQL":
-            schema_filter = _safe_id(schema) if schema else 'public'
+                    "column_default": row[3],
+                    "is_primary": col_name in primary_keys,
+                    "length": row[4],
+                    "precision": row[5],
+                    "scale": row[6],
+                    "comment": row[7],
+                    "constraints": constraints_by_column.get(col_name, []),
+                    "indexes": indexes_by_column.get(col_name, [])
+                })
+        elif db_type == "Microsoft SQL Server":
+            schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(
-                f"SELECT column_name, data_type, is_nullable, column_default "
-                f"FROM information_schema.columns "
-                f"WHERE table_name = '{safe_table}' AND table_schema = '{schema_filter}' "
-                f"ORDER BY ordinal_position"
+                f"SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, "
+                f"c.CHARACTER_MAXIMUM_LENGTH, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, "
+                f"ep.value, c.DOMAIN_SCHEMA "
+                f"FROM INFORMATION_SCHEMA.COLUMNS c "
+                f"LEFT JOIN sys.extended_properties ep ON ep.major_id = OBJECT_ID(TABLE_SCHEMA + '.' + TABLE_NAME) "
+                f"AND ep.minor_id = c.ORDINAL_POSITION AND ep.name = 'MS_Description' "
+                f"WHERE c.TABLE_NAME = '{safe_table}' AND c.TABLE_SCHEMA = '{schema_filter}' "
+                f"ORDER BY c.ORDINAL_POSITION"
             )
-            columns = [
-                {
-                    "name": row[0],
-                    "type": row[1],
+            columns = []
+            for row in cursor.fetchall():
+                col_name = row[0]
+                data_type = row[1]
+                max_length = row[4]
+                # Build full type string with length
+                full_type = data_type
+                if max_length and max_length != -1 and data_type in ('varchar', 'nvarchar', 'char', 'nchar'):
+                    full_type = f"{data_type}({max_length})"
+                elif row[5] and row[6] and data_type in ('decimal', 'numeric'):
+                    full_type = f"{data_type}({row[5]},{row[6]})"
+
+                columns.append({
+                    "id": f"{safe_table}.{col_name}",  # Add unique ID for JSON API
+                    "name": col_name,
+                    "type": full_type,
                     "is_nullable": row[2].upper() == "YES",
-                    "column_default": row[3]
-                }
-                for row in cursor.fetchall()
-            ]
+                    "column_default": row[3],
+                    "is_primary": col_name in primary_keys,
+                    "length": max_length if max_length and max_length != -1 else None,
+                    "precision": row[5],
+                    "scale": row[6],
+                    "comment": row[7],
+                    "constraints": constraints_by_column.get(col_name, []),
+                    "indexes": indexes_by_column.get(col_name, [])
+                })
+        elif db_type == "PostgreSQL":
+            cursor.execute(
+                f"SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, "
+                f"c.character_maximum_length, c.numeric_precision, c.numeric_scale, "
+                f"pgd.description "
+                f"FROM information_schema.columns c "
+                f"LEFT JOIN pg_catalog.pg_description pgd ON pgd.objoid = "
+                f"(SELECT cls.oid FROM pg_class cls JOIN pg_namespace ns ON ns.oid = cls.relnamespace "
+                f"WHERE ns.nspname = '{schema_filter}' AND cls.relname = '{safe_table}') "
+                f"AND pgd.objsubid = c.ordinal_position "
+                f"WHERE c.table_name = '{safe_table}' AND c.table_schema = '{schema_filter}' "
+                f"ORDER BY c.ordinal_position"
+            )
+            columns = []
+            for row in cursor.fetchall():
+                col_name = row[0]
+                data_type = row[1]
+                max_len = row[4]
+                precision = row[5]
+                scale = row[6]
+
+                # Build full type string with length/precision
+                full_type = data_type
+                if max_len and data_type in ('character varying', 'varchar', 'character', 'char', 'bpchar'):
+                    full_type = f"{data_type}({max_len})"
+                elif precision and scale and data_type in ('numeric', 'decimal'):
+                    full_type = f"{data_type}({precision},{scale})"
+
+                columns.append({
+                    "id": f"{safe_table}.{col_name}",  # Add unique ID for JSON API
+                    "name": col_name,
+                    "type": full_type,
+                    "is_nullable": row[2].upper() == "YES",
+                    "column_default": row[3],
+                    "is_primary": col_name in primary_keys,
+                    "length": max_len,
+                    "precision": precision,
+                    "scale": scale,
+                    "comment": row[7],
+                    "constraints": constraints_by_column.get(col_name, []),
+                    "indexes": indexes_by_column.get(col_name, [])
+                })
         else:
             cursor.close()
             return False, f"Unknown Database Type: {db_type}"
@@ -175,7 +368,9 @@ def get_columns_from_table(
         cursor.close()
         return True, columns
     except Exception as e:
-        return False, str(e)
+        import traceback
+        error_details = f"{str(e)}\n{traceback.format_exc()}"
+        return False, error_details
 
 
 def get_foreign_keys(

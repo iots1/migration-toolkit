@@ -103,6 +103,21 @@ class BaseDialect(ABC):
             return f"LIMIT {limit}"
         return f"LIMIT {limit} OFFSET {offset}"
 
+    def wrap_query_with_count(self, sql: str) -> str:
+        """
+        Wrap a SELECT query to get total row count using subquery.
+
+        Default implementation uses COUNT(1) with alias for clarity.
+        Override for dialects with different optimization requirements.
+
+        Args:
+            sql: The SELECT query to wrap
+
+        Returns:
+            str: COUNT query
+        """
+        return f"SELECT COUNT(1) AS total_row FROM ({sql}) AS _data_explorer_count_subq"
+
     def wrap_query_with_limit(self, sql: str, limit: int) -> str:
         """
         Wrap a SELECT query with a row limit using dialect-specific syntax.

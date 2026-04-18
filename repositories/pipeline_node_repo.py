@@ -9,24 +9,28 @@ from models.pipeline_config import PipelineNodeRecord
 
 
 def bulk_insert(records: list[PipelineNodeRecord]) -> None:
-    for rec in records:
-        with get_transaction() as conn:
-            conn.execute(
-                text("""
-                    INSERT INTO pipeline_nodes (
-                        pipeline_id, config_id, position_x, position_y, order_sort
-                    ) VALUES (
-                        :pipeline_id, :config_id, :position_x, :position_y, :order_sort
-                    )
-                """),
+    if not records:
+        return
+    with get_transaction() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO pipeline_nodes (
+                    pipeline_id, config_id, position_x, position_y, order_sort
+                ) VALUES (
+                    :pipeline_id, :config_id, :position_x, :position_y, :order_sort
+                )
+            """),
+            [
                 {
                     "pipeline_id": rec.pipeline_id,
                     "config_id": rec.config_id,
                     "position_x": rec.position_x,
                     "position_y": rec.position_y,
                     "order_sort": rec.order_sort,
-                },
-            )
+                }
+                for rec in records
+            ],
+        )
 
 
 def get_by_pipeline(pipeline_id: uuid.UUID) -> list[dict]:
@@ -119,6 +123,31 @@ def get_pipelines_using_config(config_id: str) -> list[dict]:
 
         # Combine all results
         return node_pipelines + source_edge_pipelines + target_edge_pipelines
+
+
+def get_nodes_by_pipeline_ids(pipeline_ids: list[str]) -> dict[str, list[dict]]:
+    """Batch-fetch nodes for multiple pipelines. Returns {pipeline_id: [nodes]}."""
+    if not pipeline_ids:
+        return {}
+    with get_transaction() as conn:
+        result = conn.execute(
+            text("""
+                SELECT id::text AS id,
+                       pipeline_id::text AS pipeline_id,
+                       config_id::text AS config_id,
+                       position_x, position_y, order_sort
+                FROM pipeline_nodes
+                WHERE pipeline_id::text = ANY(:ids)
+                  AND is_deleted = false
+                ORDER BY order_sort ASC
+            """),
+            {"ids": pipeline_ids},
+        )
+        grouped: dict[str, list[dict]] = {}
+        for row in result.fetchall():
+            d = dict(zip(result.keys(), row))
+            grouped.setdefault(d["pipeline_id"], []).append(d)
+        return grouped
 
 
 def delete_by_pipeline(pipeline_id: uuid.UUID) -> int:

@@ -31,8 +31,9 @@ class PipelinesService(BaseService):
         data = self.execute_db_operation(lambda: pipeline_repo.get_all_list())
         data = self._apply_query_params(data, params)
         data = self._sanitize_list(data)
-        data = self._attach_children(data)
+        # Paginate BEFORE attaching children so we only query nodes/edges for the current page
         page_data, total, total_pages = self._paginate(data, params)
+        page_data = self._attach_children(page_data)
 
         return {
             "data": page_data,
@@ -161,18 +162,16 @@ class PipelinesService(BaseService):
         return pipeline
 
     def _attach_children(self, pipelines: list[dict]) -> list[dict]:
+        if not pipelines:
+            return pipelines
+        pipeline_ids = [p["id"] for p in pipelines]
+        nodes_map = self.execute_db_operation(
+            lambda: pipeline_node_repo.get_nodes_by_pipeline_ids(pipeline_ids)
+        )
+        edges_map = self.execute_db_operation(
+            lambda: pipeline_edge_repo.get_edges_by_pipeline_ids(pipeline_ids)
+        )
         for p in pipelines:
-            try:
-                pipeline_id = uuid.UUID(p["id"])
-                nodes = self.execute_db_operation(
-                    lambda pid=pipeline_id: pipeline_node_repo.get_by_pipeline(pid)
-                )
-                edges = self.execute_db_operation(
-                    lambda pid=pipeline_id: pipeline_edge_repo.get_by_pipeline(pid)
-                )
-                p["nodes"] = nodes
-                p["edges"] = edges
-            except Exception:
-                p["nodes"] = []
-                p["edges"] = []
+            p["nodes"] = nodes_map.get(p["id"], [])
+            p["edges"] = edges_map.get(p["id"], [])
         return pipelines

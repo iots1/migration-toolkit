@@ -1,17 +1,27 @@
-import streamlit as st
 import pandas as pd
-from sentence_transformers import SentenceTransformer, util
 import numpy as np
 import re
+
+# Import HuggingFace transformers library first (avoid conflict with local transformers/)
+try:
+    from sentence_transformers import SentenceTransformer, util
+except ImportError:
+    # Fallback if sentence-transformers not installed
+    SentenceTransformer = None
+    util = None
 
 class SmartMapper:
     """
     AI Service for semantic column matching using Sentence Transformers + HIS Dictionary.
+
+    Pure Python service - no Streamlit dependencies.
+    Model caching is handled via simple lazy loading (singleton pattern).
     """
-    
+
     def __init__(self, model_name='paraphrase-multilingual-MiniLM-L12-v2'):
         self.model_name = model_name
-        
+        self._model = None  # Lazy-loaded model cache
+
         # --- HIS / Medical Dictionary ---
         # คำศัพท์เฉพาะทางที่ AI อาจจะเดาไม่ถูก หรือเราอยากบังคับจับคู่
         # Format: "คำที่เจอบ่อยใน Source": ["คำที่เป็นไปได้ใน Target", ...]
@@ -32,10 +42,19 @@ class SmartMapper:
             "cc": ["chief_complaint", "symptom"]
         }
 
-    @st.cache_resource
-    def load_model(_self):
-        """Loads the model and caches it to avoid reloading on every interaction."""
-        return SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+    def load_model(self):
+        """
+        Load the model (lazy loading with caching).
+
+        Model is loaded once and cached in self._model.
+        Subsequent calls return the cached model.
+
+        Returns:
+            SentenceTransformer: Loaded model instance
+        """
+        if self._model is None:
+            self._model = SentenceTransformer(self.model_name)
+        return self._model
 
     def suggest_mapping(self, source_cols, target_cols, threshold=0.4):
         """

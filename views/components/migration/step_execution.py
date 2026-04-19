@@ -1,9 +1,13 @@
 """
 Step 4 — ETL Execution.
 
-Runs the full migration pipeline:
-    connect → pre-count → truncate → schema check → HN init →
-    batch loop (encode → transform → insert) → verify → rollback UI
+Thin Streamlit wrapper around services.migration_executor.run_single_migration.
+
+Responsibilities:
+    1. Resolve datasource names → connection config dicts
+    2. Build Streamlit callbacks (log, progress)
+    3. Delegate ETL to run_single_migration()
+    4. Render MigrationResult to session_state + UI
 
 Reads from session_state:
     migration_config, migration_src_profile, migration_tgt_profile,
@@ -16,17 +20,12 @@ Updates session_state:
 """
 import time
 import streamlit as st
-import pandas as pd
-import sqlalchemy
-from sqlalchemy import text
 from datetime import datetime
+from sqlalchemy import text
 
 from services.datasource_repository import DatasourceRepository as DSRepo
 from services.migration_logger import create_log_file, write_log, read_log_file
-from services.checkpoint_manager import save_checkpoint, clear_checkpoint
-from services.encoding_helper import clean_dataframe
-from services.query_builder import build_select_query, transform_batch, build_dtype_map, batch_insert
-from services.transformers import DataTransformer
+from services.migration_executor import run_single_migration
 
 
 def render_step_execution() -> None:
@@ -80,7 +79,7 @@ def render_step_execution() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Private — ETL pipeline
+# Private — thin ETL wrapper
 # ---------------------------------------------------------------------------
 
 def _run_migration(add_log, status_box, metric_processed, metric_batch, metric_time, progress_bar):
@@ -95,7 +94,7 @@ def _run_migration(add_log, status_box, metric_processed, metric_batch, metric_t
     if skip_batches > 0:
         add_log(f"Resuming from checkpoint: skipping first {skip_batches} batches", "🔄")
 
-    # --- Connect ---
+    # Resolve credentials
     add_log("Connecting to databases...", "🔗")
     src_ds = DSRepo.get_by_name(st.session_state.migration_src_profile)
     tgt_ds = DSRepo.get_by_name(st.session_state.migration_tgt_profile)
@@ -107,106 +106,70 @@ def _run_migration(add_log, status_box, metric_processed, metric_batch, metric_t
         add_log("Auto-adjusting encoding: 'tis620' -> 'WIN874' (PostgreSQL Standard)", "🔧")
         src_charset = "WIN874"
 
-    src_engine = DSRepo.get_engine(st.session_state.migration_src_profile, charset=src_charset)
-    tgt_engine = DSRepo.get_engine(st.session_state.migration_tgt_profile)
-    add_log(f"Source connected: {src_ds['db_type']} (charset: {src_charset or 'default'})", "✅")
-    add_log(f"Target connected: {tgt_ds['db_type']}", "✅")
+    source_conn_config = {
+        "db_type": src_ds["db_type"], "host": src_ds["host"], "port": src_ds["port"],
+        "db_name": src_ds["dbname"], "user": src_ds["username"], "password": src_ds["password"],
+        "charset": src_charset,
+    }
+    target_conn_config = {
+        "db_type": tgt_ds["db_type"], "host": tgt_ds["host"], "port": tgt_ds["port"],
+        "db_name": tgt_ds["dbname"], "user": tgt_ds["username"], "password": tgt_ds["password"],
+    }
+
+    migration_start_time = datetime.now()
+    wall_start = time.time()
+
+    def progress_callback(batch_num, total_rows, rows_in_batch):
+        elapsed = time.time() - wall_start
+        metric_processed.metric("Rows Processed", f"{total_rows:,}")
+        metric_batch.metric("Current Batch", batch_num)
+        metric_time.metric("Elapsed Time", f"{elapsed:.1f}s")
+        progress_bar.progress(min(batch_num * 5, 95))
+        status_box.update(label=f"Processing Batch {batch_num} ({rows_in_batch:,} rows)...", state="running")
+
+    result = run_single_migration(
+        config=config,
+        source_conn_config=source_conn_config,
+        target_conn_config=target_conn_config,
+        batch_size=st.session_state.batch_size,
+        truncate_target=st.session_state.get("truncate_target", False),
+        test_mode=st.session_state.migration_test_sample,
+        skip_batches=skip_batches,
+        log_callback=add_log,
+        progress_callback=progress_callback,
+    )
 
     target_table = config["target"]["table"]
-    source_table = config["source"]["table"]
-    migration_start_time = datetime.now()
-
-    # --- Pre-count ---
-    pre_migration_count = _get_row_count(tgt_engine, target_table, add_log)
     st.session_state["last_migration_info"] = {
         "table": target_table,
         "tgt_profile": st.session_state.migration_tgt_profile,
         "start_time": migration_start_time.isoformat(),
-        "pre_count": pre_migration_count,
+        "pre_count": result.pre_count,
     }
 
-    # --- Truncate ---
-    if st.session_state.get("truncate_target", False):
-        _truncate_table(tgt_engine, target_table, add_log)
-
-    # --- Schema validation ---
-    _validate_schema(src_engine, tgt_engine, source_table, target_table, config, add_log)
-
-    # --- HN counter ---
-    _init_hn_counter(tgt_engine, target_table, config, add_log)
-
-    # --- Batch loop ---
-    batch_size = st.session_state.batch_size
-    select_query = build_select_query(config, source_table, src_ds["db_type"])
-    add_log(f"SELECT Query: {select_query}", "🔍")
-    add_log(f"Starting Batch Processing (Size: {batch_size})...", "🚀")
-
-    data_iterator = pd.read_sql(select_query, src_engine, chunksize=batch_size, coerce_float=False)
-    total_rows = 0
-    batch_num = 0
-    start_time = time.time()
-    migration_failed = False
-
-    for df_batch in data_iterator:
-        batch_num += 1
-        rows_in_batch = len(df_batch)
-
-        if batch_num <= skip_batches:
-            total_rows += rows_in_batch
-            add_log(f"Batch {batch_num}: Skipped (checkpoint)", "⏭️")
-            continue
-
-        status_box.update(label=f"Processing Batch {batch_num} ({rows_in_batch} rows)...", state="running")
-        df_batch = clean_dataframe(df_batch)
-
-        try:
-            df_batch, bit_columns = transform_batch(df_batch, config)
-        except Exception as e:
-            add_log(f"Transformation Error in Batch {batch_num}: {e}", "⚠️")
-            continue
-
-        try:
-            dtype_map = build_dtype_map(bit_columns, df_batch, tgt_ds["db_type"])
-            batch_insert(df_batch, target_table, tgt_engine, dtype_map)
-
-            total_rows += rows_in_batch
-            elapsed = time.time() - start_time
-            metric_processed.metric("Rows Processed", f"{total_rows:,}")
-            metric_batch.metric("Current Batch", batch_num)
-            metric_time.metric("Elapsed Time", f"{elapsed:.1f}s")
-            progress_bar.progress(min(batch_num * 5, 95))
-            save_checkpoint(config_name, batch_num, total_rows)
-            add_log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
-
-        except Exception as e:
-            save_checkpoint(config_name, batch_num - 1, total_rows)
-            short_err = str(e).split("[SQL:")[0].strip()[:300]
-            add_log(f"Insert Failed: {short_err}", "❌")
-            st.error(f"Migration Failed at Batch {batch_num}: {short_err}")
-
-            col_err1, _ = st.columns(2)
-            with col_err1:
-                if st.button("🗑️ Emergency Truncate Target Table", key="emergency_truncate"):
-                    _emergency_truncate(tgt_engine, target_table, add_log)
-            with st.expander("🔴 View Full Error Details", expanded=False):
-                st.code(str(e), language="sql")
-
-            status_box.update(label="Migration Failed", state="error", expanded=True)
-            st.session_state.migration_running = False
-            migration_failed = True
-            break
-
-        if st.session_state.migration_test_sample:
-            add_log("Stopping after first batch (Test Mode)", "🛑")
-            break
-
-    # --- Post-migration ---
-    if not migration_failed:
+    if result.status == "failed":
+        status_box.update(label="Migration Failed", state="error", expanded=True)
+        _render_migration_error(result.error_message or "", target_table, add_log)
+    else:
         progress_bar.progress(100)
         status_box.update(label="Migration Complete!", state="complete", expanded=False)
-        _verify_post_migration(tgt_engine, target_table, pre_migration_count, total_rows, add_log)
-        clear_checkpoint(config_name)
-        add_log("Checkpoint cleared (migration complete)", "🧹")
+        if result.post_count >= 0:
+            actual_inserted = result.post_count - result.pre_count
+            if actual_inserted == result.rows_processed:
+                st.success(
+                    f"✅ Migration Verified! Inserted **{actual_inserted:,}** rows "
+                    f"into `{target_table}` (total: {result.post_count:,})"
+                )
+            else:
+                st.warning(
+                    f"⚠️ Count Mismatch! Processed: {result.rows_processed:,} | "
+                    f"Actually in DB: {actual_inserted:,}  \n"
+                    f"Target now has {result.post_count:,} rows total."
+                )
+            st.session_state["last_migration_info"]["inserted"] = actual_inserted
+            st.session_state["last_migration_info"]["post_count"] = result.post_count
+        else:
+            st.success(f"✅ Migration Finished! Total Rows Processed: {result.rows_processed:,}")
         st.session_state.migration_completed = True
         st.balloons()
 
@@ -214,131 +177,8 @@ def _run_migration(add_log, status_box, metric_processed, metric_batch, metric_t
 
 
 # ---------------------------------------------------------------------------
-# Private — sub-operations
+# Private — emergency truncate (UI-triggered, runs after migration ends)
 # ---------------------------------------------------------------------------
-
-def _get_row_count(engine, table: str, add_log) -> int:
-    try:
-        with engine.connect() as conn:
-            result = conn.execute(text(f"SELECT COUNT(*) FROM {table}"))
-            count = result.scalar() or 0
-        add_log(f"Pre-migration count: {count:,} rows in `{table}`", "📊")
-        return count
-    except Exception as e:
-        add_log(f"Could not get pre-migration count (non-critical): {e}", "⚠️")
-        return 0
-
-
-def _truncate_table(engine, table: str, add_log) -> None:
-    add_log(f"Cleaning target table: {table}...", "🧹")
-    try:
-        with engine.begin() as conn:
-            conn.execute(text(f"TRUNCATE TABLE {table}"))
-        add_log("Target table truncated successfully.", "✅")
-    except Exception as e:
-        add_log(f"TRUNCATE failed, trying DELETE FROM... ({e})", "⚠️")
-        try:
-            with engine.begin() as conn:
-                conn.execute(text(f"DELETE FROM {table}"))
-            add_log("Target table cleared using DELETE.", "✅")
-        except Exception as e2:
-            add_log(f"Failed to clean table: {e2}", "❌")
-            raise e2
-
-
-def _validate_schema(src_engine, tgt_engine, source_table: str, target_table: str, config: dict, add_log) -> None:
-    add_log("Validating Schema Compatibility...", "🧐")
-    try:
-        src_insp = sqlalchemy.inspect(src_engine)
-        tgt_insp = sqlalchemy.inspect(tgt_engine)
-
-        def _get_cols(insp, table):
-            parts = table.split(".")
-            t, s = parts[-1], parts[0] if len(parts) > 1 else None
-            try:
-                return {c["name"]: c["type"] for c in insp.get_columns(t, schema=s)}
-            except Exception:
-                return {c["name"]: c["type"] for c in insp.get_columns(table)}
-
-        src_cols = _get_cols(src_insp, source_table)
-        tgt_cols = _get_cols(tgt_insp, target_table)
-
-        warnings = []
-        for m in config.get("mappings", []):
-            if m.get("ignore", False):
-                continue
-            sc, tc = m["source"], m["target"]
-            if sc in src_cols and tc in tgt_cols:
-                src_len = getattr(src_cols[sc], "length", None)
-                tgt_len = getattr(tgt_cols[tc], "length", None)
-                if tgt_len is not None:
-                    if src_len is None:
-                        warnings.append(f"- **{sc}** (Unknown/Text) ➔ **{tc}** (Limit: {tgt_len})")
-                    elif src_len > tgt_len:
-                        warnings.append(f"- **{sc}** (Limit: {src_len}) ➔ **{tc}** (Limit: {tgt_len})")
-
-        if warnings:
-            add_log("⚠️ Potential Truncation Detected:\n" + "\n".join(warnings).replace("**", ""), "⚠️")
-            st.warning("⚠️ **Potential Truncation Detected!** check logs for details.")
-            time.sleep(1)
-        else:
-            add_log("Schema compatibility check passed.", "✅")
-    except Exception as e:
-        add_log(f"Skipping schema check (Non-critical): {e}", "⚠️")
-
-
-def _init_hn_counter(tgt_engine, target_table: str, config: dict, add_log) -> None:
-    import re as _re
-    for mapping in config.get("mappings", []):
-        if mapping.get("ignore", False) or "GENERATE_HN" not in mapping.get("transformers", []):
-            continue
-        ghn_params = mapping.get("transformer_params", {}).get("GENERATE_HN", {})
-        auto_detect = ghn_params.get("auto_detect_max", True)
-        start_from = int(ghn_params.get("start_from", 0))
-
-        if auto_detect:
-            hn_col = mapping.get("target", mapping.get("source"))
-            add_log(f"Auto-detecting max HN from `{target_table}.{hn_col}`...", "🔍")
-            try:
-                with tgt_engine.connect() as conn:
-                    result = conn.execute(text(f'SELECT MAX("{hn_col}") FROM {target_table}'))
-                    max_val = result.scalar()
-                if max_val:
-                    digits = _re.sub(r"\D", "", str(max_val))
-                    start_from = int(digits) if digits else 0
-                    add_log(f"Max HN found: `{max_val}` → counter starts at {start_from}", "✅")
-                else:
-                    add_log(f"No existing HN in target → counter starts at {start_from}", "ℹ️")
-            except Exception as e:
-                add_log(f"Auto-detect HN failed: {e} → using start_from={start_from}", "⚠️")
-
-        DataTransformer.reset_hn_counter(start_from)
-        add_log(f"HN Counter initialized at {start_from} (next: HN{str(start_from+1).zfill(9)})", "🔢")
-        break  # Only one GENERATE_HN per config
-
-
-def _verify_post_migration(tgt_engine, target_table: str, pre_count: int, total_processed: int, add_log) -> None:
-    try:
-        with tgt_engine.connect() as conn:
-            result = conn.execute(text(f"SELECT COUNT(*) FROM {target_table}"))
-            post_count = result.scalar() or 0
-        actual_inserted = post_count - pre_count
-        add_log(f"Post-migration count: {post_count:,} rows (inserted: {actual_inserted:,})", "📊")
-
-        if actual_inserted == total_processed:
-            st.success(f"✅ Migration Verified! Inserted **{actual_inserted:,}** rows into `{target_table}` (total: {post_count:,})")
-        else:
-            st.warning(
-                f"⚠️ Count Mismatch! Processed: {total_processed:,} | Actually in DB: {actual_inserted:,}  \n"
-                f"Target now has {post_count:,} rows total."
-            )
-        if "last_migration_info" in st.session_state:
-            st.session_state["last_migration_info"]["inserted"] = actual_inserted
-            st.session_state["last_migration_info"]["post_count"] = post_count
-    except Exception as e:
-        st.success(f"✅ Migration Finished! Total Rows Processed: {total_processed:,}")
-        add_log(f"Could not verify post-count: {e}", "⚠️")
-
 
 def _emergency_truncate(engine, table: str, add_log) -> None:
     try:
@@ -419,3 +259,129 @@ def _reset_and_restart() -> None:
     st.session_state.checkpoint_batch = 0
     st.session_state.migration_step = 1
     st.rerun()
+
+
+def _render_migration_error(raw_error: str, target_table: str, add_log) -> None:
+    """
+    Render a user-friendly error panel for migration failures.
+
+    Handles three error types:
+    - Truncation (executor-enriched): structured column breakdown
+    - Raw DB error (psycopg2/pymssql): extracted summary + optional SQL
+    - Generic: plain message
+    """
+    # ── Truncation error (already enriched by executor) ───────────────────────
+    if raw_error.startswith("Data too long:"):
+        st.error("**Migration Failed: Data too long for target column(s)**")
+        _render_truncation_details(raw_error)
+        _render_error_actions(target_table, add_log)
+        return
+
+    # ── Raw DB error ──────────────────────────────────────────────────────────
+    short_msg, failed_sql = _parse_db_error(raw_error)
+    st.error(f"**Migration Failed:** {short_msg}")
+    if failed_sql:
+        with st.expander("🔍 Failed SQL Query", expanded=True):
+            st.code(failed_sql, language="sql")
+    with st.expander("📋 Full Error Details"):
+        st.code(raw_error or "No details", language="text")
+    _render_error_actions(target_table, add_log)
+
+
+def _render_truncation_details(error_msg: str) -> None:
+    """
+    Parse and display the structured truncation error from migration_executor.
+
+    Handles two formats produced by the executor:
+
+    Full scan (schema found):
+        Data too long: [col] limit=10, actual=35, overflow_rows=42; ... . Suggestion
+
+    Fallback scan (schema inspect failed, best-effort):
+        Data too long: [col] limit=10, actual=35, overflow_rows=unknown. Suggestion
+    """
+    import re
+
+    body = error_msg.removeprefix("Data too long:").strip()
+    parts = body.rsplit(". ", 1)
+    columns_part = parts[0]
+    suggestion = parts[1] if len(parts) > 1 else "Increase column size in target DB or add TRUNCATE_TO transformer"
+
+    # Match both "overflow_rows=42" and "overflow_rows=unknown"
+    pattern = r"\[([^\]]+)\]\s*limit=(\d+),\s*actual=(\d+),\s*overflow_rows=(\w+)"
+    matches = re.findall(pattern, columns_part)
+
+    if not matches:
+        st.warning(error_msg)
+        return
+
+    st.markdown("**Columns exceeding target size limit:**")
+    for col, limit, actual, overflow in matches:
+        overflow_label = f"{overflow} rows affected" if overflow.isdigit() else "affected rows unknown"
+        excess = int(actual) - int(limit)
+        st.markdown(
+            f"| | |\n|---|---|\n"
+            f"| **Column** | `{col}` |\n"
+            f"| **Target limit** | {limit} chars |\n"
+            f"| **Longest value found** | **{actual} chars** (+{excess} over limit) |\n"
+            f"| **Affected rows** | {overflow_label} |"
+        )
+
+    st.info(f"💡 **Suggestion:** {suggestion}")
+
+    with st.expander("📋 Full Error Details"):
+        st.code(error_msg, language="text")
+
+
+def _render_error_actions(target_table: str, add_log) -> None:
+    """Render action buttons shown after any migration failure."""
+    col_err1, _ = st.columns(2)
+    with col_err1:
+        if st.button("🗑️ Emergency Truncate Target Table", key="emergency_truncate"):
+            tgt_engine = DSRepo.get_engine(st.session_state.migration_tgt_profile)
+            _emergency_truncate(tgt_engine, target_table, add_log)
+
+
+def _parse_db_error(raw: str) -> tuple[str, str | None]:
+    """
+    Extract a readable summary and the failed SQL from a raw SQLAlchemy/DB error string.
+
+    Returns (short_summary, failed_sql | None).
+    """
+    import re
+
+    if not raw:
+        return "Unknown error", None
+
+    # ── Extract failed SQL ────────────────────────────────────────────────────
+    failed_sql: str | None = None
+    sql_marker = "[SQL:"
+    bg_marker = "(Background on this error"
+    if sql_marker in raw:
+        sql_start = raw.index(sql_marker) + len(sql_marker)
+        sql_end = raw.find(bg_marker, sql_start)
+        if sql_end == -1:
+            sql_end = len(raw)
+        failed_sql = raw[sql_start:sql_end].strip().rstrip("]").strip()
+
+    first_line = raw.split("\n")[0]
+
+    # psycopg2 truncation: (psycopg2.errors.StringDataRightTruncation) value too long...
+    if "StringDataRightTruncation" in first_line or (
+        "psycopg2" in first_line and "truncat" in first_line.lower()
+    ):
+        limit_match = re.search(r"character varying\((\d+)\)", first_line)
+        limit_info = f" (limit: {limit_match.group(1)} chars)" if limit_match else ""
+        return f"Data too long for a VARCHAR column{limit_info} — check column mappings", failed_sql
+
+    # pymssql pattern: (207, b"Invalid column name 'old_hn'.DB-Lib...)
+    match = re.search(r'\((\d+),\s*b[\'"](.+?)(?:DB-Lib|\\n|[\'"])', first_line)
+    if match:
+        code = match.group(1)
+        msg = match.group(2).rstrip(".").strip()
+        cls_match = re.search(r'\([\w.]*?(\w+Error)\)', first_line)
+        exc = cls_match.group(1) if cls_match else "DatabaseError"
+        return f"{exc} [{code}]: {msg}", failed_sql
+
+    # Generic fallback
+    return first_line[:200], failed_sql

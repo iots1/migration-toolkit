@@ -1,3 +1,6 @@
 [server]
 runOnSave = true
 fileWatcherType = "poll"
+
+[logger]
+level = "error"

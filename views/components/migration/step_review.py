@@ -93,8 +93,10 @@ def _check_self_migration(config: dict) -> bool:
 
 def _render_mapping_summary(config: dict) -> None:
     st.markdown("#### Mapping Summary")
-    st.info(f"Source Table: **{config['source']['table']}**")
-    st.info(f"Target Table: **{config['target']['table']}**")
+    src_tbl = config.get("source", {}).get("table", "N/A")
+    tgt_tbl = config.get("target", {}).get("table", "N/A")
+    st.info(f"Source Table: **{src_tbl}**")
+    st.info(f"Target Table: **{tgt_tbl}**")
     st.write(f"Columns Mapped: {len(config.get('mappings', []))}")
 
 

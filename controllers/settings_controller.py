@@ -10,6 +10,9 @@ Responsibilities:
 
 Must NOT contain any st.* rendering calls (no st.button, st.text_input, etc.).
 """
+
+from __future__ import annotations  # Enable modern type hints
+
 import streamlit as st
 
 import database as db
@@ -24,6 +27,7 @@ _DEFAULTS: dict = {
     "new_ds_db": "",
     "new_ds_user": "",
     "new_ds_pass": "",
+    "new_ds_charset": "",
     "ds_form_type_index": 0,
     "is_edit_mode": False,
     "edit_ds_id": None,
@@ -51,6 +55,7 @@ def run() -> None:
         "edit_ds_id": PageState.get("edit_ds_id"),
         "ds_form_type_index": PageState.get("ds_form_type_index"),
         "ds_grid_key": PageState.get("ds_grid_key"),
+        "new_ds_charset": PageState.get("new_ds_charset", ""),
     }
 
     callbacks = {
@@ -70,6 +75,7 @@ def run() -> None:
 # Private action callbacks
 # ---------------------------------------------------------------------------
 
+
 def _reset_to_new_mode() -> None:
     """Clear the datasource form and return to Add-New mode."""
     PageState.set("new_ds_name", "")
@@ -78,6 +84,7 @@ def _reset_to_new_mode() -> None:
     PageState.set("new_ds_db", "")
     PageState.set("new_ds_user", "")
     PageState.set("new_ds_pass", "")
+    PageState.set("new_ds_charset", "")
     PageState.set("ds_form_type_index", 0)
     PageState.set("is_edit_mode", False)
     PageState.set("edit_ds_id", None)
@@ -85,7 +92,7 @@ def _reset_to_new_mode() -> None:
     PageState.set("ds_grid_key", PageState.get("ds_grid_key", 0) + 1)
 
 
-def _on_row_select(ds_id: int) -> None:
+def _on_row_select(ds_id) -> None:
     """Load a datasource into the form for editing and trigger a rerun."""
     full_data = db.get_datasource_by_id(ds_id)
     if not full_data:
@@ -101,17 +108,26 @@ def _on_row_select(ds_id: int) -> None:
     PageState.set("new_ds_db", full_data["dbname"])
     PageState.set("new_ds_user", full_data["username"])
     PageState.set("new_ds_pass", full_data["password"])
+    PageState.set("new_ds_charset", full_data.get("charset", ""))
     PageState.set("is_edit_mode", True)
     PageState.set("edit_ds_id", ds_id)
     st.rerun()
 
 
 def _on_save_new(
-    name: str, db_type: str, host: str, port: str,
-    dbname: str, username: str, password: str,
+    name: str,
+    db_type: str,
+    host: str,
+    port: str,
+    dbname: str,
+    username: str,
+    password: str,
+    charset: str | None = None,
 ) -> tuple[bool, str]:
     """Create a new datasource. Reruns on success; returns (False, msg) on failure."""
-    ok, msg = db.save_datasource(name, db_type, host, port, dbname, username, password)
+    ok, msg = db.save_datasource(
+        name, db_type, host, port, dbname, username, password, charset
+    )
     if ok:
         PageState.set("trigger_ds_reset", True)
         st.rerun()
@@ -119,27 +135,43 @@ def _on_save_new(
 
 
 def _on_update(
-    ds_id: int, name: str, db_type: str, host: str, port: str,
-    dbname: str, username: str, password: str,
+    ds_id,
+    name: str,
+    db_type: str,
+    host: str,
+    port: str,
+    dbname: str,
+    username: str,
+    password: str,
+    charset: str | None = None,
 ) -> tuple[bool, str]:
     """Update an existing datasource. Reruns on success; returns (False, msg) on failure."""
-    ok, msg = db.update_datasource(ds_id, name, db_type, host, port, dbname, username, password)
+    ok, msg = db.update_datasource(
+        ds_id, name, db_type, host, port, dbname, username, password, charset
+    )
     if ok:
         PageState.set("trigger_ds_reset", True)
         st.rerun()
     return ok, msg
 
 
-def _on_delete_ds(ds_id: int) -> None:
+def _on_delete_ds(ds_id) -> None:
     """Delete a datasource and trigger a full form reset."""
     db.delete_datasource(ds_id)
     PageState.set("trigger_ds_reset", True)
     st.rerun()
 
 
-def _on_delete_config(config_name: str) -> tuple[bool, str]:
+def _on_delete_config(
+    conf_name: str = None, config_name: str = None, **kwargs
+) -> tuple[bool, str]:
     """Delete a saved migration config. Reruns on success."""
-    success, msg = db.delete_config(config_name)
+    # Use the actual parameter name passed (either conf_name or config_name)
+    param_name = conf_name if conf_name is not None else config_name
+    if param_name is None:
+        return False, "No config name provided"
+
+    success, msg = db.delete_config(param_name)
     if success:
         st.rerun()
     return success, msg

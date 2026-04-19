@@ -3,6 +3,8 @@ Migration Logger — creates and writes per-run log files.
 
 Responsibility (SRP): file-based logging for migration execution only.
 """
+from __future__ import annotations  # Enable modern type hints
+
 import os
 from datetime import datetime
 

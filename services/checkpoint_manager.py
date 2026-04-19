@@ -3,6 +3,9 @@ Checkpoint Manager — saves/loads/clears migration resume state.
 
 Responsibility (SRP): filesystem persistence for migration checkpoints only.
 """
+from __future__ import annotations  # Enable modern type hints
+from typing import Optional
+
 import json
 import os
 from datetime import datetime
@@ -31,7 +34,7 @@ def save_checkpoint(config_name: str, batch_num: int, rows_processed: int) -> No
         json.dump(data, f)
 
 
-def load_checkpoint(config_name: str) -> dict | None:
+def load_checkpoint(config_name: str) -> Optional[dict]:
     """Return checkpoint dict if one exists, else None."""
     path = _checkpoint_path(config_name)
     if os.path.exists(path):
@@ -43,5 +46,54 @@ def load_checkpoint(config_name: str) -> dict | None:
 def clear_checkpoint(config_name: str) -> None:
     """Remove checkpoint file after successful migration."""
     path = _checkpoint_path(config_name)
+    if os.path.exists(path):
+        os.remove(path)
+
+
+# ---------------------------------------------------------------------------
+# 2D Pipeline Checkpoints (Challenge 2)
+#
+# Stored as: migration_checkpoints/pipeline_<safe_name>.json
+#
+# Schema:
+# {
+#   "pipeline_name": "my_pipeline",
+#   "steps": {
+#     "config_A": {"status": "completed", "last_batch": -1,  "rows_processed": 5000},
+#     "config_B": {"status": "running",   "last_batch": 3,   "rows_processed": 1500},
+#     "config_C": {"status": "pending",   "last_batch": 0,   "rows_processed": 0}
+#   },
+#   "timestamp": "2026-03-25T14:30:00"
+# }
+# ---------------------------------------------------------------------------
+
+def _pipeline_checkpoint_path(pipeline_name: str) -> str:
+    return os.path.join(CHECKPOINT_DIR, f"pipeline_{_safe_name(pipeline_name)}.json")
+
+
+def save_pipeline_checkpoint(pipeline_name: str, steps_state: dict) -> None:
+    """Persist the full step-state map for a pipeline run."""
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    data = {
+        "pipeline_name": pipeline_name,
+        "steps": steps_state,
+        "timestamp": datetime.now().isoformat(),
+    }
+    with open(_pipeline_checkpoint_path(pipeline_name), "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def load_pipeline_checkpoint(pipeline_name: str) -> Optional[dict]:
+    """Return the pipeline checkpoint dict if one exists, else None."""
+    path = _pipeline_checkpoint_path(pipeline_name)
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            return json.load(f)
+    return None
+
+
+def clear_pipeline_checkpoint(pipeline_name: str) -> None:
+    """Remove pipeline checkpoint file after successful or cancelled run."""
+    path = _pipeline_checkpoint_path(pipeline_name)
     if os.path.exists(path):
         os.remove(path)

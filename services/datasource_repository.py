@@ -13,6 +13,7 @@ Usage:
     ok, tbls = DSRepo.get_tables("MyPostgres")
     ok, cols = DSRepo.get_columns("MyPostgres", "patients")
 """
+
 from __future__ import annotations
 from typing import Optional
 import database as db
@@ -37,8 +38,12 @@ class DatasourceRepository:
         if not ds:
             return False, f"Datasource '{name}' not found."
         return connector.test_db_connection(
-            ds["db_type"], ds["host"], ds["port"],
-            ds["dbname"], ds["username"], ds["password"],
+            ds["db_type"],
+            ds["host"],
+            ds["port"],
+            ds["dbname"],
+            ds["username"],
+            ds["password"],
         )
 
     @staticmethod
@@ -50,10 +55,15 @@ class DatasourceRepository:
         ds = db.get_datasource_by_name(name)
         if not ds:
             raise ValueError(f"Datasource '{name}' not found.")
+        ds_charset = charset if charset else ds.get("charset")
         return connector.create_sqlalchemy_engine(
-            ds["db_type"], ds["host"], ds["port"],
-            ds["dbname"], ds["username"], ds["password"],
-            charset=charset,
+            ds["db_type"],
+            ds["host"],
+            ds["port"],
+            ds["dbname"],
+            ds["username"],
+            ds["password"],
+            charset=ds_charset,
         )
 
     @staticmethod
@@ -66,8 +76,13 @@ class DatasourceRepository:
         if not ds:
             return False, []
         return connector.get_tables_from_datasource(
-            ds["db_type"], ds["host"], ds["port"],
-            ds["dbname"], ds["username"], ds["password"],
+            ds["db_type"],
+            ds["host"],
+            ds["port"],
+            ds["dbname"],
+            ds["username"],
+            ds["password"],
+            charset=ds.get("charset"),
         )
 
     @staticmethod
@@ -80,6 +95,12 @@ class DatasourceRepository:
         if not ds:
             return False, []
         return connector.get_columns_from_table(
-            ds["db_type"], ds["host"], ds["port"],
-            ds["dbname"], ds["username"], ds["password"], table,
+            ds["db_type"],
+            ds["host"],
+            ds["port"],
+            ds["dbname"],
+            ds["username"],
+            ds["password"],
+            table,
+            charset=ds.get("charset"),
         )

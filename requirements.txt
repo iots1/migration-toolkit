@@ -1,11 +1,28 @@
+# --- Core UI & Data ---
 streamlit>=1.35.0
-pandas
+pandas>=2.0.0,<3.0.0
+numpy<2.0.0
+
+# --- Fix for LargeUtf8 Error ---
+streamlit-aggrid==1.2.1.post2
+pyarrow==14.0.2
+
+# --- Database ---
 pymysql
 pymssql
 psycopg2-binary
-streamlit-agraph
-streamlit-aggrid
+sqlalchemy
+
+# --- REST API ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# --- Machine Learning ---
 sentence-transformers
 scikit-learn
 torch --index-url https://download.pytorch.org/whl/cpu
-sqlalchemy
+
+# --- Utilities ---
+streamlit-agraph
+python-dotenv
+python-socketio>=5.11.0

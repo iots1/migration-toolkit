@@ -1,35 +1,67 @@
-import sqlite3
-import re
-from typing import Dict, Any, Optional
-import hashlib
+"""
+db_connector.py — SQLAlchemy engine factory.
+
+Phase 9 Refactoring: This file now contains ONLY the SQLAlchemy engine creation logic.
+All other responsibilities have been extracted to:
+    - services/connection_pool.py — Raw DBAPI connection pool
+    - services/schema_inspector.py — Schema inspection & sampling
+    - services/connection_tester.py — Connection testing
+
+This module is used by the Migration Engine for Pandas read_sql/to_sql operations.
+It creates SQLAlchemy engines with proper URL handling and connection pooling.
+"""
+from __future__ import annotations
+from typing import Optional
+
+from sqlalchemy import Engine, URL
 from sqlalchemy import create_engine
-from sqlalchemy.engine import Engine, URL
 
 
-def _safe_id(name: str) -> str:
-    """Validate DB identifier (table/schema/column) to prevent SQL injection.
-    Allows alphanumeric, underscore, hyphen, dot, and spaces (for MSSQL schemas).
-    Raises ValueError on suspicious input.
-    """
-    if not isinstance(name, str) or not name.strip():
-        raise ValueError(f"Invalid identifier: {name!r}")
-    if not re.match(r'^[a-zA-Z0-9_\-\. ]+$', name):
-        raise ValueError(f"Unsafe identifier rejected: {name!r}")
-    return name
-
-# ==========================================
-#  PART 1: SQLAlchemy Integration
-#  Used for Migration Engine (Pandas read_sql/to_sql)
-# ==========================================
-
-def create_sqlalchemy_engine(db_type, host, port, db_name, user, password, charset=None) -> Optional[Engine]:
+def create_sqlalchemy_engine(
+    db_type: str,
+    host: str,
+    port: str,
+    db_name: str,
+    user: str,
+    password: str,
+    charset: str | None = None,
+    **engine_kwargs
+) -> Optional[Engine]:
     """
     Creates a SQLAlchemy Engine using URL object construction.
+
     This prevents errors when passwords contain special characters (@, :, /).
-    
+
     Args:
-        charset: Optional charset override. For Thai legacy databases, use 'tis620' or 'latin1'.
+        db_type: Database type ("MySQL", "PostgreSQL", "Microsoft SQL Server")
+        host: Database server host
+        port: Database server port
+        db_name: Database name
+        user: Database user
+        password: Database password
+        charset: Optional charset override.
+                 For Thai legacy databases, use 'tis620' or 'latin1'.
                  Default: 'utf8mb4' for MySQL, 'utf8' for others.
+        **engine_kwargs: Additional keyword arguments passed to create_engine()
+
+    Returns:
+        SQLAlchemy Engine instance or None if creation fails
+
+    Raises:
+        ValueError: If db_type is not supported
+        Exception: If engine creation fails (exception is re-raised)
+
+    Examples:
+        >>> engine = create_sqlalchemy_engine(
+        ...     "MySQL", "localhost", "3306", "mydb", "user", "pass"
+        ... )
+        >>> df = pd.read_sql("SELECT * FROM table", engine)
+
+        >>> # Thai legacy database with TIS-620 encoding
+        >>> engine = create_sqlalchemy_engine(
+        ...     "MySQL", "localhost", "3306", "mydb", "user", "pass",
+        ...     charset="tis620"
+        ... )
     """
     try:
         # Convert port to int if exists
@@ -37,7 +69,6 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password, chars
 
         if db_type == "MySQL":
             # Requires: pip install pymysql
-            # สำหรับ database เก่าที่เก็บภาษาไทยเป็น TIS-620 ให้ใช้ charset='tis620' หรือ 'latin1'
             mysql_charset = charset if charset else "utf8mb4"
             connection_url = URL.create(
                 "mysql+pymysql",
@@ -48,10 +79,10 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password, chars
                 database=db_name,
                 query={
                     "charset": mysql_charset,
-                    "binary_prefix": "true"  # ช่วยจัดการ binary/blob data ได้ดีขึ้น
+                    "binary_prefix": "true"  # Helps with binary/blob data
                 }
             )
-            
+
         elif db_type == "PostgreSQL":
             # Requires: pip install psycopg2-binary
             pg_encoding = charset if charset else "utf8"
@@ -64,7 +95,7 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password, chars
                 database=db_name,
                 query={"client_encoding": pg_encoding}
             )
-            
+
         elif db_type == "Microsoft SQL Server":
             # Requires: pip install pymssql
             mssql_charset = charset if charset else "utf8"
@@ -77,12 +108,19 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password, chars
                 database=db_name,
                 query={"charset": mssql_charset}
             )
-        
+
         else:
             raise ValueError(f"Unsupported DB Type for Engine: {db_type}")
 
         # Create Engine with pool settings
-        engine = create_engine(connection_url)
+        # pool_recycle: Recycle connections older than 30 minutes (before DB firewall timeout)
+        # This is safe for long-running migrations (hours) because we don't close active connections
+        if "pool_recycle" not in engine_kwargs:
+            engine_kwargs["pool_recycle"] = 1800  # 30 minutes
+        if "pool_pre_ping" not in engine_kwargs:
+            engine_kwargs["pool_pre_ping"] = False  # Trust pool_recycle instead of SELECT 1
+
+        engine = create_engine(connection_url, **engine_kwargs)
         return engine
 
     except Exception as e:
@@ -90,332 +128,14 @@ def create_sqlalchemy_engine(db_type, host, port, db_name, user, password, chars
         raise e
 
 
-# ==========================================
-#  PART 2: Connection Pool Class
-# ==========================================
-
-class DatabaseConnectionPool:
-    """
-    Singleton connection pool manager for database connections.
-    Maintains a pool of reusable connections to avoid repeatedly opening/closing connections.
-    """
-    _instance = None
-    _connections: Dict[str, Any] = {}
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(DatabaseConnectionPool, cls).__new__(cls)
-        return cls._instance
-
-    @staticmethod
-    def _generate_key(db_type: str, host: str, port: str, db_name: str, user: str) -> str:
-        """Generate unique key for connection based on connection parameters."""
-        key_data = f"{db_type}:{host}:{port}:{db_name}:{user}"
-        return hashlib.md5(key_data.encode()).hexdigest()
-
-    def get_connection(self, db_type: str, host: str, port: str, db_name: str, user: str, password: str):
-        """Get or create a database connection."""
-        conn_key = self._generate_key(db_type, host, port, db_name, user)
-
-        # Check existing connection
-        if conn_key in self._connections:
-            try:
-                conn = self._connections[conn_key]
-                if self._is_connection_alive(conn, db_type):
-                    return conn, conn.cursor()
-                else:
-                    del self._connections[conn_key]
-            except:
-                if conn_key in self._connections:
-                    del self._connections[conn_key]
-
-        # Create new connection
-        conn = self._create_connection(db_type, host, port, db_name, user, password)
-        self._connections[conn_key] = conn
-        return conn, conn.cursor()
-
-    def _is_connection_alive(self, conn, db_type: str) -> bool:
-        """Check if connection is still alive."""
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT 1")
-            cursor.fetchone()
-            cursor.close()
-            return True
-        except:
-            return False
-
-    def _create_connection(self, db_type: str, host: str, port: str, db_name: str, user: str, password: str):
-        """Create a new database connection (Low-level drivers)."""
-        try:
-            port_int = int(port) if port and str(port).strip() else None
-        except ValueError:
-            raise ValueError(f"Invalid port number: {port}")
-
-        if db_type == "MySQL":
-            try:
-                import pymysql
-                connect_args = {
-                    "host": host, "user": user, "password": password,
-                    "database": db_name, "connect_timeout": 5, "autocommit": True,
-                    "charset": "utf8mb4"
-                }
-                if port_int: connect_args["port"] = port_int
-                return pymysql.connect(**connect_args)
-            except ImportError:
-                raise ImportError("Library 'pymysql' not found. Run: pip install pymysql")
-
-        elif db_type == "Microsoft SQL Server":
-            try:
-                import pymssql
-                connect_args = {
-                    "server": host, "user": user, "password": password,
-                    "database": db_name, "timeout": 5, "autocommit": True
-                }
-                if port_int: connect_args["port"] = port_int
-                return pymssql.connect(**connect_args)
-            except ImportError:
-                raise ImportError("Library 'pymssql' not found. Run: pip install pymssql")
-
-        elif db_type == "PostgreSQL":
-            try:
-                import psycopg2
-                connect_args = {
-                    "host": host, "database": db_name, "user": user,
-                    "password": password, "connect_timeout": 5
-                }
-                if port_int: connect_args["port"] = port_int
-                conn = psycopg2.connect(**connect_args)
-                conn.autocommit = True
-                return conn
-            except ImportError:
-                raise ImportError("Library 'psycopg2' not found. Run: pip install psycopg2-binary")
-
-        raise ValueError(f"Unknown Database Type: {db_type}")
-
-    def close_connection(self, db_type: str, host: str, port: str, db_name: str, user: str):
-        conn_key = self._generate_key(db_type, host, port, db_name, user)
-        if conn_key in self._connections:
-            try:
-                self._connections[conn_key].close()
-            except: pass
-            del self._connections[conn_key]
-
-    def close_all(self):
-        for conn in self._connections.values():
-            try:
-                conn.close()
-            except: pass
-        self._connections.clear()
-
-
-# ==========================================
-#  PART 3: Global Instance & Functions
-#  CRITICAL: _connection_pool MUST be defined here
-# ==========================================
-
-# Global connection pool instance
-_connection_pool = DatabaseConnectionPool()
-
-
-def test_db_connection(db_type, host, port, db_name, user, password):
-    """Test connection to external database sources."""
-    try:
-        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
-        cursor.close()
-        return True, f"Successfully connected to {db_type}!"
-    except Exception as e:
-        return False, str(e)
-
-
-# --- INSPECTION FUNCTIONS (Originals Restored) ---
-
-def get_tables_from_datasource(db_type, host, port, db_name, user, password, schema=None):
-    """Retrieves list of tables from a datasource."""
-    try:
-        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
-
-        if db_type == "MySQL":
-            cursor.execute("SHOW TABLES")
-        elif db_type == "Microsoft SQL Server":
-            schema_filter = _safe_id(schema) if schema else 'dbo'
-            cursor.execute(f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = '{schema_filter}' ORDER BY TABLE_NAME")
-        elif db_type == "PostgreSQL":
-            schema_filter = _safe_id(schema) if schema else 'public'
-            cursor.execute(f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{schema_filter}' ORDER BY table_name")
-        else:
-            return False, f"Unknown Database Type: {db_type}"
-
-        tables = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        return True, tables
-    except Exception as e:
-        return False, str(e)
-
-def get_columns_from_table(db_type, host, port, db_name, user, password, table_name, schema=None):
-    """Retrieves column information from a specific table."""
-    try:
-        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
-        safe_table = _safe_id(table_name)
-
-        if db_type == "MySQL":
-            cursor.execute(f"DESCRIBE `{safe_table}`")
-            columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
-        elif db_type == "Microsoft SQL Server":
-            schema_filter = _safe_id(schema) if schema else 'dbo'
-            cursor.execute(f"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '{safe_table}' AND TABLE_SCHEMA = '{schema_filter}' ORDER BY ORDINAL_POSITION")
-            columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
-        elif db_type == "PostgreSQL":
-            schema_filter = _safe_id(schema) if schema else 'public'
-            cursor.execute(f"SELECT column_name, data_type FROM information_schema.columns WHERE table_name = '{safe_table}' AND table_schema = '{schema_filter}' ORDER BY ordinal_position")
-            columns = [{"name": row[0], "type": row[1]} for row in cursor.fetchall()]
-        else:
-            cursor.close()
-            return False, f"Unknown Database Type: {db_type}"
-
-        cursor.close()
-        return True, columns
-    except Exception as e:
-        return False, str(e)
-
-def get_foreign_keys(db_type, host, port, db_name, user, password, schema=None):
-    """Retrieves foreign key relationships."""
-    try:
-        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
-        relationships = []
-
-        if db_type == "MySQL":
-            safe_db = _safe_id(db_name)
-            query = f"""
-                SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
-                FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-                WHERE REFERENCED_TABLE_SCHEMA = '{safe_db}'
-                AND REFERENCED_TABLE_NAME IS NOT NULL
-            """
-            cursor.execute(query)
-            for row in cursor.fetchall():
-                relationships.append({
-                    "table": row[0], "col": row[1],
-                    "ref_table": row[2], "ref_col": row[3]
-                })
-
-        elif db_type == "PostgreSQL":
-            schema_filter = _safe_id(schema) if schema else 'public'
-            query = f"""
-                SELECT
-                    tc.table_name, kcu.column_name, ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name
-                FROM
-                    information_schema.table_constraints AS tc
-                    JOIN information_schema.key_column_usage AS kcu
-                      ON tc.constraint_name = kcu.constraint_name
-                      AND tc.table_schema = kcu.table_schema
-                    JOIN information_schema.constraint_column_usage AS ccu
-                      ON ccu.constraint_name = tc.constraint_name
-                      AND ccu.table_schema = tc.table_schema
-                WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = '{schema_filter}'
-            """
-            cursor.execute(query)
-            for row in cursor.fetchall():
-                relationships.append({
-                    "table": row[0], "col": row[1],
-                    "ref_table": row[2], "ref_col": row[3]
-                })
-
-        elif db_type == "Microsoft SQL Server":
-            query = """
-                SELECT 
-                    tp.name, cp.name, tr.name, cr.name
-                FROM 
-                    sys.foreign_keys fk
-                INNER JOIN 
-                    sys.tables tp ON fk.parent_object_id = tp.object_id
-                INNER JOIN 
-                    sys.tables tr ON fk.referenced_object_id = tr.object_id
-                INNER JOIN 
-                    sys.foreign_key_columns fkc ON fkc.constraint_object_id = fk.object_id
-                INNER JOIN 
-                    sys.columns cp ON fkc.parent_column_id = cp.column_id AND fkc.parent_object_id = cp.object_id
-                INNER JOIN 
-                    sys.columns cr ON fkc.referenced_column_id = cr.column_id AND fkc.referenced_object_id = cr.object_id
-            """
-            cursor.execute(query)
-            for row in cursor.fetchall():
-                relationships.append({
-                    "table": row[0], "col": row[1],
-                    "ref_table": row[2], "ref_col": row[3]
-                })
-
-        cursor.close()
-        return True, relationships
-    except Exception as e:
-        return False, str(e)
-
-def get_table_sample_data(db_type, host, port, db_name, user, password, table_name, limit=50, schema=None):
-    """Retrieves a sample of data from a table."""
-    try:
-        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
-
-        safe_table = _safe_id(table_name)
-        safe_schema = _safe_id(schema) if schema else None
-        limit = int(limit)  # ensure numeric
-
-        table_ref = safe_table
-        if safe_schema:
-            if db_type == "Microsoft SQL Server":
-                table_ref = f"[{safe_schema}].[{safe_table}]"
-            elif db_type == "PostgreSQL":
-                table_ref = f'"{safe_schema}"."{safe_table}"'
-
-        query = ""
-        if db_type == "Microsoft SQL Server":
-            query = f"SELECT TOP {limit} * FROM {table_ref}"
-        else:
-            query = f"SELECT * FROM {table_ref} LIMIT {limit}"
-
-        cursor.execute(query)
-        columns = [desc[0] for desc in cursor.description]
-        rows = cursor.fetchall()
-
-        cursor.close()
-        return True, rows, columns
-    except Exception as e:
-        return False, str(e), []
-
-def get_column_sample_values(db_type, host, port, db_name, user, password, table_name, column_name, limit=20, schema=None):
-    """Retrieves distinct sample values from a specific column."""
-    try:
-        _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
-
-        safe_table = _safe_id(table_name)
-        safe_col = _safe_id(column_name)
-        safe_schema = _safe_id(schema) if schema else None
-        limit = int(limit)  # ensure numeric
-
-        table_ref = safe_table
-        if safe_schema:
-            if db_type == "Microsoft SQL Server":
-                table_ref = f"[{safe_schema}].[{safe_table}]"
-            elif db_type == "PostgreSQL":
-                table_ref = f'"{safe_schema}"."{safe_table}"'
-
-        if db_type == "MySQL":
-            query = f"SELECT DISTINCT `{safe_col}` FROM {table_ref} WHERE `{safe_col}` IS NOT NULL AND CAST(`{safe_col}` AS CHAR) <> '' LIMIT {limit}"
-        elif db_type == "PostgreSQL":
-            query = f'SELECT DISTINCT "{safe_col}" FROM {table_ref} WHERE "{safe_col}" IS NOT NULL AND CAST("{safe_col}" AS TEXT) <> \'\' LIMIT {limit}'
-        elif db_type == "Microsoft SQL Server":
-            query = f"SELECT DISTINCT TOP {limit} [{safe_col}] FROM {table_ref} WHERE [{safe_col}] IS NOT NULL AND CAST([{safe_col}] AS NVARCHAR(MAX)) <> ''"
-        else:
-            return False, f"Unknown Database Type: {db_type}"
-
-        cursor.execute(query)
-        values = [row[0] for row in cursor.fetchall()]
-        cursor.close()
-        return True, values
-    except Exception as e:
-        return False, str(e)
-
-def close_connection(db_type, host, port, db_name, user):
-    _connection_pool.close_connection(db_type, host, port, db_name, user)
-
-def close_all_connections():
-    _connection_pool.close_all()
+# Re-export functions from split modules for backward compatibility
+# This ensures existing code continues to work during transition
+from services.connection_pool import close_connection, close_all_connections
+from services.connection_tester import test_db_connection
+from services.schema_inspector import (
+    get_tables_from_datasource,
+    get_columns_from_table,
+    get_foreign_keys,
+    get_table_sample_data,
+    get_column_sample_values,
+)

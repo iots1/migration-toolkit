@@ -26,11 +26,14 @@ def clean_value(value) -> object:
     return value
 
 
-def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+def clean_dataframe(df: pd.DataFrame, *, fix_thai: bool = True) -> pd.DataFrame:
     """Apply clean_value to all object-typed columns in a DataFrame batch.
 
     Fast path (vectorized): string-only columns — uses pandas str operations.
     Slow path (cell-by-cell): columns with bytes — defers to clean_value().
+
+    When fix_thai=True (default), also attempts to re-decode garbled Thai text
+    that was read from a TIS-620/CP874 source via a UTF-8 connection.
 
     Benchmark: vectorized path is ~5-10x faster than per-cell apply() for
     typical 1,000-row batches with 20+ string columns.
@@ -55,6 +58,8 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
             r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', regex=True
         )
         df.loc[mask, col] = cleaned
+    if fix_thai:
+        df = fix_thai_encoding(df)
     return df
 
 
@@ -76,14 +81,31 @@ def _try_fix_single(value: str) -> str:
 def fix_thai_encoding(df: pd.DataFrame) -> pd.DataFrame:
     """
     Heuristic fix for DataFrames where Thai text (TIS-620/CP874) was fetched
-    via a latin1 MySQL connection and appears garbled.
+    via a UTF-8 or latin1 connection and appears garbled (mojibake).
 
-    Applies only to object columns. Each cell is tested: if re-encoding
-    latin1→cp874 yields a fully-printable string, the fixed value is used.
+    Applies only to object columns that contain bytes in the Latin-1 range
+    (0x80-0xFF) which are typical of mis-decoded TIS-620 text. Each cell is
+    tested: if re-encoding latin1→cp874 yields a fully-printable string, the
+    fixed value is used.
+
     Safe to call on already-correct UTF-8 data (the heuristic is conservative).
+    Columns with no Latin-1 range bytes are skipped entirely for performance.
     """
     df = df.copy()
     for col in df.select_dtypes(include=["object"]).columns:
+        s = df[col].dropna()
+        if s.empty:
+            continue
+        sample = s.iloc[0] if len(s) > 0 else ""
+        if not isinstance(sample, str):
+            continue
+        if not any(ord(c) >= 0x80 for c in sample[:200]):
+            has_high = any(
+                any(ord(c) >= 0x80 for c in str(v)[:50])
+                for v in s.iloc[:20]
+            )
+            if not has_high:
+                continue
         df[col] = df[col].apply(
             lambda v: _try_fix_single(v) if isinstance(v, str) else v
         )

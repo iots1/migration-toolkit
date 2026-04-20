@@ -602,6 +602,7 @@ class PipelineExecutor:
         if not tgt_ds:
             return f"Target datasource (id={tgt_ds_id}) not found"
 
+        tgt_charset = tgt_ds.get("charset") or None
         tgt_conn = {
             "db_type": tgt_ds["db_type"],
             "host": tgt_ds["host"],
@@ -609,6 +610,7 @@ class PipelineExecutor:
             "db_name": tgt_ds["dbname"],
             "user": tgt_ds["username"],
             "password": tgt_ds["password"],
+            "charset": tgt_charset,
         }
 
         # Custom scripts skip source entirely — return empty dict as placeholder.
@@ -619,9 +621,9 @@ class PipelineExecutor:
         if not src_ds:
             return f"Source datasource (id={src_ds_id}) not found"
 
-        charset = config.get("source", {}).get("charset")
-        if src_ds["db_type"] == "PostgreSQL" and charset == "tis620":
-            charset = "WIN874"
+        src_charset = src_ds.get("charset") or config.get("source", {}).get("charset") or None
+        if src_ds["db_type"] == "PostgreSQL" and src_charset == "tis620":
+            src_charset = "WIN874"
 
         src_conn = {
             "db_type": src_ds["db_type"],
@@ -630,7 +632,7 @@ class PipelineExecutor:
             "db_name": src_ds["dbname"],
             "user": src_ds["username"],
             "password": src_ds["password"],
-            "charset": charset,
+            "charset": src_charset,
         }
         return src_conn, tgt_conn
 

@@ -16,6 +16,7 @@ class CreateDatasourceSchema(BaseModel):
     dbname: str = Field(default="", min_length=0)
     username: str = Field(default="", min_length=0)
     password: str = Field(default="", min_length=0)
+    charset: str | None = None
 
 
 class UpdateDatasourceSchema(BaseModel):
@@ -28,6 +29,7 @@ class UpdateDatasourceSchema(BaseModel):
     dbname: str | None = None
     username: str | None = None
     password: str | None = None
+    charset: str | None = None
 
 
 class DatasourceSchema(BaseModel):
@@ -40,3 +42,4 @@ class DatasourceSchema(BaseModel):
     port: str
     dbname: str
     username: str
+    charset: str | None = None

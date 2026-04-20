@@ -239,12 +239,13 @@ def get_columns_from_table(
         elif db_type == "Microsoft SQL Server":
             schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(
-                f"SELECT c.name, con.name, con.type_desc "
-                f"FROM sys.constraints con "
-                f"JOIN sys.columns c ON con.parent_object_id = c.object_id AND con.parent_column_id = c.column_id "
-                f"JOIN sys.tables t ON con.parent_object_id = t.object_id "
-                f"JOIN sys.schemas s ON t.schema_id = s.schema_id "
-                f"WHERE t.name = '{safe_table}' AND s.name = '{schema_filter}'"
+                f"SELECT ccu.COLUMN_NAME, tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE "
+                f"FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
+                f"JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE ccu "
+                f"  ON tc.CONSTRAINT_NAME = ccu.CONSTRAINT_NAME "
+                f"  AND tc.TABLE_NAME = ccu.TABLE_NAME "
+                f"  AND tc.TABLE_SCHEMA = ccu.TABLE_SCHEMA "
+                f"WHERE tc.TABLE_NAME = '{safe_table}' AND tc.TABLE_SCHEMA = '{schema_filter}'"
             )
             for row in cursor.fetchall():
                 col_name, constr_name, constr_type = row
@@ -252,7 +253,7 @@ def get_columns_from_table(
                     constraints_by_column[col_name] = []
                 constraints_by_column[col_name].append({
                     "name": constr_name,
-                    "type": constr_type.replace('_CONSTRAINT', '').upper()
+                    "type": constr_type
                 })
 
         # Fetch column details

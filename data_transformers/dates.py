@@ -11,17 +11,25 @@ def buddhist_to_iso(series: pd.Series, params=None) -> pd.Series:
     BE = CE + 543
 
     Params:
-        source_format: Format of source dates (default: 'mixed')
-        target_format: Target date format (default: 'ISO')
+        default_value: Value to use for null/empty values (fallback chain: BUDDHIST_TO_ISO.default_value → DEFAULT_VALUE.value → null)
     """
     if params is None:
         params = {}
 
+    def get_default():
+        # Fallback chain: BUDDHIST_TO_ISO.default_value → DEFAULT_VALUE.value → None
+        if 'BUDDHIST_TO_ISO' in params and 'default_value' in params.get('BUDDHIST_TO_ISO', {}):
+            return params['BUDDHIST_TO_ISO']['default_value']
+        if 'DEFAULT_VALUE' in params:
+            return params['DEFAULT_VALUE'].get('value', None)
+        return None
+
     def convert_year(date_str):
         if pd.isna(date_str) or date_str == '':
-            return date_str
+            return get_default()
         date_str = str(date_str)
         # Extract year (assume 4 digits)
+        import re
         match = re.search(r'\d{4}', date_str)
         if match:
             year = int(match.group())
@@ -30,7 +38,6 @@ def buddhist_to_iso(series: pd.Series, params=None) -> pd.Series:
                 date_str = date_str.replace(str(year), str(new_year))
         return date_str
 
-    import re
     return series.apply(convert_year)
 
 

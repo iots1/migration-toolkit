@@ -25,6 +25,35 @@ MAX_ROWS = 1000
 QUERY_TIMEOUT_SECONDS = 30
 
 
+def _try_fix_tis620(value: str) -> str:
+    """Re-decode a string misread as Latin-1 back to CP874 (Thai TIS-620)."""
+    try:
+        fixed = value.encode("latin1").decode("cp874")
+        if all(c.isprintable() or c in "\t\n\r" for c in fixed):
+            return fixed
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    return value
+
+
+def _fix_tis620_mojibake(rows: list[dict]) -> list[dict]:
+    """Fix Thai TIS-620 mojibake in MSSQL query results.
+
+    When pymssql connects with charset='utf8' to a TIS-620/CP874 database,
+    Thai characters appear garbled (e.g. '¾ÔÉ¾ÔªÑÂ' instead of 'พิษพิชัย').
+    This re-decodes Latin-1 → CP874 only for cells that contain high bytes
+    and produce fully-printable Thai text.
+    """
+    for row in rows:
+        for key, val in row.items():
+            if not isinstance(val, str):
+                continue
+            if not any(ord(c) >= 0x80 for c in val[:100]):
+                continue
+            row[key] = _try_fix_tis620(val)
+    return rows
+
+
 def _extract_table_name(sql: str) -> str | None:
     """
     Extract table name from SELECT query.
@@ -106,6 +135,7 @@ class QueryExecutor:
                 db_name=ds["dbname"],
                 user=ds["username"],
                 password=ds["password"],
+                charset=ds.get("charset"),
             )
 
             timeout_stmt = dialect.get_timeout_statement(QUERY_TIMEOUT_SECONDS)
@@ -146,6 +176,9 @@ class QueryExecutor:
             rows = rows[:MAX_ROWS]
 
             row_dicts = [dict(zip(columns, row)) for row in rows]
+
+            if ds["db_type"] == "Microsoft SQL Server":
+                row_dicts = _fix_tis620_mojibake(row_dicts)
 
             logger.info(
                 "DataExplorer: datasource=%s rows=%d total=%d elapsed=%.2fs sql=%.200s",

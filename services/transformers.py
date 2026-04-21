@@ -42,7 +42,7 @@ class DataTransformer:
                             vmap_params = transformer_params.get('VALUE_MAP', {})
                             df = DataTransformer.apply_value_map(df, source_col, target_col, vmap_params)
                         else:
-                            series_data = DataTransformer.transform_series(series_data, t_name)
+                            series_data = DataTransformer.transform_series(series_data, t_name, transformer_params)
                     except Exception as e:
                         print(f"Error transforming {source_col} with {t_name}: {e}")
 
@@ -66,7 +66,7 @@ class DataTransformer:
                             df = DataTransformer.apply_value_map(df, source_col, target_col, vmap_params)
                             series_data = df[target_col] if target_col in df.columns else df[source_col]
                         else:
-                            series_data = DataTransformer.transform_series(series_data, t_name)
+                            series_data = DataTransformer.transform_series(series_data, t_name, transformer_params)
                     except Exception as e:
                         # Log error but don't crash the whole batch
                         print(f"Error transforming {source_col} with {t_name}: {e}")
@@ -89,10 +89,13 @@ class DataTransformer:
         return df
 
     @staticmethod
-    def transform_series(series: pd.Series, transformer_name: str) -> pd.Series:
+    def transform_series(series: pd.Series, transformer_name: str, transformer_params: dict = None) -> pd.Series:
         """
         Apply transformation to a Pandas Series using Vectorized operations.
+        transformer_params: Dict with all transformer parameters (may include DEFAULT_VALUE for fallback)
         """
+        if transformer_params is None:
+            transformer_params = {}
         if series.empty:
             return series
 
@@ -117,6 +120,14 @@ class DataTransformer:
         if transformer_name == "REPLACE_EMPTY_WITH_NULL":
             return series.where(series.notna() & series.astype(str).str.strip().ne(''), other=np.nan)
 
+        if transformer_name == "DEFAULT_VALUE":
+            default_val = transformer_params.get('DEFAULT_VALUE', {}).get('value', None)
+            def fill_null(val):
+                if pd.isna(val) or val == '':
+                    return default_val
+                return val
+            return series.apply(fill_null)
+
         if transformer_name == "GENERATE_HN":
             # Generate sequential HN numbers for the entire series
             start_counter = DataTransformer._hn_counter
@@ -137,17 +148,29 @@ class DataTransformer:
         ]
         
         if transformer_name in complex_transformers:
-            return series.apply(lambda x: DataTransformer.transform_value(x, transformer_name))
+            return series.apply(lambda x: DataTransformer.transform_value(x, transformer_name, transformer_params))
             
         return series
 
     @staticmethod
-    def transform_value(value: Any, transformer_name: str) -> Any:
+    def transform_value(value: Any, transformer_name: str, transformer_params: dict = None) -> Any:
         """
         Apply transformer to a single scalar value.
         Used as a fallback or for row-by-row processing.
+        transformer_params: Dict with all transformer parameters (may include DEFAULT_VALUE for fallback)
         """
-        if value is None or pd.isna(value): 
+        if transformer_params is None:
+            transformer_params = {}
+
+        if value is None or pd.isna(value):
+            # Fallback chain for null values:
+            # 1. Use default_value from specific transformer params
+            # 2. Fall back to DEFAULT_VALUE if available
+            # 3. Return None
+            if transformer_name in transformer_params and 'default_value' in transformer_params[transformer_name]:
+                return transformer_params[transformer_name]['default_value']
+            if 'DEFAULT_VALUE' in transformer_params:
+                return transformer_params['DEFAULT_VALUE'].get('value', None)
             return None
         
         value_str = str(value)
@@ -162,7 +185,7 @@ class DataTransformer:
         if transformer_name == "REPLACE_EMPTY_WITH_NULL": return None if not value_str.strip() else value_str
         
         # Domain logic
-        if transformer_name == "BUDDHIST_TO_ISO": return DataTransformer._buddhist_to_iso(value_str)
+        if transformer_name == "BUDDHIST_TO_ISO": return DataTransformer._buddhist_to_iso(value_str, transformer_params)
         if transformer_name == "ENG_DATE_TO_ISO": return DataTransformer._eng_date_to_iso(value_str)
         if transformer_name == "MAP_GENDER": return DataTransformer._map_gender(value_str)
         if transformer_name == "FORMAT_PHONE": return DataTransformer._format_phone(value_str)
@@ -179,9 +202,25 @@ class DataTransformer:
     # --- Internal Helper Methods (Logic Implementation) ---
 
     @staticmethod
-    def _buddhist_to_iso(date_str: str) -> Optional[str]:
-        """Convert Thai Buddhist Date (dd/mm/2566) to ISO"""
-        if not date_str or len(date_str) < 8: return None
+    def _buddhist_to_iso(date_str: str, transformer_params: dict = None) -> Optional[str]:
+        """
+        Convert Thai Buddhist Date (dd/mm/2566) to ISO
+        Falls back to DEFAULT_VALUE if conversion fails
+        """
+        if transformer_params is None:
+            transformer_params = {}
+
+        # Helper to get default value with fallback chain
+        def get_default():
+            if 'BUDDHIST_TO_ISO' in transformer_params and 'default_value' in transformer_params['BUDDHIST_TO_ISO']:
+                return transformer_params['BUDDHIST_TO_ISO']['default_value']
+            if 'DEFAULT_VALUE' in transformer_params:
+                return transformer_params['DEFAULT_VALUE'].get('value', None)
+            return None
+
+        if not date_str or len(date_str) < 8:
+            return get_default()
+
         try:
             # Handle various separators
             parts = re.split(r'[-/]', date_str.strip())
@@ -192,11 +231,12 @@ class DataTransformer:
                 # BE years in Thailand are ~2500+; threshold >2400 avoids
                 # misidentifying Gregorian years (2001-2399) as Buddhist Era.
                 iso_year = year_val - 543 if year_val > 2400 else year_val
-                
+
                 return f"{iso_year}-{m.zfill(2)}-{d.zfill(2)}"
         except:
             pass
-        return None # Return None on failure to ensure DB consistency
+
+        return get_default()
 
     @staticmethod
     def _eng_date_to_iso(date_str: str) -> Optional[str]:

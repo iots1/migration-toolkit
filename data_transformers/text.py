@@ -48,3 +48,23 @@ def concat(series: pd.Series, params=None) -> pd.Series:
     prefix = params.get("prefix", "")
     suffix = params.get("suffix", "")
     return prefix + series.astype(str) + suffix
+
+
+@register_transformer("DEFAULT_VALUE", "Default Value", "Fill null/empty values with default", has_params=True)
+def default_value(series: pd.Series, params=None) -> pd.Series:
+    """
+    Fill null and empty string values with a default value.
+
+    Params:
+        value: Default value to use for null/empty cells
+    """
+    if params is None:
+        params = {}
+    default_val = params.get("value", None)
+
+    def fill_null(val):
+        if pd.isna(val) or val == '':
+            return default_val
+        return val
+
+    return series.apply(fill_null)

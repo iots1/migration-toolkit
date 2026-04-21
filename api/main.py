@@ -10,6 +10,7 @@ from __future__ import annotations
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from api.base.auth import verify_api_key
 from api.base.exceptions import (
@@ -35,6 +36,30 @@ from api.socket_manager import sio, socket_asgi, set_event_loop
 
 from repositories.base import init_db
 
+
+class UnicodeJSONResponse(JSONResponse):
+    """JSONResponse that preserves non-ASCII characters (Thai, CJK, etc.).
+
+    FastAPI's default uses json.dumps(ensure_ascii=True) which escapes
+    Unicode characters to \\uXXXX sequences. On deploy servers this can
+    cause Thai text to appear as ASCII codes in the response body.
+
+    Setting ensure_ascii=False outputs raw UTF-8, which is both more
+    compact and avoids any intermediate encoding/decoding issues.
+    """
+
+    def render(self, content) -> bytes:
+        import json
+
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+
 # Create FastAPI app
 app = FastAPI(
     title="HIS Analyzer API",
@@ -42,6 +67,7 @@ app = FastAPI(
     version="1.0.0",
     dependencies=[Depends(verify_api_key)],
     redirect_slashes=False,
+    default_response_class=UnicodeJSONResponse,
 )
 
 # Register exception handlers

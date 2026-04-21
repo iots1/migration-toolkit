@@ -70,6 +70,16 @@
 
 **Impact**: A single corrupt row among millions can halt a 24-hour migration with no recovery path other than manual investigation.
 
+### 1.7 Source Data Consistency Risk: HIGH (NEW)
+
+| What exists | Gap |
+|---|---|
+| No source isolation level set | Cursor-based pagination reads different batches at different times. If source data changes between batches (INSERT/UPDATE/DELETE via `build_select_query()`), rows can be missed or duplicated regardless of PK-based cursor. |
+| `READ COMMITTED` default | PostgreSQL default isolation level allows seeing new commits between batches. A row inserted after batch N's cursor position will be skipped; a row deleted before batch N+1's read will cause a gap. |
+| No source table locking | No mechanism to freeze source data during migration. |
+
+**Impact**: For active tables (e.g., live HIS system), migrated data may not match source exactly. Cursor-based pagination with `REPEATABLE READ` (Phase 2) mitigates this — each batch sees a consistent snapshot — but only if the source is PostgreSQL. For MySQL/MSSQL sources, dialect-specific isolation must be applied.
+
 ---
 
 ## 2. Implementation Plan
@@ -496,9 +506,16 @@ connection pool — test that connections are properly returned to the pool afte
    ```python
    # In query_builder.py
    def _make_pg_upsert_method(target_table, pk_columns, insert_strategy="upsert"):
-       """COPY into staging CTE, then INSERT ... ON CONFLICT."""
+       """COPY into temp staging table, then INSERT ... ON CONFLICT.
+
+       Requires the full operation to run inside a single transaction.
+       The temp table is created with ON COMMIT DROP so it auto-cleans.
+       """
+       quoted_table = f'"{target_table}"'
+
        def _upsert(table, conn, keys, data_iter):
            cols = ", ".join(f'"{k}"' for k in keys)
+           col_defs = ", ".join(f'"{k}" TEXT" for k in keys)  # staging: all TEXT
            pk_cols = ", ".join(f'"{k}"' for k in pk_columns)
            updates = ", ".join(
                f'"{k}" = EXCLUDED."{k}"' for k in keys if k not in pk_columns
@@ -511,24 +528,41 @@ connection pool — test that connections are properly returned to the pool afte
 
            dbapi_conn = conn.connection
            with dbapi_conn.cursor() as cur:
+               # Create temp staging table (auto-dropped on transaction commit)
+               cur.execute(
+                   f"CREATE TEMP TABLE IF NOT EXISTS _upsert_staging "
+                   f"({col_defs}) ON COMMIT DROP"
+               )
+               cur.execute("TRUNCATE _upsert_staging")
+
+               # COPY into staging
+               staging_cols = ", ".join(f'"{k}"' for k in keys)
+               cur.copy_expert(
+                   f"COPY _upsert_staging({staging_cols}) FROM STDIN WITH CSV", buf
+               )
+
+               # INSERT from staging into target with conflict resolution
                if insert_strategy == "upsert":
                    sql = (
-                       f"INSERT INTO {quoted} ({cols}) "
-                       f"SELECT * FROM temp_csv ON CONFLICT ({pk_cols}) "
-                       f"DO UPDATE SET {updates}"
+                       f"INSERT INTO {quoted_table} ({cols}) "
+                       f"SELECT {cols} FROM _upsert_staging "
+                       f"ON CONFLICT ({pk_cols}) DO UPDATE SET {updates}"
                    )
                else:  # upsert_ignore
                    sql = (
-                       f"INSERT INTO {quoted} ({cols}) "
-                       f"SELECT * FROM temp_csv ON CONFLICT ({pk_cols}) DO NOTHING"
+                       f"INSERT INTO {quoted_table} ({cols}) "
+                       f"SELECT {cols} FROM _upsert_staging "
+                       f"ON CONFLICT ({pk_cols}) DO NOTHING"
                    )
-               cur.copy_expert(
-                   f"COPY temp_csv({cols}) FROM STDIN WITH CSV", buf
-               )
                cur.execute(sql)
        return _upsert
    ```
 
+   > **Critical detail**: The temp table must be created inside the same transaction as
+   > the COPY + INSERT. `ON COMMIT DROP` ensures cleanup even on error. The staging
+   > columns use TEXT type to avoid type mismatch during COPY — PostgreSQL will cast
+   > to target column types during the INSERT.
+   >
    > **Note**: UPSERT requires knowing the target PK columns. These are detected at the
    > start of each step (same mechanism as Phase 2 source PK detection) and stored
    > alongside the step config for the duration of the migration.
@@ -549,9 +583,11 @@ connection pool — test that connections are properly returned to the pool afte
                src_engine.dispose()
    ```
 
-**Effort**: ~8 hours. **Risk**: UPSERT is dialect-specific. Implement PostgreSQL first
+**Effort**: ~10 hours. **Risk**: UPSERT is dialect-specific. Implement PostgreSQL first
 (most common target), add MySQL (`INSERT ... ON DUPLICATE KEY UPDATE`) and MSSQL
-(`MERGE`) later. COPY-into-temp-CTE pattern needs testing for large batches.
+(`MERGE`) later — estimate an additional ~4h per dialect. The temp staging table pattern
+needs testing for large batches (verify temp table doesn't bloat `pg_temp` schema).
+Also test that `ON COMMIT DROP` works correctly when the COPY itself fails mid-stream.
 
 ---
 
@@ -595,13 +631,22 @@ connection pool — test that connections are properly returned to the pool afte
 
 2. **File-based heartbeat** (lightweight, no DB write per batch):
    ```python
-   HEARTBEAT_DIR = "/tmp/migration_heartbeats"
+   import os
+   from pathlib import Path
+
+   # Use a persistent path that survives machine reboot (NOT /tmp)
+   HEARTBEAT_DIR = os.path.join(
+       os.getenv("HEARTBEAT_DIR", str(Path.home() / ".his_analyzer" / "heartbeats"))
+   )
 
    def _write_heartbeat(job_id: str, step: str, batch: int) -> None:
        path = os.path.join(HEARTBEAT_DIR, f"{job_id}.heartbeat")
        os.makedirs(HEARTBEAT_DIR, exist_ok=True)
-       with open(path, "w") as f:
+       # Atomic write via temp file
+       tmp = path + ".tmp"
+       with open(tmp, "w") as f:
            f.write(f"{step}|{batch}|{time.time()}")
+       os.replace(tmp, path)
 
    def _read_heartbeat(job_id: str) -> dict | None:
        path = os.path.join(HEARTBEAT_DIR, f"{job_id}.heartbeat")
@@ -617,8 +662,15 @@ connection pool — test that connections are properly returned to the pool afte
 
    > **Design note**: We use file-based heartbeat instead of DB-based to avoid
    > 10,000+ DB writes per migration (one per batch). The heartbeat file is ~50 bytes
-   > and written via `open()` which is near-instant. A periodic checker (or stale job
-   > detection on POST) reads this file to detect dead threads.
+   > and written atomically via `os.replace()`. The heartbeat directory uses
+   > `~/.his_analyzer/heartbeats` by default (survives reboot, unlike `/tmp`).
+   > Override via `HEARTBEAT_DIR` env var for containerized deployments.
+   >
+   > **Fallback for reboot scenario**: After machine restart, heartbeat files persist
+   > on disk. Stale job detection reads the file's timestamp — if > 5 minutes old,
+   > the job is marked as failed. If the heartbeat file is somehow deleted (manual
+   > cleanup, container restart without volume mount), stale detection falls back
+   > to the `last_heartbeat` column in the `jobs` table (see item 3).
 
 3. **Heartbeat + `last_heartbeat` column** — periodic flush to DB (every 30s):
    ```sql
@@ -627,33 +679,56 @@ connection pool — test that connections are properly returned to the pool afte
 
    ```python
    # In pipeline_service.py — background heartbeat flusher
-   def _heartbeat_flusher(self, job_id: str, stop_event: threading.Event):
-       """Flush heartbeat to DB every 30 seconds."""
+   def _heartbeat_flusher(self, job_id: str, job_repo, stop_event: threading.Event):
+       """Flush heartbeat to DB every 30 seconds.
+
+       Uses job_repo (not _run_repo) because last_heartbeat lives on the jobs table.
+       """
        while not stop_event.wait(30):
            hb = _read_heartbeat(job_id)
            if hb and time.time() - hb["timestamp"] < 60:
-               self._run_repo.update(job_id, PipelineRunUpdateRecord(
-                   last_heartbeat=datetime.utcnow()
-               ))
+               job_repo.update(job_id, {
+                   "last_heartbeat": datetime.now(timezone.utc)
+               })
    ```
 
 4. **Stale job detection on POST /api/v1/jobs**:
    ```python
+   STALE_THRESHOLD_SECONDS = 300  # 5 minutes
+
    # In jobs router — before returning 409:
    running_job = job_repo.get_running_for_pipeline(pipeline_id)
    if running_job:
        hb = _read_heartbeat(str(running_job["id"]))
-       if hb and (time.time() - hb["timestamp"]) > 300:  # 5 min stale
+       is_stale = False
+
+       if hb:
+           is_stale = (time.time() - hb["timestamp"]) > STALE_THRESHOLD_SECONDS
+       elif running_job.get("last_heartbeat"):
+           # Fallback: use DB last_heartbeat if heartbeat file missing
+           elapsed = (datetime.now(timezone.utc) - running_job["last_heartbeat"]).total_seconds()
+           is_stale = elapsed > STALE_THRESHOLD_SECONDS
+       else:
+           # No heartbeat at all — check if job was created > 10 minutes ago
+           elapsed = (datetime.now(timezone.utc) - running_job["created_at"]).total_seconds()
+           is_stale = elapsed > 600
+
+       if is_stale:
            job_repo.update(running_job["id"], {
                "status": "failed",
                "error_message": "Process died — no heartbeat for 5 minutes"
            })
            # Clean up heartbeat file
-           os.remove(f"{HEARTBEAT_DIR}/{running_job['id']}.heartbeat")
+           hb_path = os.path.join(HEARTBEAT_DIR, f"{running_job['id']}.heartbeat")
+           if os.path.exists(hb_path):
+               os.remove(hb_path)
            # Proceed with new job creation
        else:
            return 409  # genuinely running
    ```
+
+   > **Defense in depth**: Three-tier stale detection — file heartbeat (fastest),
+   > DB `last_heartbeat` (survives file loss), and `created_at` age (last resort).
 
 5. **New job status: `"interrupted"`**:
    - Set when `_shutdown_event` is detected between batches.
@@ -700,16 +775,33 @@ event loop) + `threading.Event` to propagate to worker threads.
 
 2. **Adaptive batch size** — measure first batch memory, adjust:
    ```python
+   # Adaptive batch size — reset for each step, re-evaluate periodically
+   adaptive_batch_size = effective_batch_size  # reset per step (from config or pipeline)
+
    # After first successful batch:
    batch_memory_mb = df_batch.memory_usage(deep=True).sum() / (1024 * 1024)
    if batch_memory_mb > MEMORY_PER_BATCH_TARGET_MB:
-       # Calculate new batch size to stay under target
        scale_factor = MEMORY_PER_BATCH_TARGET_MB / batch_memory_mb
-       new_batch_size = max(100, int(batch_size * scale_factor))
+       adaptive_batch_size = max(100, int(effective_batch_size * scale_factor))
        log(f"Batch 1 memory: {batch_memory_mb:.0f}MB — "
-           f"reducing batch_size from {batch_size} to {new_batch_size}", "⚠️")
-       batch_size = new_batch_size
+           f"reducing batch_size from {effective_batch_size} to {adaptive_batch_size}", "⚠️")
+
+   # Re-evaluate every 100 batches (in case initial batch was atypical):
+   REEVAL_INTERVAL = 100
+   if batch_num > 1 and batch_num % REEVAL_INTERVAL == 0:
+       batch_memory_mb = df_batch.memory_usage(deep=True).sum() / (1024 * 1024)
+       if batch_memory_mb > MEMORY_PER_BATCH_TARGET_MB * 1.5:
+           scale_factor = MEMORY_PER_BATCH_TARGET_MB / batch_memory_mb
+           adaptive_batch_size = max(100, int(adaptive_batch_size * scale_factor))
+       elif batch_memory_mb < MEMORY_PER_BATCH_TARGET_MB * 0.3:
+           # Batch is using much less than target — can increase (up to original)
+           new_size = min(effective_batch_size, int(adaptive_batch_size * 1.5))
+           adaptive_batch_size = new_size
    ```
+
+   > **Note**: Batch size is reset to the original `effective_batch_size` at the start of
+   > each step, since different tables have different column widths. The adaptive logic
+   > only adjusts within a single step's lifecycle.
 
 3. **Explicit `del df_batch` + `gc.collect()`** after each batch insert:
    ```python
@@ -811,17 +903,20 @@ reduces batch_size (never increases), so it's safe.
            self._file = open(self._path, "a")
            self._step_stats: dict[str, dict] = {}
 
-       def log(self, step: str, batch: int, event: str, **extra):
-           entry = {
-               "ts": datetime.now(timezone.utc).isoformat(),
-               "job_id": self.job_id,
-               "step": step,
-               "batch": batch,
-               "event": event,
-               **extra,
-           }
-           self._file.write(json.dumps(entry, ensure_ascii=False) + "\n")
-           self._file.flush()
+        def log(self, step: str, batch: int, event: str, **extra):
+            entry = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "job_id": self.job_id,
+                "step": step,
+                "batch": batch,
+                "event": event,
+                **extra,
+            }
+            line = json.dumps(entry, ensure_ascii=False)
+            # Safety: replace literal newlines in values to prevent broken JSONL
+            line = line.replace("\n", "\\n").replace("\r", "\\r")
+            self._file.write(line + "\n")
+            self._file.flush()
 
        def close(self):
            self._file.close()
@@ -901,11 +996,14 @@ for later investigation.
 
 2. **Row-level error quarantine** when `error_handling: "skip_bad_rows"`:
    ```python
+   MAX_QUARANTINED_PER_BATCH = 100  # abort batch if too many bad rows
+   QUARANTINE_CHUNK_SIZE = 50       # split into sub-batches for faster isolation
+
    def _insert_with_quarantine(
        df, target_table, tgt_engine, dtype_map,
-       batch_num, config_name, log, quarantine_callback
+       batch_num, config_name, config, log, quarantine_callback
    ):
-       """Try full batch insert. On failure, insert row-by-row to isolate bad rows."""
+       """Try full batch insert. On failure, binary-search to isolate bad rows."""
        try:
            batch_insert(df, target_table, tgt_engine, dtype_map)
            return len(df), 0  # (inserted, quarantined)
@@ -914,26 +1012,45 @@ for later investigation.
                raise  # default: fail fast
 
            log(f"Batch {batch_num}: Batch insert failed — "
-               f"switching to row-by-row quarantine mode", "⚠️")
+               f"switching to chunk-based quarantine mode", "⚠️")
 
            inserted = 0
            quarantined = 0
-           for idx, row in df.iterrows():
+
+           # Step 1: Try sub-batches of QUARANTINE_CHUNK_SIZE
+           for chunk_start in range(0, len(df), QUARANTINE_CHUNK_SIZE):
+               chunk_end = min(chunk_start + QUARANTINE_CHUNK_SIZE, len(df))
+               chunk = df.iloc[chunk_start:chunk_end]
+
                try:
-                   row_df = df.iloc[[idx]]
-                   batch_insert(row_df, target_table, tgt_engine, dtype_map)
-                   inserted += 1
-               except Exception as row_error:
-                   quarantined += 1
-                   quarantine_callback(
-                       config_name, batch_num, idx, row.to_dict(), str(row_error)
-                   )
-                   if quarantined >= MAX_QUARANTINED_PER_BATCH:
-                       log(f"Batch {batch_num}: Too many bad rows ({quarantined}), aborting batch", "❌")
-                       break
+                   batch_insert(chunk, target_table, tgt_engine, dtype_map)
+                   inserted += len(chunk)
+               except Exception:
+                   # Step 2: Row-by-row only for the failed sub-batch
+                   for row_tuple in chunk.itertuples(index=True, name=None):
+                       idx = row_tuple[0]
+                       row = chunk.loc[idx]
+                       row_df = chunk.loc[[idx]]
+                       try:
+                           batch_insert(row_df, target_table, tgt_engine, dtype_map)
+                           inserted += 1
+                       except Exception as row_error:
+                           quarantined += 1
+                           quarantine_callback(
+                               config_name, batch_num, int(idx),
+                               row.to_dict(), str(row_error)
+                           )
+                           if quarantined >= MAX_QUARANTINED_PER_BATCH:
+                               log(f"Batch {batch_num}: Too many bad rows "
+                                   f"({quarantined}), aborting batch", "❌")
+                               return inserted, quarantined
 
            return inserted, quarantined
    ```
+
+   > **Performance**: Two-tier strategy — first try sub-batches of 50 rows (bulk INSERT),
+   > then fall back to row-by-row only for the failing sub-batch. This is ~50x faster
+   > than pure row-by-row for the common case where only a few rows are bad.
 
 3. **Quarantine storage** — write to `logs/quarantine_{job_id}.jsonl`:
    ```jsonl
@@ -961,17 +1078,17 @@ is opt-in via config flag — default behavior unchanged.
 
 | Phase | Risk Addressed | Effort | Priority |
 |-------|---------------|--------|----------|
-| 1. Atomic Checkpoints | Data loss on crash, checkpoint corruption | ~1.5h | **CRITICAL** |
-| 2. Cursor-Based Pagination | OFFSET O(N) slowdown, connection hold, resume correctness | ~6h | **CRITICAL** |
-| 3. Batch Transaction Isolation | Partial data on COPY failure, stuck queries | ~3h | **CRITICAL** |
-| 4. Retry + UPSERT | Transient errors, duplicate rows on resume | ~8h | **HIGH** |
+| 1. Atomic Checkpoints | Data loss on crash, checkpoint corruption | ~2h | **CRITICAL** |
+| 2. Cursor-Based Pagination | OFFSET O(N) slowdown, connection hold, resume correctness, source consistency | ~8h | **CRITICAL** |
+| 3. Batch Transaction Isolation | Partial data on COPY failure, stuck queries | ~4h | **CRITICAL** |
+| 4. Retry + UPSERT | Transient errors, duplicate rows on resume | ~10h | **HIGH** |
 | 5. Graceful Shutdown + Heartbeat | Orphan jobs, dead thread detection | ~5h | **HIGH** |
 | 6. Memory Guard | OOM kill on wide tables | ~3h | **HIGH** |
 | 7. Connection Keepalive | Firewall timeout, pool_pre_ping fix | ~2h | **HIGH** |
 | 8. Structured Logging + ETA | Observability, progress estimation | ~4h | **MEDIUM** |
 | 9. Dead Letter Queue | Single bad row halting migration | ~5h | **MEDIUM** |
 
-**Total estimated effort**: ~37.5 hours
+**Total estimated effort**: ~43 hours
 
 **Recommended order**: 1 → 2 → 3 → 5 → 6 → 4 → 7 → 8 → 9
 
@@ -1097,11 +1214,14 @@ Each phase should be verified with:
 
 | Test Scenario | How to Verify |
 |---|---|
-| **Crash recovery** (Phase 1, 2) | Start migration, `kill -9` the process mid-batch, restart, resume. Verify no duplicates via `SELECT COUNT(*)` and checksum. |
-| **Network failure** (Phase 4, 7) | Block source port with `iptables` for 30s during migration. Verify retry succeeds after port is restored. |
-| **OOM prevention** (Phase 6) | Use a wide table (200+ VARCHAR cols) with batch_size=10000. Verify adaptive sizing kicks in. |
+| **Crash recovery** (Phase 1, 2) | Start migration, `kill -9` the process mid-batch, restart, resume. Verify no duplicates via `SELECT COUNT(*)` and checksum. Verify checkpoint file is not corrupt (valid JSON). |
+| **Network failure** (Phase 4, 7) | Block source port with `iptables` for 30s during migration. Verify retry succeeds after port is restored. Test both source read and target insert failures. |
+| **OOM prevention** (Phase 6) | Use a wide table (200+ VARCHAR cols) with batch_size=10000. Verify adaptive sizing kicks in and reduces batch size. Verify batch size resets for next step. |
 | **Graceful shutdown** (Phase 5) | Send `SIGTERM` during migration. Verify checkpoint is saved and job status = "interrupted". |
-| **Dead thread detection** (Phase 5) | Start migration, `kill -9`, then POST new job. Verify stale job auto-fails. |
-| **UPSERT correctness** (Phase 4) | Migrate, then resume. Verify row count matches source exactly (no duplicates). |
-| **Bad row quarantine** (Phase 9) | Insert a row with NULL in NOT NULL column. Verify migration continues and bad row appears in quarantine file. |
+| **Dead thread detection** (Phase 5) | Start migration, `kill -9`, then POST new job. Verify stale job auto-fails. Also test with heartbeat file deleted (verify DB `last_heartbeat` fallback works). |
+| **UPSERT correctness** (Phase 4) | Migrate, then resume. Verify row count matches source exactly (no duplicates). Test both `upsert` and `upsert_ignore` strategies. |
+| **Bad row quarantine** (Phase 9) | Insert a row with NULL in NOT NULL column. Verify migration continues and bad row appears in quarantine file. Verify `MAX_QUARANTINED_PER_BATCH` limit. |
 | **ETA accuracy** (Phase 8) | Start migration, check ETA after 100 batches, compare with actual completion time. |
+| **Composite PK cursor** (Phase 2) | Test with 2-column and 3-column composite PKs. Verify cursor pagination produces correct results. Test both PostgreSQL (row-value) and expanded OR-chain. |
+| **ctid fallback** (Phase 2) | Test with a table that has no PK and no unique index (PostgreSQL only). Verify ctid-based pagination is deterministic across two consecutive runs. |
+| **COPY rollback** (Phase 3) | Insert a row that violates a CHECK constraint mid-batch. Verify target table has zero rows from that batch (full rollback). |

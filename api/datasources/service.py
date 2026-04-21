@@ -51,12 +51,8 @@ class DatasourcesService(BaseService):
             username=data.get("username", ""),
             password=data.get("password", ""),
         )
-        ok, msg = self.execute_db_operation(lambda: datasource_repo.save(record))
-        self._assert_success(ok, msg)
-
-        result = self.execute_db_operation(
-            lambda: datasource_repo.get_by_name(record.name)
-        )
+        new_id = self.execute_db_operation(lambda: datasource_repo.save(record))
+        result = self.execute_db_operation(lambda: datasource_repo.get_by_id(new_id))
         return self._sanitize_response(self._strip_password(result))
 
     def update(self, id: str | int, data: dict) -> dict:

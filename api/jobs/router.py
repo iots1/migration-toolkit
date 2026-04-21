@@ -1,244 +1,48 @@
 """
-POST /api/v1/jobs — Create a migration job and trigger the pipeline.
+Jobs API router — uses JobsController(BaseController).
 
-Flow:
-    1. Validate pipeline_id exists
-    2. Build PipelineConfig from pipeline's json_data
-    3. Resolve datasource connection configs from first step's migration config
-    4. Create a jobs record (source of truth for this job request)
-    5. Start PipelineExecutor in background thread — returns run_id
-    6. Return job_id + run_id immediately (202 Accepted)
+Standard endpoints (via BaseController):
+    GET    /api/v1/jobs          — list jobs (paginated)
+    GET    /api/v1/jobs/{id}     — get job by UUID
+    POST   /api/v1/jobs          — trigger pipeline (202 Accepted)
+    PUT    /api/v1/jobs/{id}     — 405 (not supported)
+    DELETE /api/v1/jobs/{id}     — 405 (not supported)
 
-Socket.IO events (frontend connects to /ws/socket.io/):
-    "job:batch"     — after each successful batch
-                      { run_id, job_id, pipeline_id, step, batch_num, rows_processed }
-    "job:error"     — on batch failure or step failure
-                      { run_id, job_id, pipeline_id, step, batch_num, error_message }
-    "job:completed" — when the whole pipeline finishes
-                      { run_id, job_id, pipeline_id, status, total_rows }
+Socket.IO events emitted during execution:
+    "job:batch"     — { run_id, job_id, pipeline_id, step, batch_num, rows_processed }
+    "job:error"     — { run_id, job_id, pipeline_id, step, batch_num, error_message }
+    "job:completed" — { run_id, job_id, pipeline_id, status, total_rows }
 """
 
 from __future__ import annotations
 
-import json
-import uuid
-
-from fastapi import APIRouter, HTTPException
-
-from api.jobs.schemas import CreateJobSchema, JobCreatedResponse
-from api.socket_manager import emit_from_thread
-from models.job import JobRecord, JobUpdateRecord
-from models.pipeline_config import (
-    PipelineConfig,
-    PipelineRunRecord,
-    PipelineRunUpdateRecord,
-)
-from repositories import pipeline_repo, pipeline_run_repo, job_repo
-from repositories.datasource_repo import get_by_id as ds_get_by_id
-from services.pipeline_service import (
-    PipelineExecutor,
-    ConfigRepositoryAdapter,
-    PipelineRunRepositoryAdapter,
-)
-
-router = APIRouter(prefix="/api/v1/jobs", tags=["Jobs"])
+from api.base.controller import BaseController
+from api.jobs.schemas import CreateJobSchema, UpdateJobSchema, JobCreatedResponse
+from api.jobs.service import JobsService
 
 
-def _build_conn_config(ds_row: dict, charset: str | None = None) -> dict:
-    return {
-        "db_type": ds_row["db_type"],
-        "host": ds_row["host"],
-        "port": ds_row["port"],
-        "db_name": ds_row["dbname"],
-        "user": ds_row["username"],
-        "password": ds_row["password"],
-        "charset": charset,
-    }
+class JobsController(BaseController):
+    """Extends BaseController for the async job-trigger pattern.
 
-
-def _resolve_conn_configs(pc: PipelineConfig, config_repo: ConfigRepositoryAdapter):
-    """Resolve source/target connection configs from the pipeline's first node config.
-
-    Uses datasource_source_id / datasource_target_id (UUID FK) from configs table.
+    Differences from standard CRUD:
+    - POST returns 202 Accepted (async) instead of 201 Created.
+    - POST response is ``JobCreatedResponse`` instead of JSON:API format.
+    - PUT and DELETE are blocked (service raises 405).
     """
-    nodes = pc.nodes or []
-    if not nodes:
-        raise HTTPException(status_code=422, detail="Pipeline has no nodes")
 
-    first_node = nodes[0]
-    config_name = (
-        first_node["config_name"]
-        if isinstance(first_node, dict)
-        else first_node.config_name
+    create_status_code = 202
+
+    def _make_create_response(self, resource_type: str, data: dict, url: str):
+        return JobCreatedResponse(**data)
+
+
+def get_jobs_router():
+    service = JobsService()
+    controller = JobsController(
+        prefix="jobs",
+        service=service,
+        create_schema=CreateJobSchema,
+        update_schema=UpdateJobSchema,
+        tags=["Jobs"],
     )
-    config = config_repo.get_content(config_name)
-    if config is None:
-        raise HTTPException(status_code=404, detail=f"Config '{config_name}' not found")
-
-    src_ds_id = config.get("_datasource_source_id")
-    tgt_ds_id = config.get("_datasource_target_id")
-    if not src_ds_id:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Config '{config_name}' missing source datasource. "
-            "Please edit the config and select a source datasource.",
-        )
-    if not tgt_ds_id:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Config '{config_name}' missing target datasource. "
-            "Please edit the config and select a target datasource.",
-        )
-
-    src_ds = ds_get_by_id(src_ds_id)
-    if not src_ds:
-        raise HTTPException(
-            status_code=404, detail=f"Source datasource (id={src_ds_id}) not found"
-        )
-    tgt_ds = ds_get_by_id(tgt_ds_id)
-    if not tgt_ds:
-        raise HTTPException(
-            status_code=404, detail=f"Target datasource (id={tgt_ds_id}) not found"
-        )
-
-    charset = config.get("source", {}).get("charset")
-    if src_ds["db_type"] == "PostgreSQL" and charset == "tis620":
-        charset = "WIN874"
-
-    source_conn_config = _build_conn_config(src_ds, charset)
-    target_conn_config = _build_conn_config(tgt_ds)
-    return source_conn_config, target_conn_config
-
-
-@router.post("", response_model=JobCreatedResponse, status_code=202)
-def create_job(body: CreateJobSchema):
-    """
-    Trigger a pipeline migration job.
-
-    Creates a job record, starts a background migration thread, and returns
-    immediately with job_id + run_id so the frontend can subscribe to socket events.
-    """
-    pipeline_row = pipeline_repo.get_by_id(body.pipeline_id)
-    if not pipeline_row:
-        raise HTTPException(
-            status_code=404, detail=f"Pipeline '{body.pipeline_id}' not found"
-        )
-
-    try:
-        pc = PipelineConfig.from_dict(pipeline_row.get("json_data", {}) or {})
-        pc.id = pipeline_row["id"]
-        pc.nodes = pipeline_row.get("nodes", [])
-        pc.edges = pipeline_row.get("edges", [])
-    except Exception as exc:
-        raise HTTPException(status_code=422, detail=f"Invalid pipeline data: {exc}")
-
-    config_repo = ConfigRepositoryAdapter()
-
-    # Check if there's already a running job for this pipeline
-    recent_jobs = job_repo.get_by_pipeline(uuid.UUID(pc.id), limit=1)
-    if recent_jobs and recent_jobs[0]["status"] == "running":
-        raise HTTPException(
-            status_code=409,
-            detail="A job is already running for this pipeline",
-        )
-
-    # Count configs (nodes) in the pipeline for progress tracking
-    total_config = len(pc.nodes) if pc.nodes else 0
-
-    job_record = JobRecord(
-        pipeline_id=uuid.UUID(pc.id),
-        status="running",
-        total_config=total_config,
-    )
-    job_id: uuid.UUID = job_repo.save(job_record)
-    job_id_str = str(job_id)
-    pipeline_id_str = pc.id
-
-    def batch_event_callback(
-        run_id: str,
-        step_name: str,
-        batch_num: int,
-        rows_processed: int,
-        error: str | None = None,
-    ) -> None:
-        """
-        Called after each batch completes (for socket.io + job updates).
-
-        Note: The actual batch record is already saved by PipelineExecutor._save_batch_record()
-        This callback is just for job status updates and socket.io notifications.
-        """
-        if error:
-            # Update job record to mark error
-            try:
-                job_repo.update(
-                    job_id, JobUpdateRecord(status="running", error_message=error)
-                )
-            except Exception:
-                pass
-
-            # Emit socket.io error event
-            emit_from_thread(
-                "job:error",
-                {
-                    "run_id": run_id,
-                    "job_id": job_id_str,
-                    "pipeline_id": pipeline_id_str,
-                    "step": step_name,
-                    "batch_num": batch_num,
-                    "error_message": error,
-                },
-            )
-        else:
-            # Emit socket.io batch complete event
-            # (batch record already saved in _save_batch_record)
-            emit_from_thread(
-                "job:batch",
-                {
-                    "run_id": run_id,
-                    "job_id": job_id_str,
-                    "pipeline_id": pipeline_id_str,
-                    "step": step_name,
-                    "batch_num": batch_num,
-                    "rows_processed": rows_processed,
-                },
-            )
-
-    def completion_callback(run_id: str, status: str, total_rows: int) -> None:
-        try:
-            job_repo.update(job_id, JobUpdateRecord(status=status))
-        except Exception:
-            pass
-        emit_from_thread(
-            "job:completed",
-            {
-                "run_id": run_id,
-                "job_id": job_id_str,
-                "pipeline_id": pipeline_id_str,
-                "status": status,
-                "total_rows": total_rows,
-            },
-        )
-
-    run_repo = PipelineRunRepositoryAdapter(job_id=job_id)
-
-    executor = PipelineExecutor(
-        pipeline=pc,
-        source_conn_config={},
-        target_conn_config={},
-        config_repo=config_repo,
-        run_repo=run_repo,
-        batch_event_callback=batch_event_callback,
-        completion_callback=completion_callback,
-    )
-    run_id = executor.start_background()
-
-    return JobCreatedResponse(
-        job_id=job_id_str,
-        run_id=str(run_id),
-        pipeline_id=pipeline_id_str,
-        status="running",
-    )
-
-
-def get_jobs_router() -> APIRouter:
-    return router
+    return controller.router

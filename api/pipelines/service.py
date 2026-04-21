@@ -55,19 +55,15 @@ class PipelinesService(BaseService):
         edges_raw = data.pop("edges", None)
 
         record = self._to_record(data)
-        ok, msg = self.execute_db_operation(lambda: pipeline_repo.save(record))
-        self._assert_success(ok, msg)
-
-        result = self.execute_db_operation(
-            lambda: pipeline_repo.get_by_name(record.name)
-        )
-        pipeline_id = uuid.UUID(result["id"])
+        new_id = self.execute_db_operation(lambda: pipeline_repo.save(record))
+        pipeline_id = uuid.UUID(str(new_id))
 
         if nodes_raw is not None:
             self._sync_nodes(pipeline_id, nodes_raw)
         if edges_raw is not None:
             self._sync_edges(pipeline_id, edges_raw)
 
+        result = self.execute_db_operation(lambda: pipeline_repo.get_by_id(str(new_id)))
         result = self._sanitize_response(result)
         return self._attach_children_single(result)
 
@@ -76,10 +72,8 @@ class PipelinesService(BaseService):
         edges_raw = data.pop("edges", None)
 
         existing = self.find_by_id(id)
-        record = self._to_record(
-            data, existing=existing, name_override=existing["name"]
-        )
-        ok, msg = self.execute_db_operation(lambda: pipeline_repo.save(record))
+        record = self._to_record(data, existing=existing)
+        ok, msg = self.execute_db_operation(lambda: pipeline_repo.update_by_id(id, record))
         self._assert_success(ok, msg)
 
         result = self.execute_db_operation(lambda: pipeline_repo.get_by_id(id))
@@ -111,7 +105,7 @@ class PipelinesService(BaseService):
     ) -> PipelineRecord:
         ex = existing or {}
         return PipelineRecord(
-            name=name_override or data.get("name", ""),
+            name=name_override or data.get("name") or ex.get("name", ""),
             description=data.get("description") or ex.get("description", ""),
         )
 

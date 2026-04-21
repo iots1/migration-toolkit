@@ -1,11 +1,20 @@
 """Pipeline edge repository — CRUD for pipeline_edges table."""
-
 from __future__ import annotations
 
 import uuid
+
 from sqlalchemy import text
+
 from repositories.connection import get_transaction
+from repositories.utils import rows_to_dicts
 from models.pipeline_config import PipelineEdgeRecord
+
+_COLUMNS = """
+    id::text AS id,
+    pipeline_id::text AS pipeline_id,
+    source_config_uuid::text AS source_config_uuid,
+    target_config_uuid::text AS target_config_uuid
+"""
 
 
 def bulk_insert(records: list[PipelineEdgeRecord]) -> None:
@@ -14,11 +23,8 @@ def bulk_insert(records: list[PipelineEdgeRecord]) -> None:
     with get_transaction() as conn:
         conn.execute(
             text("""
-                INSERT INTO pipeline_edges (
-                    pipeline_id, source_config_uuid, target_config_uuid
-                ) VALUES (
-                    :pipeline_id, :source_config_uuid, :target_config_uuid
-                )
+                INSERT INTO pipeline_edges (pipeline_id, source_config_uuid, target_config_uuid)
+                VALUES (:pipeline_id, :source_config_uuid, :target_config_uuid)
             """),
             [
                 {
@@ -34,17 +40,10 @@ def bulk_insert(records: list[PipelineEdgeRecord]) -> None:
 def get_by_pipeline(pipeline_id: uuid.UUID) -> list[dict]:
     with get_transaction() as conn:
         result = conn.execute(
-            text("""
-                SELECT id::text AS id,
-                       pipeline_id::text AS pipeline_id,
-                       source_config_uuid::text AS source_config_uuid,
-                       target_config_uuid::text AS target_config_uuid
-                FROM pipeline_edges
-                WHERE pipeline_id = :pipeline_id
-            """),
+            text(f"SELECT {_COLUMNS} FROM pipeline_edges WHERE pipeline_id = :pipeline_id"),
             {"pipeline_id": pipeline_id},
         )
-        return [dict(zip(result.keys(), row)) for row in result.fetchall()]
+        return rows_to_dicts(result)
 
 
 def get_edges_by_pipeline_ids(pipeline_ids: list[str]) -> dict[str, list[dict]]:
@@ -53,20 +52,16 @@ def get_edges_by_pipeline_ids(pipeline_ids: list[str]) -> dict[str, list[dict]]:
         return {}
     with get_transaction() as conn:
         result = conn.execute(
-            text("""
-                SELECT id::text AS id,
-                       pipeline_id::text AS pipeline_id,
-                       source_config_uuid::text AS source_config_uuid,
-                       target_config_uuid::text AS target_config_uuid
+            text(f"""
+                SELECT {_COLUMNS}
                 FROM pipeline_edges
                 WHERE pipeline_id::text = ANY(:ids)
             """),
             {"ids": pipeline_ids},
         )
         grouped: dict[str, list[dict]] = {}
-        for row in result.fetchall():
-            d = dict(zip(result.keys(), row))
-            grouped.setdefault(d["pipeline_id"], []).append(d)
+        for row in rows_to_dicts(result):
+            grouped.setdefault(row["pipeline_id"], []).append(row)
         return grouped
 
 

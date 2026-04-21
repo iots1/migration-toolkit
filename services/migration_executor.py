@@ -15,7 +15,7 @@ import re as _re
 import time
 import pandas as pd
 import sqlalchemy
-from sqlalchemy import text
+from sqlalchemy import text, event
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -162,6 +162,9 @@ def run_single_migration(
         **target_conn_config, pool_pre_ping=True, pool_recycle=3600
     )
 
+    _tune_pg_migration_session(src_engine)
+    _tune_pg_migration_session(tgt_engine)
+
     try:
         src_db_type = source_conn_config.get("db_type", "")
         log(
@@ -270,6 +273,37 @@ _CHECKPOINT_INTERVAL = 10
 # ---------------------------------------------------------------------------
 # SQL identifier safety
 # ---------------------------------------------------------------------------
+
+
+def _tune_pg_migration_session(engine) -> None:
+    """Auto-configure PostgreSQL session parameters for migration workloads.
+
+    Applied via SQLAlchemy ``connect`` event so every pooled connection
+    (including those created internally by pd.read_sql) inherits the tuning.
+    Settings are **session-scoped** — they expire when the connection is
+    returned to the pool and do not affect other applications.
+
+    No-op for non-PostgreSQL engines.
+
+    Tuning rationale:
+        statement_timeout = 0          — disable query cancellation
+        work_mem = 256MB               — faster sorts/hashes on wide rows
+        max_parallel_workers_per_gather — parallel seq scans for large tables
+        maintenance_work_mem = 512MB   — faster COPY / bulk INSERT WAL
+        effective_cache_size = 4GB     — planner hint (no real allocation)
+    """
+    if "postgresql" not in str(engine.url):
+        return
+
+    @event.listens_for(engine, "connect")
+    def _apply_migration_tuning(dbapi_conn, connection_record):
+        cursor = dbapi_conn.cursor()
+        cursor.execute("SET statement_timeout = 0")
+        cursor.execute("SET work_mem = '256MB'")
+        cursor.execute("SET max_parallel_workers_per_gather = 4")
+        cursor.execute("SET maintenance_work_mem = '512MB'")
+        cursor.execute("SET effective_cache_size = '4GB'")
+        cursor.close()
 
 
 def _quote_identifier(name: str) -> str:

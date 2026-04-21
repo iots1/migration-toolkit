@@ -275,13 +275,17 @@ class PipelineExecutor:
 
             src_conn_cfg, tgt_conn_cfg = step_conn_configs
 
-            skip_batches = steps_state.get(config_name, {}).get("last_batch", 0)
+            step_state = steps_state.get(config_name, {})
+            is_resuming = step_state.get("status") == "running"
+            skip_batches = step_state.get("last_batch", 0)
+            should_truncate = self._pipeline.truncate_targets and not is_resuming
+
             self._log(
-                f"[{config_name}] Starting"
-                + (f" (resuming from batch {skip_batches})" if skip_batches else ""),
+                f"[{config_name}] {'Resuming' if is_resuming else 'Starting'}"
+                + (f" from batch {skip_batches}" if skip_batches else ""),
                 "🚀",
             )
-            print(f"[JOB] [{config_name}] Starting migration...")
+            print(f"[JOB] [{config_name}] {'Resuming' if is_resuming else 'Starting'} migration...")
 
             try:
                 mig_result = run_single_migration(
@@ -289,7 +293,7 @@ class PipelineExecutor:
                     source_conn_config=src_conn_cfg,
                     target_conn_config=tgt_conn_cfg,
                     batch_size=self._pipeline.batch_size,
-                    truncate_target=self._pipeline.truncate_targets,
+                    truncate_target=should_truncate,
                     skip_batches=skip_batches,
                     log_callback=self._log_callback,
                     progress_callback=self._progress_callback,
@@ -396,6 +400,7 @@ class PipelineExecutor:
         PostgreSQL safety: all repo calls here use thread-safe connection managers
         internally, so no connection object crosses a thread boundary.
         """
+        result = None
         try:
             result = self.execute()
             self._run_repo.update(
@@ -421,9 +426,15 @@ class PipelineExecutor:
             if self._completion_callback:
                 self._completion_callback(self._run_id, "failed", 0)
         finally:
-            # Completed (or crashed) — remove pipeline checkpoint so a fresh
-            # start isn't accidentally resumed from stale state.
-            clear_pipeline_checkpoint(self._pipeline.name)
+            if result is not None and result.status == "completed":
+                clear_pipeline_checkpoint(self._pipeline.name)
+            else:
+                cp = load_pipeline_checkpoint(self._pipeline.name)
+                print(
+                    f"[JOB] Pipeline '{self._pipeline.name}' "
+                    f"did not complete — checkpoint preserved for resume"
+                    f" ({len(cp.get('steps', {}))} step(s) tracked)" if cp else ""
+                )
 
     # ------------------------------------------------------------------
     # Private — Kahn's topological sort

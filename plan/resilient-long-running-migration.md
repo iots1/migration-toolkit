@@ -84,20 +84,26 @@
 
 1. **Atomic file writes** — write to a temp file, then `os.replace()` (atomic on POSIX):
    ```python
-   def save_checkpoint(config_name, batch_num, rows_processed):
+   _FSYNC_INTERVAL = 50  # fsync every N batches
+
+   def save_checkpoint(config_name, batch_num, rows_processed, last_seen_pk=None):
        path = _checkpoint_path(config_name)
        tmp = path + ".tmp"
        with open(tmp, "w") as f:
            json.dump(data, f)
-       os.replace(tmp, path)     # atomic rename — no fsync needed
+           f.flush()
+           if batch_num % _FSYNC_INTERVAL == 0:
+               os.fsync(f.fileno())  # durable every 50 batches (~500ms overhead total)
+       os.replace(tmp, path)     # atomic rename on POSIX
    ```
 
-   > **Design note**: `os.replace()` is atomic on POSIX (Linux/macOS). We intentionally skip
-   > `os.fsync()` here because it adds 5-10ms latency per batch (SSD) or more (HDD).
-   > For a 10M-row migration at batch_size=1000, that's 10,000 × 10ms = ~100s of pure I/O
-   > overhead. The atomic rename is sufficient — the OS will flush the temp file before
-   > replacing the target. If absolute durability is needed (battery-backed write cache
-   > concerns), add fsync every N batches (e.g., every 100) instead of every batch.
+   > **Design note**: `os.replace()` atomically swaps the directory entry, but data blocks
+   > may still reside in OS page cache. On power loss (not process crash), the file content
+   > could be incomplete. We use `fsync()` every 50 batches as a compromise — for
+   > batch_size=1000, that's ~10ms every 50 batches (50,000 rows), adding negligible
+   > overhead while bounding worst-case data loss to 50 batches on power failure.
+   > For process crashes (not power loss), `os.replace()` alone is sufficient since the
+   > OS flushes page cache on orderly shutdown.
 
 2. **Reduce `_CHECKPOINT_INTERVAL` from 10 to 1** in `migration_executor.py`:
    - With atomic writes, the I/O cost is minimal (one `rename` syscall).
@@ -137,28 +143,78 @@ per batch regardless of position.
 
 1. **New function `build_paginated_select()`** in `query_builder.py`:
    ```python
+   from sqlalchemy import text
+
    def build_paginated_select(
        base_query: str,
        pk_columns: list[str],
        last_seen_pk: tuple | None = None,
        batch_size: int = 1000,
-   ) -> str:
+   ) -> tuple[text, dict]:
        """Wrap a SELECT query with cursor-based pagination.
 
        Uses WHERE pk > :last_pk ORDER BY pk LIMIT :batch_size.
-       Returns the query and the parameter dict for last_seen_pk.
+       Returns a sqlalchemy.text() query and parameter dict for last_seen_pk.
+
+       Cross-dialect: uses row-value comparison (a,b) > (:x,:y) for PostgreSQL,
+       expanded OR-chain for MySQL/MSSQL compatibility.
        """
        order_clause = ", ".join(f'"{c}"' for c in pk_columns)
-       pk_params = {}
+       pk_params: dict = {"batch_size": batch_size}
 
        if last_seen_pk is not None:
+           for i, v in enumerate(last_seen_pk):
+               pk_params[f"pk_{i}"] = v
+
+           # Row-value comparison: (col1, col2) > (:pk_0, :pk_1)
+           # Works in PostgreSQL, MySQL 8+, MariaDB 10.3+
+           # For older MySQL/MSSQL, expand to OR-chain (see below)
            pk_placeholders = ", ".join(f":pk_{i}" for i in range(len(pk_columns)))
-           pk_params = {f"pk_{i}": v for i, v in enumerate(last_seen_pk)}
            where_clause = f"WHERE ({order_clause}) > ({pk_placeholders})"
        else:
            where_clause = ""
 
-       return (
+       return text(
+           f"SELECT * FROM ({base_query}) AS _paginated_src "
+           f"{where_clause} "
+           f"ORDER BY {order_clause} "
+           f"LIMIT :batch_size"
+       ), pk_params
+
+   def build_paginated_select_expanded(
+       base_query: str,
+       pk_columns: list[str],
+       last_seen_pk: tuple | None = None,
+       batch_size: int = 1000,
+   ) -> tuple[text, dict]:
+       """Cross-dialect cursor pagination using expanded OR-chain.
+
+       For composite PK (a, b), generates:
+         WHERE a > :pk_0 OR (a = :pk_0 AND b > :pk_1)
+       This works on ALL databases including MySQL 5.x and MSSQL.
+       """
+       pk_params: dict = {"batch_size": batch_size}
+
+       if last_seen_pk is not None:
+           for i, v in enumerate(last_seen_pk):
+               pk_params[f"pk_{i}"] = v
+
+           conditions = []
+           for depth in range(len(pk_columns)):
+               eq_parts = []
+               for i in range(depth):
+                   eq_parts.append(f'"{pk_columns[i]}" = :pk_{i}')
+               gt_part = f'"{pk_columns[depth]}" > :pk_{depth}'
+               if eq_parts:
+                   conditions.append(f"({' AND '.join(eq_parts)} AND {gt_part})")
+               else:
+                   conditions.append(gt_part)
+           where_clause = f"WHERE ({' OR '.join(conditions)})"
+       else:
+           where_clause = ""
+
+       order_clause = ", ".join(f'"{c}"' for c in pk_columns)
+       return text(
            f"SELECT * FROM ({base_query}) AS _paginated_src "
            f"{where_clause} "
            f"ORDER BY {order_clause} "
@@ -166,7 +222,11 @@ per batch regardless of position.
        ), pk_params
    ```
 
-2. **Auto-detect primary key** in `migration_executor.py`:
+   > **Dialect choice**: Use `build_paginated_select()` (row-value) for PostgreSQL targets.
+   > Use `build_paginated_select_expanded()` (OR-chain) for MySQL/MSSQL targets.
+   > Detect via `engine.dialect.name` at runtime.
+
+2. **Auto-detect primary key** (fallback to unique index) in `migration_executor.py`:
    ```python
    def _detect_pk_columns(engine, source_table: str) -> list[str] | None:
        try:
@@ -176,6 +236,17 @@ per batch regardless of position.
                return pk["constrained_columns"]
        except Exception:
            pass
+
+       # Fallback: find smallest unique index (prefer short indexes for cursor pagination)
+       try:
+           insp = sqlalchemy.inspect(engine)
+           unique_indexes = insp.get_unique_constraints(source_table)
+           if unique_indexes:
+               shortest = min(unique_indexes, key=lambda u: len(u["column_names"]))
+               return shortest["column_names"]
+       except Exception:
+           pass
+
        return None
    ```
 
@@ -185,8 +256,10 @@ per batch regardless of position.
        pk_columns = _detect_pk_columns(src_engine, source_table)
 
        if pk_columns is None:
-           log("WARNING: No PK detected — falling back to OFFSET pagination. "
-               "Resume may produce duplicates if source data changes.", "⚠️")
+           log("WARNING: No PK or unique index detected. "
+               "Cursor-based pagination is not possible — migration will use OFFSET "
+               "which is non-deterministic for resume. Consider adding a PK or unique "
+               "index to the source table, or specify pk_columns in config.", "⚠️")
            return _process_batches_offset(...)
 
        last_seen_pk = _load_last_seen_pk(checkpoint, config_name)
@@ -195,52 +268,95 @@ per batch regardless of position.
            query, params = build_paginated_select(
                select_query, pk_columns, last_seen_pk, batch_size
            )
-           params["batch_size"] = batch_size
 
+           # Each batch gets a fresh connection from the pool
            with src_engine.connect() as conn:
+               # Set source isolation level for consistent snapshot
+               conn.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
                df_batch = pd.read_sql(
-                   text(query), conn, params=params, coerce_float=False
+                   query, conn, params=params, coerce_float=False
                )
 
            if df_batch.empty:
                break
 
-           # Extract last PK values for next iteration
            last_seen_pk = tuple(df_batch[pk].iloc[-1] for pk in pk_columns)
 
            # ... process batch (transform, insert, checkpoint) ...
-           # Save last_seen_pk in checkpoint
            save_checkpoint(config_name, batch_num, total_rows, last_seen_pk=last_seen_pk)
 
            del df_batch
            gc.collect()
    ```
 
-4. **For `generate_sql`**: User is responsible for including ORDER BY on the PK.
-   - Add a validation warning if `ORDER BY` is not detected.
-   - Use `sqlparse` to check for ORDER BY at the top-level (not inside subqueries/comments).
-   - Fall back to OFFSET pagination with a warning if no ORDER BY found.
+   > **Source isolation level**: `REPEATABLE READ` ensures each batch sees a consistent
+   > snapshot of the source data. Without it, rows inserted/updated between batches on
+   > the source could cause duplicates or missed rows. For frozen source tables (no writes
+   > during migration), this has no performance impact. Note: this only works for
+   > PostgreSQL source; MySQL/MSSQL use their own isolation level syntax.
 
-5. **OFFSET fallback** — kept for tables without PK (rare edge case):
+4. **For `generate_sql`**: User is responsible for including ORDER BY on the PK.
+    - Add a validation warning if `ORDER BY` is not detected at the top level.
+    - Use `sqlparse` to extract top-level tokens (skip subqueries/comments) and check
+      for `ORDER BY` keyword. Note: `sqlparse` is a **syntax-level** parser, not
+      semantic — it may produce false positives for `ORDER BY` inside CTEs or
+      subqueries. Accept this limitation and add a secondary heuristic: if the
+      ORDER BY columns match the detected PK columns, proceed; otherwise warn.
+    - Fall back to OFFSET pagination with a warning if no ORDER BY found.
+
+5. **OFFSET fallback** — for tables without PK or unique index:
    ```python
    def _process_batches_offset(*, src_engine, select_query, ...):
-       """Fallback: OFFSET-based pagination for tables without PK."""
+       """Fallback: OFFSET-based pagination for tables without PK.
+
+       For PostgreSQL source: use ctid (physical row ID) for stable ordering.
+       For other databases: fail early and require user to specify pk_columns.
+       """
+       dialect = src_engine.dialect.name
+
+       if dialect == "postgresql":
+           # ctid provides deterministic physical ordering (no index needed)
+           order_col = "ctid"
+           wrapped = (
+               f"SELECT *, ctid FROM ({select_query}) AS _offset_src "
+               f"ORDER BY ctid LIMIT :batch_size OFFSET :offset"
+           )
+       else:
+           raise ValueError(
+               f"Cannot paginate table '{source_table}': no primary key or unique "
+               f"index found. For {dialect}, specify 'pk_columns' in the config or "
+               f"add a primary key to the source table."
+           )
+
        offset = skip_batches * batch_size
        while True:
-           query = f"{select_query} ORDER BY (SELECT NULL) LIMIT {batch_size} OFFSET {offset}"
-           df_batch = pd.read_sql(query, src_engine, coerce_float=False)
+           df_batch = pd.read_sql(
+               text(wrapped), src_engine,
+               params={"batch_size": batch_size, "offset": offset},
+               coerce_float=False,
+           )
            if df_batch.empty:
                break
+           # Drop ctid column before transform/insert
+           if "ctid" in df_batch.columns:
+               df_batch = df_batch.drop(columns=["ctid"])
            offset += batch_size
            # ... process batch ...
    ```
 
-**Effort**: ~6 hours. **Risk**: Significant refactor of `_process_batches()`. The explicit loop
+   > **Note**: `ctid`-based OFFSET is still O(N) but at least deterministic. Physical
+   > row order is stable if no VACUUM FULL or concurrent writes occur. For long-running
+   > migrations on tables without PK, strongly recommend adding a PK or unique index.
+
+**Effort**: ~8 hours. **Risk**: Significant refactor of `_process_batches()`. The explicit loop
 changes the connection lifecycle — each batch gets a fresh connection. Test with:
-  - Tables with composite PKs (multi-column)
-  - Tables with no PK (OFFSET fallback)
-  - `generate_sql` with JOINs and WHERE clauses
-  - Resume after crash (cursor-based vs OFFSET)
+   - Tables with composite PKs (multi-column)
+   - Tables with unique index but no PK (fallback to unique index)
+   - Tables with no PK or unique index (ctid fallback / fail early)
+   - `generate_sql` with JOINs and WHERE clauses
+   - Resume after crash (cursor-based vs OFFSET)
+   - MySQL/MSSQL source with composite PK (expanded OR-chain)
+   - Cross-dialect parameter binding with `sqlalchemy.text()` + subqueries
 
 ---
 
@@ -254,11 +370,14 @@ changes the connection lifecycle — each batch gets a fresh connection. Test wi
 
 1. **Wrap `batch_insert()` in explicit transaction**:
    ```python
+   from sqlalchemy import text as sa_text
+
    def batch_insert(df, target_table, engine, dtype_map=None) -> int:
        if df.empty:
            return 0
 
        is_pg = "postgresql" in str(engine.url)
+       quoted_table = f'"{target_table}"'  # properly quote table name
 
        if is_pg:
            dbapi_conn = None
@@ -266,6 +385,12 @@ changes the connection lifecycle — each batch gets a fresh connection. Test wi
                conn = engine.connect()
                dbapi_conn = conn.connection
                dbapi_conn.autocommit = False
+
+               # Set per-connection timeout (not pool-level)
+               with dbapi_conn.cursor() as cur:
+                   cur.execute(
+                       f"SET statement_timeout = {BATCH_STATEMENT_TIMEOUT_MS}"
+                   )
 
                buf = io.StringIO()
                writer = csv.writer(buf, lineterminator="\n")
@@ -276,7 +401,7 @@ changes the connection lifecycle — each batch gets a fresh connection. Test wi
                col_list = ", ".join(f'"{c}"' for c in cols)
                with dbapi_conn.cursor() as cur:
                    cur.copy_expert(
-                       f"COPY {quoted} ({col_list}) FROM STDIN WITH CSV",
+                       f"COPY {quoted_table} ({col_list}) FROM STDIN WITH CSV",
                        buf,
                    )
                dbapi_conn.commit()
@@ -287,6 +412,8 @@ changes the connection lifecycle — each batch gets a fresh connection. Test wi
            finally:
                if dbapi_conn:
                    dbapi_conn.autocommit = True
+               if conn:
+                   conn.close()
        else:
            # MySQL / MSSQL: use explicit BEGIN/COMMIT
            with engine.begin() as conn:
@@ -298,24 +425,35 @@ changes the connection lifecycle — each batch gets a fresh connection. Test wi
        return len(df)
    ```
 
-2. **Add per-batch `statement_timeout`** (configurable, default 5 min):
-   ```python
-   # In migration_executor.py — set per-batch timeout instead of 0
-   BATCH_STATEMENT_TIMEOUT_MS = 300_000  # 5 minutes
+   > **Note**: `conn.connection` reaches into the raw DBAPI connection, bypassing
+   > SQLAlchemy's transaction tracking. We must explicitly `conn.close()` in `finally`
+   > to return the connection to the pool. The `autocommit` toggle is fragile —
+   > consider using SQLAlchemy's `conn.execute(sa_text("BEGIN"))` pattern instead
+   > if raw DBAPI access causes issues with SQLAlchemy 2.0's connection management.
 
-   @event.listens_for(engine, "connect")
-   def _apply_batch_tuning(dbapi_conn, connection_record):
-       cursor = dbapi_conn.cursor()
-       cursor.execute(f"SET statement_timeout = {BATCH_STATEMENT_TIMEOUT_MS}")
-       cursor.close()
+2. **Set `statement_timeout` per-connection** (not pool-level):
+   ```python
+   BATCH_STATEMENT_TIMEOUT_MS = 300_000  # 5 minutes — configurable per step
+
+   # Applied inside batch_insert() per connection, NOT as a pool-level event listener.
+   # A pool-level listener would apply the timeout to ALL connections from the engine,
+   # including schema inspection and PK detection queries that may need longer.
+   #
+   # For migrations using complex generate_sql with JOINs on large tables,
+   # override BATCH_STATEMENT_TIMEOUT_MS via config:
+   #   {"statement_timeout_ms": 600000}  # 10 minutes
    ```
 
    > **Rationale**: `statement_timeout = 0` (current) means a stuck query hangs forever.
    > A per-batch timeout of 5 minutes guarantees each batch either completes or fails
    > within a bounded time. The retry mechanism (Phase 4) handles transient failures.
+   > Setting per-connection (not pool-level) avoids interfering with non-migration queries
+   > like PK detection and schema inspection that share the same engine.
 
-**Effort**: ~3 hours. **Risk**: Changing transaction semantics for COPY is the most sensitive
+**Effort**: ~4 hours. **Risk**: Changing transaction semantics for COPY is the most sensitive
 part. Must verify that rollback after partial COPY actually removes all inserted rows.
+Also verify that raw DBAPI access (`conn.connection`) works correctly with SQLAlchemy 2.0's
+connection pool — test that connections are properly returned to the pool after `close()`.
 
 ---
 

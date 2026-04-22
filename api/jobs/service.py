@@ -2,29 +2,24 @@
 
 from __future__ import annotations
 
-import os
 import threading
-import time
 import uuid
 
 from fastapi import HTTPException
 
 from api.base.service import BaseService
 from api.base.query_params import QueryParams
-from api.socket_manager import emit_from_thread
+from api.jobs.stale_detector import is_job_stale
 from models.job import JobRecord, JobUpdateRecord
 from models.pipeline_config import PipelineConfig, PipelineRunRecord
 from repositories import pipeline_repo, job_repo
 from repositories import pipeline_run_repo
-from repositories.datasource_repo import get_by_id as ds_get_by_id
 from services.pipeline_service import (
     PipelineExecutor,
     ConfigRepositoryAdapter,
     PipelineRunRepositoryAdapter,
 )
-from services.migration_executor import _read_heartbeat, _clean_heartbeat
-
-_STALE_THRESHOLD_SECONDS = 300
+from services.migration_executor import _clean_heartbeat
 
 
 class JobsService(BaseService):
@@ -39,98 +34,33 @@ class JobsService(BaseService):
         "created_at",
     ]
 
-    # ------------------------------------------------------------------
-    # Standard CRUD
-    # ------------------------------------------------------------------
+    def __init__(self, emit_fn=None):
+        self._emit_fn = emit_fn
 
-    def find_all(self, params: QueryParams) -> dict:
-        total_records = self.execute_db_operation(lambda: job_repo.count_all())
-        data = self.execute_db_operation(lambda: job_repo.get_all(limit=10_000))
-        data = self._apply_query_params(data, params)
-        data = self._sanitize_list(data)
-        page_data, total, total_pages = self._paginate(data, params)
-        return {
-            "data": page_data,
-            "total": total,
-            "total_records": total_records,
-            "page": params.page,
-            "page_size": params.limit,
-            "total_pages": total_pages,
-        }
+    def _count_all(self) -> int:
+        return job_repo.count_all()
+
+    def _list_all(self) -> list[dict]:
+        return job_repo.get_all(limit=10_000)
 
     def find_by_id(self, id: str) -> dict:
-        try:
-            job_id = uuid.UUID(id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid UUID: {id}")
+        job_id = self._parse_uuid(id)
         result = self.execute_db_operation(lambda: job_repo.get_by_id(job_id))
         self._assert_found(result, id)
         return self._sanitize_response(result)
 
     def find_pipeline_runs(self, job_id: str) -> list[dict]:
         """Get all pipeline_run records for a given job."""
-        try:
-            jid = uuid.UUID(job_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid UUID: {job_id}")
-        rows = self.execute_db_operation(
+        jid = self._parse_uuid(job_id)
+        return self.execute_db_operation(
             lambda: pipeline_run_repo.get_by_job(jid)
         )
-        return rows
 
     def update(self, id: str, data: dict) -> dict:
         raise HTTPException(status_code=405, detail="Jobs cannot be updated")
 
     def delete(self, id: str) -> None:
         raise HTTPException(status_code=405, detail="Jobs cannot be deleted")
-
-    def _is_job_stale(self, running_job_id: uuid.UUID) -> bool:
-        """Three-tier stale detection: heartbeat file, DB last_heartbeat, created_at age."""
-        running_job = self.execute_db_operation(
-            lambda: job_repo.get_by_id(running_job_id)
-        )
-        if not running_job:
-            return True
-
-        hb = _read_heartbeat(str(running_job_id))
-        if hb:
-            return (time.time() - hb["timestamp"]) > _STALE_THRESHOLD_SECONDS
-
-        last_hb = running_job.get("last_heartbeat")
-        if last_hb:
-            from datetime import datetime, timezone
-            if isinstance(last_hb, str):
-                try:
-                    last_hb = datetime.fromisoformat(last_hb)
-                except Exception:
-                    last_hb = None
-            if last_hb and hasattr(last_hb, "tzinfo"):
-                if last_hb.tzinfo is None:
-                    from datetime import timezone as _tz
-                    last_hb = last_hb.replace(tzinfo=_tz.utc)
-                elapsed = (datetime.now(timezone.utc) - last_hb).total_seconds()
-                return elapsed > _STALE_THRESHOLD_SECONDS
-
-        created_at = running_job.get("created_at")
-        if created_at:
-            from datetime import datetime, timezone
-            if isinstance(created_at, str):
-                try:
-                    created_at = datetime.fromisoformat(created_at)
-                except Exception:
-                    created_at = None
-            if created_at and hasattr(created_at, "tzinfo"):
-                if created_at.tzinfo is None:
-                    from datetime import timezone as _tz
-                    created_at = created_at.replace(tzinfo=_tz.utc)
-                elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
-                return elapsed > 600
-
-        return False
-
-    # ------------------------------------------------------------------
-    # Pipeline trigger (called by POST /api/v1/jobs)
-    # ------------------------------------------------------------------
 
     def create(self, data: dict) -> dict:
         """Trigger a pipeline migration job.
@@ -159,13 +89,13 @@ class JobsService(BaseService):
         except Exception as exc:
             raise HTTPException(status_code=422, detail=f"Invalid pipeline data: {exc}")
 
-        # Guard: reject if a job is already running for this pipeline
         recent = self.execute_db_operation(
             lambda: job_repo.get_by_pipeline(uuid.UUID(pc.id), limit=1)
         )
         if recent and recent[0]["status"] == "running":
-            running_job_id = uuid.UUID(recent[0]["id"])
-            if self._is_job_stale(running_job_id):
+            running_job = recent[0]
+            running_job_id = uuid.UUID(running_job["id"])
+            if is_job_stale(running_job):
                 self.execute_db_operation(
                     lambda: job_repo.update(
                         running_job_id,
@@ -213,6 +143,8 @@ class JobsService(BaseService):
         job_id: uuid.UUID = self.execute_db_operation(lambda: job_repo.save(job_record))
         job_id_str = str(job_id)
 
+        emit = self._emit_fn or _noop_emit
+
         def batch_event_callback(
             run_id: str,
             step_name: str,
@@ -225,7 +157,7 @@ class JobsService(BaseService):
                     job_repo.update(job_id, JobUpdateRecord(status="running", error_message=error))
                 except Exception:
                     pass
-                emit_from_thread(
+                emit(
                     "job:error",
                     {
                         "run_id": run_id,
@@ -237,7 +169,7 @@ class JobsService(BaseService):
                     },
                 )
             else:
-                emit_from_thread(
+                emit(
                     "job:batch",
                     {
                         "run_id": run_id,
@@ -254,7 +186,7 @@ class JobsService(BaseService):
                 job_repo.update(job_id, JobUpdateRecord(status=status))
             except Exception:
                 pass
-            emit_from_thread(
+            emit(
                 "job:completed",
                 {
                     "run_id": run_id,
@@ -270,7 +202,7 @@ class JobsService(BaseService):
         shutdown_event = threading.Event()
 
         def run_event_callback(event_name: str, data: dict) -> None:
-            emit_from_thread(event_name, data)
+            emit(event_name, data)
 
         executor = PipelineExecutor(
             pipeline=pc,
@@ -292,3 +224,7 @@ class JobsService(BaseService):
             "pipeline_id": pipeline_id_str,
             "status": "running",
         }
+
+
+def _noop_emit(event: str, data: dict) -> None:
+    pass

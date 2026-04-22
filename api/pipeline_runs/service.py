@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import uuid
+
 from fastapi import HTTPException
 from api.base.service import BaseService
 from api.base.query_params import QueryParams
@@ -38,51 +38,29 @@ class PipelineRunsService(BaseService):
         "deleted_reason",
     ]
 
-    def find_all(self, params: QueryParams) -> dict:
-        """List all pipeline runs with pagination."""
-        total_records = self.execute_db_operation(lambda: pipeline_run_repo.count_all())
-        data = self.execute_db_operation(
-            lambda: pipeline_run_repo.get_all(limit=params.limit, offset=0)
-        )
-        data = self._apply_query_params(data, params)
-        data = self._sanitize_list(data)
-        page_data, total, total_pages = self._paginate(data, params)
+    def _count_all(self) -> int:
+        return pipeline_run_repo.count_all()
 
-        return {
-            "data": page_data,
-            "total": total,
-            "total_records": total_records,
-            "page": params.page,
-            "page_size": params.limit,
-            "total_pages": total_pages,
-        }
+    def _list_all(self) -> list[dict]:
+        return pipeline_run_repo.get_all(limit=10_000, offset=0)
 
     def find_by_id(self, id: str) -> dict:
         """Get pipeline run by ID."""
-        try:
-            run_id = uuid.UUID(id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid UUID: {id}")
+        run_id = self._parse_uuid(id)
         result = self.execute_db_operation(lambda: pipeline_run_repo.get_by_id(run_id))
         self._assert_found(result, id)
         return self._sanitize_response(result)
 
     def create(self, data: dict) -> dict:
         """Create new pipeline run."""
-        try:
-            pipeline_id = uuid.UUID(data.get("pipeline_id", ""))
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid UUID: {data.get('pipeline_id')}")
+        pipeline_id = self._parse_uuid(data.get("pipeline_id", ""), "pipeline_id")
 
         steps_json = data.get("steps_json", "{}")
         if isinstance(steps_json, dict):
             steps_json = json.dumps(steps_json, ensure_ascii=False)
 
         raw_job_id = data.get("job_id")
-        try:
-            job_id = uuid.UUID(raw_job_id) if raw_job_id else None
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid UUID: {raw_job_id}")
+        job_id = self._parse_uuid(raw_job_id, "job_id") if raw_job_id else None
 
         record = PipelineRunRecord(
             pipeline_id=pipeline_id,
@@ -96,10 +74,7 @@ class PipelineRunsService(BaseService):
 
     def update(self, id: str, data: dict) -> dict:
         """Update pipeline run status/steps/error."""
-        try:
-            run_id = uuid.UUID(id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Invalid UUID: {id}")
+        run_id = self._parse_uuid(id)
 
         steps_json = data.get("steps_json")
         if isinstance(steps_json, dict):

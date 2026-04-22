@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 import traceback as _tb
+import uuid
 from abc import ABC, abstractmethod
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -17,35 +18,61 @@ from api.base.sql_query_builder import SqlQueryBuilder
 
 
 class BaseService(ABC):
-    """Abstract base service for CRUD operations."""
+    """Abstract base service for CRUD operations.
+
+    Uses Template Method pattern for find_all():
+        - Subclasses implement _count_all() and _list_all()
+        - Optional _post_process_page() hook for post-pagination transforms
+    """
 
     resource_type: str = ""
     allowed_fields: list[str] = []
 
     @abstractmethod
+    def _count_all(self) -> int:
+        """Return total record count from the database."""
+
+    @abstractmethod
+    def _list_all(self) -> list[dict]:
+        """Return all records as list of dicts from the database."""
+
+    def _post_process_page(self, page_data: list[dict]) -> list[dict]:
+        """Hook: transform paginated data before returning. Override in subclasses."""
+        return page_data
+
     def find_all(self, params: QueryParams) -> dict:
-        """Return {data: list, total: int, page: int, page_size: int, total_pages: int}."""
-        pass
+        """List all records with in-memory filtering, sorting, and pagination."""
+        total_records = self.execute_db_operation(self._count_all)
+        data = self.execute_db_operation(self._list_all)
+        data = self._apply_query_params(data, params)
+        data = self._sanitize_list(data)
+        page_data, total, total_pages = self._paginate(data, params)
+        page_data = self._post_process_page(page_data)
+
+        return {
+            "data": page_data,
+            "total": total,
+            "total_records": total_records,
+            "page": params.page,
+            "page_size": params.limit,
+            "total_pages": total_pages,
+        }
 
     @abstractmethod
     def find_by_id(self, id: str | int) -> dict:
         """Return single record dict or raise HTTPException 404."""
-        pass
 
     @abstractmethod
     def create(self, data) -> dict:
         """Return created record dict."""
-        pass
 
     @abstractmethod
     def update(self, id: str | int, data) -> dict:
         """Return updated record dict."""
-        pass
 
     @abstractmethod
     def delete(self, id: str | int) -> None:
         """Raise HTTPException 404 if not found."""
-        pass
 
     def execute_db_operation(self, operation, *, operation_name: str = ""):
         try:
@@ -128,4 +155,24 @@ class BaseService(ABC):
             "total": total,
             "total_records": total_records if total_records is not None else total,
             "total_pages": total_pages,
+        }
+
+    def _parse_uuid(self, value: str, field: str = "id") -> uuid.UUID:
+        """Parse and validate a UUID string. Raises HTTPException 400 if invalid."""
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID: {value}")
+
+    def _merge_fields(
+        self,
+        data: dict,
+        existing: dict,
+        fields: list[str],
+        defaults: dict | None = None,
+    ) -> dict:
+        """Merge request data with existing record. Request fields take precedence."""
+        df = defaults or {}
+        return {
+            f: data.get(f) if f in data else existing.get(f, df.get(f)) for f in fields
         }

@@ -65,11 +65,18 @@ api/ → services/ → repositories/ → models/
 
 When `services/` needs to notify the API layer (e.g. Socket.IO emit), use **callback injection** — the API layer passes a callback function, the service layer calls it without knowing about the API.
 
+**This also applies to `api/*/service.py` files — they MUST NOT import from `api.socket_manager`.** Use constructor injection: the router passes `emit_fn` to the service.
+
 ```python
-# ✅ CORRECT — callback injection (DIP)
-class PipelineExecutor:
-    def __init__(self, ..., run_event_callback=None):
-        self._run_event_callback = run_event_callback  # Injected by API layer
+# ✅ CORRECT — router injects, service receives
+# api/jobs/router.py
+from api.socket_manager import emit_from_thread
+service = JobsService(emit_fn=emit_from_thread)
+
+# api/jobs/service.py
+class JobsService(BaseService):
+    def __init__(self, emit_fn=None):
+        self._emit_fn = emit_fn  # No api/ imports needed
 
 # ❌ WRONG — service imports from API layer
 from api.socket_manager import emit_from_thread  # Breaks DIP
@@ -474,6 +481,103 @@ inject_global_css()
 
 ---
 
+## API Service Layer Patterns
+
+### Rule 7.1: Use Template Method for find_all() (BaseService)
+
+**All API services extend `BaseService` which provides a concrete `find_all()`. Subclasses implement only `_count_all()` and `_list_all()`.**
+
+```python
+# ✅ CORRECT — implement only the two hooks
+class DatasourcesService(BaseService):
+    def _count_all(self) -> int:
+        return datasource_repo.count_all()
+
+    def _list_all(self) -> list[dict]:
+        return datasource_repo.get_all_list()
+
+# For post-pagination transforms (e.g., attaching child records):
+class PipelinesService(BaseService):
+    def _post_process_page(self, page_data: list[dict]) -> list[dict]:
+        return self._attach_children(page_data)
+
+# ❌ WRONG — overriding find_all() directly
+class MyService(BaseService):
+    def find_all(self, params):  # Bypasses template method — don't do this
+        ...
+```
+
+### Rule 7.2: Use _parse_uuid() Instead of Manual try/except
+
+**Use `self._parse_uuid(value)` from BaseService for UUID validation.**
+
+```python
+# ✅ CORRECT
+def find_by_id(self, id: str) -> dict:
+    run_id = self._parse_uuid(id)
+    ...
+
+# ❌ WRONG — duplicate UUID validation
+try:
+    run_id = uuid.UUID(id)
+except ValueError:
+    raise HTTPException(status_code=400, detail=f"Invalid UUID: {id}")
+```
+
+### Rule 7.3: Use _merge_fields() for Patch-Style Updates
+
+**Use `self._merge_fields(data, existing, fields)` from BaseService instead of manual per-field merge.**
+
+```python
+# ✅ CORRECT — concise merge
+def update(self, id, data):
+    existing = self.find_by_id(id)
+    merged = self._merge_fields(data, existing, ["name", "db_type", "host", ...])
+    record = DatasourceRecord(**merged)
+
+# ❌ WRONG — manual per-field merge
+record = DatasourceRecord(
+    name=data.get("name") if "name" in data else existing.get("name", ""),
+    db_type=data.get("db_type") if "db_type" in data else existing.get("db_type", ""),
+    ...
+)
+```
+
+### Rule 7.4: Routers Contain Only HTTP Concerns
+
+**Routers MUST NOT contain business logic, repo calls, or service-level imports. All logic belongs in the service.**
+
+```python
+# ✅ CORRECT — router delegates to service
+@router.get("/{datasource_id}/tables")
+def list_tables(datasource_id: str):
+    data = service.get_tables(datasource_id)
+    return create_collection_response("datasource_tables", data, ...)
+
+# ❌ WRONG — business logic in router
+@router.get("/{datasource_id}/tables")
+def list_tables(datasource_id: str):
+    ds = get_datasource(datasource_id)  # Repo call in router!
+    kw = _datasource_kwargs(ds)          # Business logic in router!
+    ok, result = get_tables(**kw)
+```
+
+### Rule 7.5: Inject External Dependencies via Constructor
+
+**Services that need external resources (Socket.IO, etc.) receive them via constructor injection from the router.**
+
+```python
+# ✅ CORRECT — router injects
+# api/jobs/router.py
+service = JobsService(emit_fn=emit_from_thread)
+
+# ❌ WRONG — service imports from API layer
+class JobsService(BaseService):
+    from api.socket_manager import emit_from_thread  # Breaks DIP
+```
+
+---
+
 ## RESTful API Design Rules
 
 ### Rule 6.1: OOP-Style Resource URIs (NOT RPC Style)
@@ -689,10 +793,19 @@ Before merging any code, verify:
 
 - [ ] **Model Layer**: No `import streamlit` in `models/`, `repositories/`, `services/`, `protocols/`
 - [ ] **Layer Dependency**: No reverse imports — `services/` MUST NOT import from `api/` (use callback injection)
+- [ ] **DIP**: `api/*/service.py` MUST NOT import from `api.socket_manager` — use constructor injection (`emit_fn`)
 - [ ] **Data Ownership**: Each repo queries ONLY its own table — cross-repo lookups go through service layer
 - [ ] **Repository Layer**: All DB access via `repositories/`, NOT `database.py` facade
 - [ ] **View Layer**: No repository imports, no `PageState.set()`, pure rendering only
 - [ ] **Controller Layer**: All state mutations happen here, all data fetches via repositories
+
+### API Service Layer
+
+- [ ] **Template Method**: Services use `_count_all()` / `_list_all()` — NOT overriding `find_all()` directly
+- [ ] **UUID Validation**: Uses `_parse_uuid()` from BaseService — no manual try/except blocks
+- [ ] **Field Merge**: Uses `_merge_fields()` for patch-style updates — no manual per-field merge
+- [ ] **Router Boundary**: Routers contain only HTTP response formatting — no business logic or repo calls
+- [ ] **DI**: External dependencies (Socket.IO, etc.) injected via constructor, not imported
 
 ### RESTful API Design
 

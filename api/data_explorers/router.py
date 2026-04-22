@@ -1,12 +1,8 @@
-"""
-Data Explorers API router — POST /api/v1/db-explorers
-
-Follows the non-CRUD pattern used by api/jobs/ (standalone APIRouter).
-"""
+"""Data Explorers API router — POST /api/v1/db-explorers"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from api.data_explorers.schemas import ExecuteQueryRequest
 from api.base.json_api import create_success_response
@@ -15,13 +11,15 @@ from services.sql_validator import SqlValidationError
 
 router = APIRouter(prefix="/api/v1/db-explorers", tags=["Data Explorers"])
 
-_executor = QueryExecutor()
+
+def _get_executor() -> QueryExecutor:
+    return QueryExecutor()
 
 
 @router.post("", status_code=200)
-def execute_sql(body: ExecuteQueryRequest):
+def execute_sql(body: ExecuteQueryRequest, executor: QueryExecutor = Depends(_get_executor)):
     try:
-        result = _executor.execute(str(body.datasource_id), body.cmd)
+        result = executor.execute(str(body.datasource_id), body.cmd)
     except SqlValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

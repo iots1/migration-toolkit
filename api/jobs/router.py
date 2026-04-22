@@ -22,6 +22,7 @@ from api.base.controller import BaseController
 from api.base import json_api
 from api.jobs.schemas import CreateJobSchema, UpdateJobSchema, JobCreatedResponse
 from api.jobs.service import JobsService
+from api.socket_manager import emit_from_thread
 
 
 class JobsController(BaseController):
@@ -51,7 +52,7 @@ class JobsController(BaseController):
 
 
 def get_jobs_router():
-    service = JobsService()
+    service = JobsService(emit_fn=emit_from_thread)
     controller = JobsController(
         prefix="jobs",
         service=service,

@@ -81,6 +81,12 @@ Dual-interface HIS (Hospital Information System) database migration toolkit with
 - ✅ Protocol interfaces for DI (Dependency Inversion)
 - ✅ Registry patterns for transformers/validators/dialects (Open/Closed)
 
+**Last Updated**: 2026-04-22
+**Python Version**: 3.11
+**Database**: PostgreSQL 18+
+**Architecture**: Clean Architecture + SOLID + MVC + REST API
+**Status**: ✅ Production Ready
+
 ### Directory Structure
 
 ```
@@ -127,7 +133,14 @@ Dual-interface HIS (Hospital Information System) database migration toolkit with
 │   ├── configs/                    # /api/v1/configs (+ /histories, /{id}/versions/{version})
 │   ├── pipelines/                  # /api/v1/pipelines (with nodes/edges sub-resources)
 │   ├── pipeline_runs/              # /api/v1/pipeline-runs
-│   └── jobs/                       # /api/v1/jobs (POST → trigger background pipeline)
+│   ├── jobs/                       # /api/v1/jobs (POST → trigger background pipeline)
+│   │   ├── router.py               # Job routes + emit_fn injection
+│   │   ├── service.py              # JobsService (DIP-compliant, no api/ imports)
+│   │   ├── schemas.py              # Pydantic schemas
+│   │   └── stale_detector.py       # Stale job detection (SRP extraction)
+│   ├── data_explorers/             # /api/v1/db-explorers
+│   ├── transformers/               # /api/v1/transformers
+│   └── validators/                 # /api/v1/validators
 │
 ├── dialects/                       # Database dialects (OCP - Open/Closed)
 │   ├── registry.py                 # Dialect registry
@@ -197,6 +210,8 @@ Dual-interface HIS (Hospital Information System) database migration toolkit with
 | `app.py`                       | Streamlit router            | ✅ Complete   |
 | `api/main.py`                  | FastAPI app + Socket.IO      | ✅ Complete   |
 | `api/jobs/router.py`           | POST /jobs → trigger pipeline | ✅ Complete   |
+| `api/jobs/service.py`          | JobsService (DIP-compliant)   | ✅ Complete   |
+| `api/jobs/stale_detector.py`   | Stale job detection (SRP)     | ✅ Complete   |
 | `api/socket_manager.py`        | Socket.IO emit from thread  | ✅ Complete   |
 | `database.py`                  | Legacy facade               | 🚧 Deprecated |
 | `repositories/pipeline_repo.py`| Pipeline CRUD + nodes/edges  | ✅ Complete   |
@@ -339,6 +354,121 @@ class PipelineExecutor:
 
 # ❌ WRONG — service imports from API layer
 from api.socket_manager import emit_from_thread  # Breaks DIP
+```
+
+- **API services (in `api/*/service.py`) MUST NOT import from `api.socket_manager`**. Use constructor injection: the router passes `emit_fn` to the service.
+
+```python
+# ✅ CORRECT — router injects, service receives
+# api/jobs/router.py
+from api.socket_manager import emit_from_thread
+service = JobsService(emit_fn=emit_from_thread)
+
+# api/jobs/service.py
+class JobsService(BaseService):
+    def __init__(self, emit_fn=None):
+        self._emit_fn = emit_fn  # No api/ imports needed
+```
+
+## API Service Layer Patterns
+
+### Template Method Pattern (BaseService)
+
+All API services extend `BaseService` which provides a concrete `find_all()` implementation via the **Template Method** pattern. Subclasses implement two hooks:
+
+```python
+# ✅ CORRECT — implement only the two hooks
+class DatasourcesService(BaseService):
+    def _count_all(self) -> int:
+        return datasource_repo.count_all()
+
+    def _list_all(self) -> list[dict]:
+        return datasource_repo.get_all_list()
+
+# For post-pagination transforms (e.g., attaching child records):
+class PipelinesService(BaseService):
+    def _count_all(self) -> int:
+        return pipeline_repo.count_all()
+
+    def _list_all(self) -> list[dict]:
+        return pipeline_repo.get_all_list()
+
+    def _post_process_page(self, page_data: list[dict]) -> list[dict]:
+        return self._attach_children(page_data)
+
+# ❌ WRONG — overriding find_all() directly (bypasses template method)
+class MyService(BaseService):
+    def find_all(self, params):  # Don't do this — use _count_all / _list_all
+        ...
+```
+
+### UUID Validation Helper
+
+Use `_parse_uuid()` from BaseService instead of manual try/except:
+
+```python
+# ✅ CORRECT
+def find_by_id(self, id: str) -> dict:
+    run_id = self._parse_uuid(id)
+    ...
+
+# ❌ WRONG — duplicate UUID validation
+try:
+    run_id = uuid.UUID(id)
+except ValueError:
+    raise HTTPException(status_code=400, detail=f"Invalid UUID: {id}")
+```
+
+### Field Merge Helper
+
+Use `_merge_fields()` for patch-style updates where request data overrides existing values:
+
+```python
+# ✅ CORRECT — concise merge
+def update(self, id, data):
+    existing = self.find_by_id(id)
+    merged = self._merge_fields(data, existing, ["name", "db_type", "host", ...])
+    record = DatasourceRecord(**merged)
+
+# ❌ WRONG — manual per-field merge
+record = DatasourceRecord(
+    name=data.get("name") if "name" in data else existing.get("name", ""),
+    db_type=data.get("db_type") if "db_type" in data else existing.get("db_type", ""),
+    ...
+)
+```
+
+### Router → Service Boundary
+
+Routers contain **only HTTP concerns** (response formatting, status codes). All business logic belongs in the service:
+
+```python
+# ✅ CORRECT — router delegates to service
+@router.get("/{datasource_id}/tables")
+def list_tables(datasource_id: str):
+    data = service.get_tables(datasource_id)
+    return create_collection_response("datasource_tables", data, ...)
+
+# ❌ WRONG — business logic in router
+@router.get("/{datasource_id}/tables")
+def list_tables(datasource_id: str):
+    ds = get_datasource(datasource_id)  # Repo call in router!
+    kw = _datasource_kwargs(ds)          # Business logic in router!
+    ok, result = get_tables(**kw)
+    ...
+```
+
+### Dependency Injection for External Dependencies
+
+Services that need external resources (Socket.IO, etc.) receive them via constructor injection from the router:
+
+```python
+# ✅ CORRECT
+service = JobsService(emit_fn=emit_from_thread)  # Router injects
+
+# ❌ WRONG — service imports from API layer
+class JobsService(BaseService):
+    from api.socket_manager import emit_from_thread  # Breaks DIP
 ```
 
 ## RESTful API Design

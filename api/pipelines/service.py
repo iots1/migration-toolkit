@@ -27,23 +27,14 @@ class PipelinesService(BaseService):
         "updated_at",
     ]
 
-    def find_all(self, params: QueryParams) -> dict:
-        total_records = self.execute_db_operation(lambda: pipeline_repo.count_all())
-        data = self.execute_db_operation(lambda: pipeline_repo.get_all_list())
-        data = self._apply_query_params(data, params)
-        data = self._sanitize_list(data)
-        # Paginate BEFORE attaching children so we only query nodes/edges for the current page
-        page_data, total, total_pages = self._paginate(data, params)
-        page_data = self._attach_children(page_data)
+    def _count_all(self) -> int:
+        return pipeline_repo.count_all()
 
-        return {
-            "data": page_data,
-            "total": total,
-            "total_records": total_records,
-            "page": params.page,
-            "page_size": params.limit,
-            "total_pages": total_pages,
-        }
+    def _list_all(self) -> list[dict]:
+        return pipeline_repo.get_all_list()
+
+    def _post_process_page(self, page_data: list[dict]) -> list[dict]:
+        return self._attach_children(page_data)
 
     def find_by_id(self, id: str) -> dict:
         result = self.execute_db_operation(lambda: pipeline_repo.get_by_id(id))

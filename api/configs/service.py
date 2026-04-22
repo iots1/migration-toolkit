@@ -43,22 +43,11 @@ class ConfigsService(BaseService):
         "datasource_target_dbname",
     ]
 
-    def find_all(self, params: QueryParams) -> dict:
-        """List all configs with pagination."""
-        total_records = self.execute_db_operation(lambda: config_repo.count_all())
-        data = self.execute_db_operation(lambda: config_repo.get_all_list())
-        data = self._apply_query_params(data, params)
-        data = self._sanitize_list(data)
-        page_data, total, total_pages = self._paginate(data, params)
+    def _count_all(self) -> int:
+        return config_repo.count_all()
 
-        return {
-            "data": page_data,
-            "total": total,
-            "total_records": total_records,
-            "page": params.page,
-            "page_size": params.limit,
-            "total_pages": total_pages,
-        }
+    def _list_all(self) -> list[dict]:
+        return config_repo.get_all_list()
 
     def find_by_id(self, id: str) -> dict:
         """Get config by UUID."""

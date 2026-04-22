@@ -118,7 +118,7 @@ def create_sqlalchemy_engine(
         if "pool_recycle" not in engine_kwargs:
             engine_kwargs["pool_recycle"] = 1800  # 30 minutes
         if "pool_pre_ping" not in engine_kwargs:
-            engine_kwargs["pool_pre_ping"] = False  # Trust pool_recycle instead of SELECT 1
+            engine_kwargs["pool_pre_ping"] = True
 
         engine = create_engine(connection_url, **engine_kwargs)
         return engine

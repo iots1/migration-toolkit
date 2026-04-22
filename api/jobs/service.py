@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import threading
+import time
 import uuid
 
 from fastapi import HTTPException
@@ -18,6 +21,9 @@ from services.pipeline_service import (
     ConfigRepositoryAdapter,
     PipelineRunRepositoryAdapter,
 )
+from services.migration_executor import _read_heartbeat, _clean_heartbeat
+
+_STALE_THRESHOLD_SECONDS = 300
 
 
 class JobsService(BaseService):
@@ -66,17 +72,49 @@ class JobsService(BaseService):
     def delete(self, id: str) -> None:
         raise HTTPException(status_code=405, detail="Jobs cannot be deleted")
 
-    def _mark_stale_job_failed(self, job_id: uuid.UUID) -> None:
-        """Mark a stale 'running' job as 'failed' so a new run can start."""
-        self.execute_db_operation(
-            lambda: job_repo.update(
-                job_id,
-                JobUpdateRecord(
-                    status="failed",
-                    error_message="Marked stale — process died or was restarted",
-                ),
-            )
+    def _is_job_stale(self, running_job_id: uuid.UUID) -> bool:
+        """Three-tier stale detection: heartbeat file, DB last_heartbeat, created_at age."""
+        running_job = self.execute_db_operation(
+            lambda: job_repo.get_by_id(running_job_id)
         )
+        if not running_job:
+            return True
+
+        hb = _read_heartbeat(str(running_job_id))
+        if hb:
+            return (time.time() - hb["timestamp"]) > _STALE_THRESHOLD_SECONDS
+
+        last_hb = running_job.get("last_heartbeat")
+        if last_hb:
+            from datetime import datetime, timezone
+            if isinstance(last_hb, str):
+                try:
+                    last_hb = datetime.fromisoformat(last_hb)
+                except Exception:
+                    last_hb = None
+            if last_hb and hasattr(last_hb, "tzinfo"):
+                if last_hb.tzinfo is None:
+                    from datetime import timezone as _tz
+                    last_hb = last_hb.replace(tzinfo=_tz.utc)
+                elapsed = (datetime.now(timezone.utc) - last_hb).total_seconds()
+                return elapsed > _STALE_THRESHOLD_SECONDS
+
+        created_at = running_job.get("created_at")
+        if created_at:
+            from datetime import datetime, timezone
+            if isinstance(created_at, str):
+                try:
+                    created_at = datetime.fromisoformat(created_at)
+                except Exception:
+                    created_at = None
+            if created_at and hasattr(created_at, "tzinfo"):
+                if created_at.tzinfo is None:
+                    from datetime import timezone as _tz
+                    created_at = created_at.replace(tzinfo=_tz.utc)
+                elapsed = (datetime.now(timezone.utc) - created_at).total_seconds()
+                return elapsed > 600
+
+        return False
 
     # ------------------------------------------------------------------
     # Pipeline trigger (called by POST /api/v1/jobs)
@@ -114,8 +152,28 @@ class JobsService(BaseService):
             lambda: job_repo.get_by_pipeline(uuid.UUID(pc.id), limit=1)
         )
         if recent and recent[0]["status"] == "running":
-            if resume_mode:
-                self._mark_stale_job_failed(uuid.UUID(recent[0]["id"]))
+            running_job_id = uuid.UUID(recent[0]["id"])
+            if self._is_job_stale(running_job_id):
+                self.execute_db_operation(
+                    lambda: job_repo.update(
+                        running_job_id,
+                        JobUpdateRecord(
+                            status="failed",
+                            error_message="Process died — no heartbeat for 5 minutes",
+                        ),
+                    )
+                )
+                _clean_heartbeat(str(running_job_id))
+            elif resume_mode:
+                self.execute_db_operation(
+                    lambda: job_repo.update(
+                        running_job_id,
+                        JobUpdateRecord(
+                            status="failed",
+                            error_message="Marked stale — resume requested",
+                        ),
+                    )
+                )
             else:
                 raise HTTPException(
                     status_code=409,
@@ -197,6 +255,7 @@ class JobsService(BaseService):
 
         config_repo = ConfigRepositoryAdapter()
         run_repo = PipelineRunRepositoryAdapter(job_id=job_id)
+        shutdown_event = threading.Event()
         executor = PipelineExecutor(
             pipeline=pc,
             source_conn_config={},
@@ -205,6 +264,8 @@ class JobsService(BaseService):
             run_repo=run_repo,
             batch_event_callback=batch_event_callback,
             completion_callback=completion_callback,
+            shutdown_event=shutdown_event,
+            job_id=job_id_str,
         )
         run_id = executor.start_background()
 

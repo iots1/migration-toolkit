@@ -37,10 +37,16 @@ import time as _time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Optional, Protocol, runtime_checkable
 
 from models.pipeline_config import PipelineConfig, PipelineStep
-from services.migration_executor import run_single_migration
+from services.migration_executor import (
+    run_single_migration,
+    MigrationInterrupted,
+    _write_heartbeat,
+    _read_heartbeat,
+    _clean_heartbeat,
+)
 from services.checkpoint_manager import (
     load_pipeline_checkpoint,
     save_pipeline_checkpoint,
@@ -149,6 +155,8 @@ class PipelineExecutor:
         run_id: str | None = None,
         batch_event_callback=None,
         completion_callback=None,
+        shutdown_event: threading.Event | None = None,
+        job_id: str | None = None,
     ) -> None:
         """
         Args:
@@ -166,17 +174,21 @@ class PipelineExecutor:
                                    Called after every batch — used for socket.io + DB update.
             completion_callback:   fn(run_id, status, total_rows)
                                    Called once when the whole pipeline finishes.
+            shutdown_event:        threading.Event to signal graceful shutdown between batches.
+            job_id:                UUID string of the associated job record.
         """
         self._pipeline = pipeline
         self._source_conn_config = source_conn_config
         self._target_conn_config = target_conn_config
-        self._config_repo = config_repo  # Injected (DIP)
-        self._run_repo = run_repo  # Injected (DIP)
+        self._config_repo = config_repo
+        self._run_repo = run_repo
         self._log_callback = log_callback
         self._progress_callback = progress_callback
         self._run_id = run_id
         self._batch_event_callback = batch_event_callback
         self._completion_callback = completion_callback
+        self._shutdown_event = shutdown_event
+        self._job_id = job_id
 
     # ------------------------------------------------------------------
     # Public API
@@ -299,7 +311,21 @@ class PipelineExecutor:
                     progress_callback=self._progress_callback,
                     checkpoint_callback=self._update_step_checkpoint,
                     batch_insert_callback=self._save_batch_record,
+                    shutdown_event=self._shutdown_event,
+                    job_id=self._job_id,
                 )
+            except MigrationInterrupted:
+                results[config_name] = StepResult(
+                    status="failed",
+                    config_name=config_name,
+                    error_message="Migration interrupted by shutdown signal",
+                )
+                self._log(f"[{config_name}] Interrupted — shutdown requested", "🛑")
+                print(f"[JOB ERROR] [{config_name}] Interrupted — shutdown requested")
+                self._flush_run_state(results)
+                if self._pipeline.error_strategy == "fail_fast":
+                    break
+                continue
             except Exception as exc:
                 err_msg = str(exc)
                 results[config_name] = StepResult(
@@ -395,11 +421,7 @@ class PipelineExecutor:
     # ------------------------------------------------------------------
 
     def _background_run(self) -> None:
-        """Thread entry point — wraps execute() with DB bookkeeping.
-
-        PostgreSQL safety: all repo calls here use thread-safe connection managers
-        internally, so no connection object crosses a thread boundary.
-        """
+        """Thread entry point — wraps execute() with DB bookkeeping."""
         result = None
         try:
             result = self.execute()
@@ -435,6 +457,8 @@ class PipelineExecutor:
                     f"did not complete — checkpoint preserved for resume"
                     f" ({len(cp.get('steps', {}))} step(s) tracked)" if cp else ""
                 )
+            if self._job_id:
+                _clean_heartbeat(self._job_id)
 
     # ------------------------------------------------------------------
     # Private — Kahn's topological sort
@@ -646,8 +670,6 @@ class PipelineExecutor:
             "charset": src_charset,
         }
         return src_conn, tgt_conn
-
-        return False, ""
 
     # ------------------------------------------------------------------
     # Private — 2D checkpoint helpers

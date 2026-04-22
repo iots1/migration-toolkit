@@ -11,7 +11,8 @@ from models.job import JobRecord, JobUpdateRecord
 
 _COLUMNS = """
     id::text AS id, pipeline_id::text AS pipeline_id,
-    status, completed_at, error_message, total_config, created_at
+    status, completed_at, error_message, total_config,
+    last_heartbeat, summary, created_at
 """
 
 

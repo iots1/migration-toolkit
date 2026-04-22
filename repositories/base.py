@@ -114,6 +114,8 @@ TABLES_DDL = [
         completed_at TIMESTAMP WITH TIME ZONE,
         error_message TEXT,
         total_config INTEGER DEFAULT 0,
+        last_heartbeat TIMESTAMP WITH TIME ZONE,
+        summary JSONB,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         created_by UUID,

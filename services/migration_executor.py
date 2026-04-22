@@ -7,28 +7,70 @@ without any Streamlit dependency.
 
 JIT Connection Pattern: creates SQLAlchemy engines with pool_pre_ping and
 pool_recycle, then disposes them in a finally block regardless of outcome.
+
+Resilience features (Phases 1-7):
+    - Atomic checkpoint writes (os.replace)
+    - Cursor-based pagination (no OFFSET O(N) slowdown)
+    - Batch-level transaction isolation (COPY in explicit tx)
+    - Retry with exponential backoff + engine.dispose()
+    - UPSERT / UPSERT_IGNORE strategies
+    - Graceful shutdown via threading.Event
+    - File-based heartbeat
+    - Memory guard with adaptive batch sizing
+    - TCP keepalive on migration engines
 """
 
 from __future__ import annotations
+
+import gc
 import json as _json
 import re as _re
 import time
+import uuid
+import threading
 import pandas as pd
 import sqlalchemy
 from sqlalchemy import text, event
+from sqlalchemy.exc import OperationalError, DisconnectionError, InterfaceError
 from dataclasses import dataclass
 from typing import Callable, Optional
 
 import services.db_connector as connector
-from services.checkpoint_manager import save_checkpoint, clear_checkpoint
+from services.checkpoint_manager import (
+    save_checkpoint,
+    clear_checkpoint,
+    load_checkpoint,
+)
 from services.encoding_helper import clean_dataframe
 from services.query_builder import (
     build_select_query,
     transform_batch,
     build_dtype_map,
     batch_insert,
+    build_paginated_select,
+    build_paginated_select_expanded,
+    select_pagination_builder,
 )
 from services.transformers import DataTransformer
+
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_CHECKPOINT_INTERVAL = 1
+
+MAX_RETRIES = 3
+RETRY_DELAYS = [5, 15, 45]
+
+MEMORY_WARN_THRESHOLD = 85
+MEMORY_ABORT_THRESHOLD = 95
+MEMORY_PER_BATCH_TARGET_MB = 200
+REEVAL_INTERVAL = 100
+
+STALE_THRESHOLD_SECONDS = 300
+
+HEARTBEAT_DIR_ENV = "HEARTBEAT_DIR"
 
 
 # ---------------------------------------------------------------------------
@@ -38,13 +80,17 @@ from services.transformers import DataTransformer
 
 @dataclass
 class MigrationResult:
-    status: str  # "success" | "failed"
+    status: str
     rows_processed: int
     batch_count: int
     duration_seconds: float
     error_message: str = ""
     pre_count: int = 0
-    post_count: int = 0  # -1 means post-verify query failed (non-fatal)
+    post_count: int = -1
+
+
+class MigrationInterrupted(Exception):
+    """Raised when shutdown_event is set between batches."""
 
 
 # ---------------------------------------------------------------------------
@@ -54,8 +100,6 @@ class MigrationResult:
 
 @dataclass
 class _BatchOutcome:
-    """Carries the result of a single batch through to the callback."""
-
     success: bool
     rows_in_batch: int
     rows_cumulative: int
@@ -65,8 +109,6 @@ class _BatchOutcome:
 
 @dataclass
 class _TruncationDetail:
-    """Info about a single column that exceeds the target length limit."""
-
     column: str
     target_limit: int
     actual_max: int
@@ -74,7 +116,6 @@ class _TruncationDetail:
     overflow_rows: int
 
 
-# Type aliases for callbacks
 LogCallback = Callable[[str, str], None]
 
 
@@ -95,25 +136,14 @@ def run_single_migration(
     progress_callback=None,
     checkpoint_callback=None,
     batch_insert_callback=None,
+    shutdown_event: threading.Event | None = None,
+    job_id: str | None = None,
 ) -> MigrationResult:
     """
     Run a full single-table migration and return a MigrationResult.
 
     This function **never raises**; all errors are captured in the returned
     MigrationResult with status="failed".
-
-    Args:
-        source_conn_config:  dict with keys db_type, host, port, db_name,
-                             user, password, charset (optional)
-        target_conn_config:  same shape
-        log_callback:        fn(message: str, icon: str)
-        progress_callback:   fn(batch_num: int, rows_processed: int, rows_in_batch: int)
-        checkpoint_callback: fn(config_name: str, batch_num: int, rows: int)
-                             — legacy hook for resumable checkpoints
-        batch_insert_callback: fn(config_name, batch_round, rows_in_batch, rows_cumulative,
-                                  batch_size, total_records_in_config, status, error_message,
-                                  transformation_warnings)
-                             — save batch record to pipeline_runs after each batch
     """
 
     def log(msg: str, icon: str = "ℹ️") -> None:
@@ -125,10 +155,9 @@ def run_single_migration(
     target_table = config.get("target", {}).get("table", "")
     start_time = time.time()
 
-    # Custom scripts only need the target engine — skip source entirely.
     if config.get("config_type") == "custom":
         tgt_engine = connector.create_sqlalchemy_engine(
-            **target_conn_config, pool_pre_ping=True, pool_recycle=3600
+            **target_conn_config, pool_pre_ping=True, pool_recycle=1800
         )
         try:
             log(f"Target connected: {target_conn_config.get('db_type', '')}", "✅")
@@ -156,14 +185,18 @@ def run_single_migration(
         return result
 
     src_engine = connector.create_sqlalchemy_engine(
-        **source_conn_config, pool_pre_ping=True, pool_recycle=3600
+        **source_conn_config, pool_pre_ping=True, pool_recycle=1800,
+        pool_size=2, max_overflow=1,
     )
     tgt_engine = connector.create_sqlalchemy_engine(
-        **target_conn_config, pool_pre_ping=True, pool_recycle=3600
+        **target_conn_config, pool_pre_ping=True, pool_recycle=1800,
+        pool_size=2, max_overflow=1,
     )
 
     _tune_pg_migration_session(src_engine)
     _tune_pg_migration_session(tgt_engine)
+    _set_keepalive(src_engine)
+    _set_keepalive(tgt_engine)
 
     try:
         src_db_type = source_conn_config.get("db_type", "")
@@ -192,6 +225,17 @@ def run_single_migration(
 
         total_source_rows = _count_source_rows(src_engine, select_query, source_table)
 
+        insert_strategy = config.get("insert_strategy", "append")
+
+        tgt_pk_columns = _detect_pk_columns(tgt_engine, target_table)
+        if insert_strategy in ("upsert", "upsert_ignore") and not tgt_pk_columns:
+            log(
+                f"WARNING: insert_strategy='{insert_strategy}' requires a primary key "
+                f"on the target table. Falling back to 'append'.",
+                "⚠️",
+            )
+            insert_strategy = "append"
+
         total_rows, batch_num, error_message = _process_batches(
             src_engine=src_engine,
             tgt_engine=tgt_engine,
@@ -208,6 +252,10 @@ def run_single_migration(
             progress_callback=progress_callback,
             checkpoint_callback=checkpoint_callback,
             batch_insert_callback=batch_insert_callback,
+            shutdown_event=shutdown_event,
+            job_id=job_id,
+            insert_strategy=insert_strategy,
+            tgt_pk_columns=tgt_pk_columns,
         )
 
         if error_message:
@@ -235,6 +283,15 @@ def run_single_migration(
             post_count=post_count,
         )
 
+    except MigrationInterrupted:
+        log("Migration interrupted by shutdown signal", "🛑")
+        return MigrationResult(
+            status="interrupted",
+            rows_processed=0,
+            batch_count=0,
+            duration_seconds=time.time() - start_time,
+            error_message="Shutdown requested",
+        )
     except Exception as e:
         error_msg = str(e)
         log(f"Migration failed with unexpected error: {error_msg}", "❌")
@@ -264,10 +321,140 @@ def run_single_migration(
         tgt_engine.dispose()
 
 
-# Save a checkpoint to disk every N successful batches.
-# Reduces disk I/O by ~10x while keeping resume granularity acceptable.
-# Error checkpoints always save (regardless of interval).
-_CHECKPOINT_INTERVAL = 10
+# ---------------------------------------------------------------------------
+# PK Detection
+# ---------------------------------------------------------------------------
+
+
+def _detect_pk_columns(engine, table: str) -> list[str] | None:
+    """Detect primary key columns, falling back to smallest unique index."""
+    try:
+        insp = sqlalchemy.inspect(engine)
+        pk = insp.get_pk_constraint(table)
+        if pk and pk.get("constrained_columns"):
+            return list(pk["constrained_columns"])
+    except Exception:
+        pass
+
+    try:
+        insp = sqlalchemy.inspect(engine)
+        unique_indexes = insp.get_unique_constraints(table)
+        if unique_indexes:
+            shortest = min(unique_indexes, key=lambda u: len(u["column_names"]))
+            return list(shortest["column_names"])
+    except Exception:
+        pass
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+
+
+def _get_heartbeat_dir() -> str:
+    from pathlib import Path
+
+    env_dir = os.getenv(HEARTBEAT_DIR_ENV)
+    if env_dir:
+        return env_dir
+    return str(Path.home() / ".his_analyzer" / "heartbeats")
+
+
+def _write_heartbeat(job_id: str, step: str, batch: int) -> None:
+    hb_dir = _get_heartbeat_dir()
+    path = os.path.join(hb_dir, f"{job_id}.heartbeat")
+    os.makedirs(hb_dir, exist_ok=True)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(f"{step}|{batch}|{time.time()}")
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        raise
+
+
+def _read_heartbeat(job_id: str) -> dict | None:
+    path = os.path.join(_get_heartbeat_dir(), f"{job_id}.heartbeat")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            content = f.read().strip()
+        step, batch, ts = content.split("|")
+        return {"step": step, "batch": int(batch), "timestamp": float(ts)}
+    except Exception:
+        return None
+
+
+def _clean_heartbeat(job_id: str) -> None:
+    path = os.path.join(_get_heartbeat_dir(), f"{job_id}.heartbeat")
+    if os.path.exists(path):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Memory Guard
+# ---------------------------------------------------------------------------
+
+
+def _check_memory(log: LogCallback, batch_num: int) -> bool:
+    """Check system memory. Returns True if memory is OK, False if aborting."""
+    try:
+        import psutil
+
+        mem = psutil.virtual_memory()
+        if mem.percent > MEMORY_WARN_THRESHOLD:
+            log(
+                f"Batch {batch_num}: Memory at {mem.percent}% — running GC",
+                "⚠️",
+            )
+            gc.collect()
+            mem = psutil.virtual_memory()
+            if mem.percent > MEMORY_ABORT_THRESHOLD:
+                raise MemoryError(
+                    f"Memory critically high ({mem.percent}%) — aborting to prevent OOM kill. "
+                    f"Reduce batch_size or add more RAM."
+                )
+    except MemoryError:
+        raise
+    except ImportError:
+        pass
+    except PermissionError:
+        pass
+    except Exception:
+        pass
+    return True
+
+
+# ---------------------------------------------------------------------------
+# TCP Keepalive
+# ---------------------------------------------------------------------------
+
+
+def _set_keepalive(engine) -> None:
+    """Register TCP keepalive on new connections (defense-in-depth)."""
+    if "postgresql" not in str(engine.url):
+        return
+
+    @event.listens_for(engine, "connect")
+    def _apply_keepalive(dbapi_conn, connection_record):
+        try:
+            dbapi_conn.set_keepalives(1)
+            dbapi_conn.set_keepalives_idle(30)
+            dbapi_conn.set_keepalives_interval(10)
+            dbapi_conn.set_keepalives_count(5)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -276,22 +463,7 @@ _CHECKPOINT_INTERVAL = 10
 
 
 def _tune_pg_migration_session(engine) -> None:
-    """Auto-configure PostgreSQL session parameters for migration workloads.
-
-    Applied via SQLAlchemy ``connect`` event so every pooled connection
-    (including those created internally by pd.read_sql) inherits the tuning.
-    Settings are **session-scoped** — they expire when the connection is
-    returned to the pool and do not affect other applications.
-
-    No-op for non-PostgreSQL engines.
-
-    Tuning rationale:
-        statement_timeout = 0          — disable query cancellation
-        work_mem = 256MB               — faster sorts/hashes on wide rows
-        max_parallel_workers_per_gather — parallel seq scans for large tables
-        maintenance_work_mem = 512MB   — faster COPY / bulk INSERT WAL
-        effective_cache_size = 4GB     — planner hint (no real allocation)
-    """
+    """Auto-configure PostgreSQL session parameters for migration workloads."""
     if "postgresql" not in str(engine.url):
         return
 
@@ -307,13 +479,6 @@ def _tune_pg_migration_session(engine) -> None:
 
 
 def _quote_identifier(name: str) -> str:
-    """Double-quote each part of a dotted identifier to prevent SQL injection.
-
-    Examples:
-        "cnPatientDudeeV1"      → '"cnPatientDudeeV1"'
-        "public.test_patients"  → '"public"."test_patients"'
-        "dbo.patients"          → '"dbo"."patients"'
-    """
     return ".".join(f'"{part.strip().strip(chr(34))}"' for part in name.split("."))
 
 
@@ -323,12 +488,6 @@ def _quote_identifier(name: str) -> str:
 
 
 def _split_sql_statements(script: str) -> list[str]:
-    """Split a SQL script into individual statements on `;` boundaries.
-
-    Ignores semicolons that appear inside dollar-quoted blocks such as
-    PostgreSQL's ``DO $$ ... $$`` or ``$body$ ... $body$``, so PL/pgSQL
-    anonymous blocks are kept intact as a single statement.
-    """
     statements: list[str] = []
     buf: list[str] = []
     i = 0
@@ -337,11 +496,10 @@ def _split_sql_statements(script: str) -> list[str]:
     dollar_tag = ""
 
     while i < n:
-        # --- Enter/exit a dollar-quoted block ---
         if script[i] == "$":
             end = script.find("$", i + 1)
             if end != -1:
-                tag = script[i : end + 1]  # e.g. "$$" or "$body$"
+                tag = script[i : end + 1]
                 if in_dollar_quote:
                     if tag == dollar_tag:
                         buf.append(tag)
@@ -356,7 +514,6 @@ def _split_sql_statements(script: str) -> list[str]:
                     dollar_tag = tag
                     continue
 
-        # --- Statement boundary (only outside dollar-quoted blocks) ---
         if not in_dollar_quote and script[i] == ";":
             stmt = "".join(buf).strip()
             if stmt:
@@ -368,7 +525,6 @@ def _split_sql_statements(script: str) -> list[str]:
         buf.append(script[i])
         i += 1
 
-    # Trailing statement without a closing semicolon
     stmt = "".join(buf).strip()
     if stmt:
         statements.append(stmt)
@@ -387,13 +543,6 @@ def _run_custom_script(
     start_time: float,
     log: LogCallback,
 ) -> MigrationResult:
-    """Execute config["script"] directly against the target database.
-
-    Used when config_type == "custom".  The script may contain multiple
-    statements separated by semicolons; each non-empty statement is executed
-    in its own transaction so that a failure in one statement is isolated and
-    reported clearly.
-    """
     config_name = config.get("config_name", "custom")
     script: str = (config.get("script") or "").strip()
 
@@ -408,13 +557,9 @@ def _run_custom_script(
             error_message=msg,
         )
 
-    # Split on semicolons, respecting dollar-quoted blocks (DO $$ ... $$)
     statements = _split_sql_statements(script)
     log(f"[{config_name}] Running custom script ({len(statements)} statement(s))", "📝")
 
-    # Use AUTOCOMMIT so that DO $$ ... COMMIT ... $$ blocks can manage their
-    # own transactions without hitting "invalid transaction termination".
-    # Also disable statement_timeout so long-running scripts are not cancelled.
     rows_affected = 0
     with tgt_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
         conn.execute(text("SET statement_timeout = 0"))
@@ -458,11 +603,6 @@ def _run_custom_script(
 def _prepare_select_query(
     config: dict, source_table: str, src_db_type: str, log: LogCallback
 ) -> tuple[str, dict]:
-    """
-    Determine the SELECT query and (possibly) remap config mappings.
-
-    Returns (select_query, updated_config).
-    """
     generate_sql = (config.get("generate_sql") or "").strip()
 
     if generate_sql:
@@ -481,13 +621,6 @@ def _prepare_select_query(
 
 
 def _count_source_rows(engine, select_query: str, source_table: str) -> int:
-    """Count rows from the actual SELECT query (subquery), fallback to table count.
-
-    When generate_sql has JOINs or WHERE filters, the result count differs
-    from the raw source table count. Using the real query ensures accurate
-    progress reporting via total_records_in_config.
-    """
-    # Try counting from the actual query first (accurate for filtered/joined queries)
     try:
         with engine.connect() as conn:
             count_sql = f"SELECT COUNT(*) FROM ({select_query}) AS _src_count"
@@ -495,7 +628,6 @@ def _count_source_rows(engine, select_query: str, source_table: str) -> int:
             return result.scalar() or 0
     except Exception:
         pass
-    # Fallback: raw table count (when subquery wrapping fails, e.g. MSSQL TOP clause)
     try:
         with engine.connect() as conn:
             result = conn.execute(
@@ -504,6 +636,27 @@ def _count_source_rows(engine, select_query: str, source_table: str) -> int:
             return result.scalar() or 0
     except Exception:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Batch processing — cursor-based pagination (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+def _load_last_seen_pk(checkpoint: dict | None, config_name: str) -> tuple | None:
+    """Extract last_seen_pk from checkpoint for cursor-based resume."""
+    if not checkpoint:
+        return None
+    pk_list = checkpoint.get("last_seen_pk")
+    if pk_list and isinstance(pk_list, list) and len(pk_list) > 0:
+        return tuple(pk_list)
+    return None
+
+
+def _check_shutdown(shutdown_event: threading.Event | None) -> None:
+    """Raise MigrationInterrupted if shutdown is requested."""
+    if shutdown_event and shutdown_event.is_set():
+        raise MigrationInterrupted("Shutdown requested")
 
 
 def _process_batches(
@@ -523,25 +676,114 @@ def _process_batches(
     progress_callback,
     checkpoint_callback,
     batch_insert_callback,
+    shutdown_event: threading.Event | None = None,
+    job_id: str | None = None,
+    insert_strategy: str = "append",
+    tgt_pk_columns: list[str] | None = None,
 ) -> tuple[int, int, str]:
     """
-    Iterate over source data in batches and insert into target.
+    Iterate over source data in cursor-paginated batches and insert into target.
 
     Returns (total_rows_processed, batch_count, error_message).
-    error_message is empty string on success.
     """
-    data_iterator = pd.read_sql(
-        select_query, src_engine, chunksize=batch_size, coerce_float=False
-    )
-    total_rows = 0
-    batch_num = 0
-    error_message = ""
+    source_table = config.get("source", {}).get("table", "")
 
-    for df_batch in data_iterator:
-        batch_num += 1
+    config_pk = config.get("pk_columns")
+    pk_columns = config_pk if config_pk else _detect_pk_columns(src_engine, source_table)
+
+    if pk_columns is None:
+        log(
+            "WARNING: No PK or unique index detected on source table. "
+            "Falling back to OFFSET-based pagination (non-deterministic for resume). "
+            "Consider adding a PK, unique index, or specify 'pk_columns' in the config.",
+            "⚠️",
+        )
+        return _process_batches_offset(
+            src_engine=src_engine,
+            tgt_engine=tgt_engine,
+            select_query=select_query,
+            config=config,
+            config_name=config_name,
+            target_table=target_table,
+            target_conn_config=target_conn_config,
+            batch_size=batch_size,
+            skip_batches=skip_batches,
+            test_mode=test_mode,
+            total_source_rows=total_source_rows,
+            log=log,
+            progress_callback=progress_callback,
+            checkpoint_callback=checkpoint_callback,
+            batch_insert_callback=batch_insert_callback,
+            shutdown_event=shutdown_event,
+            job_id=job_id,
+            insert_strategy=insert_strategy,
+            tgt_pk_columns=tgt_pk_columns,
+        )
+
+    checkpoint = load_checkpoint(config_name)
+    last_seen_pk = _load_last_seen_pk(checkpoint, config_name)
+
+    if skip_batches > 0 and last_seen_pk is None:
+        log(
+            f"Checkpoint has skip_batches={skip_batches} but no last_seen_pk. "
+            f"OFFSET skip will be applied before cursor pagination begins.",
+            "⚠️",
+        )
+
+    pagination_fn = select_pagination_builder(src_engine)
+
+    total_rows = checkpoint.get("rows_processed", 0) if checkpoint else 0
+    batch_num = checkpoint.get("last_batch", 0) if checkpoint else 0
+
+    adaptive_batch_size = batch_size
+    first_batch = True
+
+    log(
+        f"Cursor-based pagination on PK: {pk_columns}"
+        + (f" | Resuming from PK={last_seen_pk}" if last_seen_pk else ""),
+        "🔍",
+    )
+
+    while True:
+        _check_shutdown(shutdown_event)
+
+        _check_memory(log, batch_num + 1)
+
+        query, params = pagination_fn(
+            select_query, pk_columns, last_seen_pk, adaptive_batch_size
+        )
+
+        try:
+            df_batch = _read_batch_with_retry(
+                src_engine, query, params, batch_num + 1, log
+            )
+        except Exception as e:
+            save_checkpoint(config_name, batch_num, total_rows, last_seen_pk=last_seen_pk)
+            return total_rows, batch_num, f"Source read error: {e}"
+
+        if df_batch.empty:
+            break
+
         rows_in_batch = len(df_batch)
 
-        if batch_num <= skip_batches:
+        try:
+            last_seen_pk = tuple(df_batch[pk].iloc[-1] for pk in pk_columns)
+        except (KeyError, IndexError):
+            log(
+                f"WARNING: PK column missing from batch DataFrame. "
+                f"Expected PK columns: {pk_columns}, got: {list(df_batch.columns)}",
+                "⚠️",
+            )
+            save_checkpoint(config_name, batch_num, total_rows)
+            return total_rows, batch_num, (
+                f"PK column missing from query result. "
+                f"Expected: {pk_columns}, got: {list(df_batch.columns)}"
+            )
+
+        batch_num += 1
+
+        if skip_batches > 0:
+            skip_batches -= 1
             total_rows += rows_in_batch
             log(f"Batch {batch_num}: Skipped (checkpoint)", "⏭️")
             continue
@@ -558,10 +800,214 @@ def _process_batches(
             log=log,
             progress_callback=progress_callback,
             checkpoint_callback=checkpoint_callback,
+            insert_strategy=insert_strategy,
+            tgt_pk_columns=tgt_pk_columns,
         )
 
         if outcome is None:
-            # transform failed — skip this batch entirely
+            del df_batch
+            gc.collect()
+            continue
+
+        total_rows = outcome.rows_cumulative
+
+        _safe_notify_callback(
+            batch_insert_callback,
+            config_name=config_name,
+            batch_round=batch_num - 1,
+            rows_in_batch=outcome.rows_in_batch if outcome.success else 0,
+            rows_cumulative=outcome.rows_cumulative,
+            batch_size=adaptive_batch_size,
+            total_records_in_config=total_source_rows,
+            status="success" if outcome.success else "failed",
+            error_message=outcome.error_message or None,
+            transformation_warnings=outcome.warnings_json,
+        )
+
+        if not outcome.success:
+            save_checkpoint(config_name, batch_num - 1, total_rows, last_seen_pk=last_seen_pk)
+            return total_rows, batch_num, outcome.error_message
+
+        save_checkpoint(config_name, batch_num, total_rows, last_seen_pk=last_seen_pk)
+
+        if job_id:
+            try:
+                _write_heartbeat(job_id, config_name, batch_num)
+            except Exception:
+                pass
+
+        if checkpoint_callback:
+            checkpoint_callback(config_name, batch_num, total_rows)
+        if progress_callback:
+            progress_callback(batch_num, total_rows, rows_in_batch)
+
+        log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
+
+        if first_batch:
+            try:
+                batch_mem_mb = df_batch.memory_usage(deep=True).sum() / (1024 * 1024)
+                if batch_mem_mb > MEMORY_PER_BATCH_TARGET_MB:
+                    scale = MEMORY_PER_BATCH_TARGET_MB / batch_mem_mb
+                    adaptive_batch_size = max(100, int(batch_size * scale))
+                    log(
+                        f"Batch 1 memory: {batch_mem_mb:.0f}MB — "
+                        f"reducing batch_size from {batch_size} to {adaptive_batch_size}",
+                        "⚠️",
+                    )
+            except Exception:
+                pass
+            first_batch = False
+
+        if batch_num > 1 and batch_num % REEVAL_INTERVAL == 0:
+            try:
+                batch_mem_mb = df_batch.memory_usage(deep=True).sum() / (1024 * 1024)
+                if batch_mem_mb > MEMORY_PER_BATCH_TARGET_MB * 1.5:
+                    scale = MEMORY_PER_BATCH_TARGET_MB / batch_mem_mb
+                    adaptive_batch_size = max(100, int(adaptive_batch_size * scale))
+                    log(
+                        f"Batch {batch_num}: memory {batch_mem_mb:.0f}MB — "
+                        f"reducing batch_size to {adaptive_batch_size}",
+                        "⚠️",
+                    )
+                elif batch_mem_mb < MEMORY_PER_BATCH_TARGET_MB * 0.3:
+                    new_size = min(batch_size, int(adaptive_batch_size * 1.5))
+                    if new_size != adaptive_batch_size:
+                        adaptive_batch_size = new_size
+                        log(
+                            f"Batch {batch_num}: memory {batch_mem_mb:.0f}MB — "
+                            f"increasing batch_size to {adaptive_batch_size}",
+                            "ℹ️",
+                        )
+            except Exception:
+                pass
+
+        del df_batch
+        gc.collect()
+
+        if test_mode:
+            log("Stopping after first batch (Test Mode)", "🛑")
+            break
+
+    return total_rows, batch_num, ""
+
+
+# ---------------------------------------------------------------------------
+# OFFSET fallback for tables without PK
+# ---------------------------------------------------------------------------
+
+
+def _process_batches_offset(
+    *,
+    src_engine,
+    tgt_engine,
+    select_query: str,
+    config: dict,
+    config_name: str,
+    target_table: str,
+    target_conn_config: dict,
+    batch_size: int,
+    skip_batches: int,
+    test_mode: bool,
+    total_source_rows: int,
+    log: LogCallback,
+    progress_callback,
+    checkpoint_callback,
+    batch_insert_callback,
+    shutdown_event: threading.Event | None = None,
+    job_id: str | None = None,
+    insert_strategy: str = "append",
+    tgt_pk_columns: list[str] | None = None,
+) -> tuple[int, int, str]:
+    """Fallback: OFFSET-based pagination for tables without PK.
+
+    For PostgreSQL source: uses ctid for deterministic physical ordering.
+    For MSSQL source: uses ROW_NUMBER() OVER (ORDER BY (SELECT 0)) surrogate key.
+    For other databases: raises ValueError.
+    """
+    dialect = src_engine.dialect.name if hasattr(src_engine, "dialect") else ""
+
+    if dialect == "postgresql":
+        wrapped = (
+            f"SELECT *, ctid FROM ({select_query}) AS _offset_src "
+            f"ORDER BY ctid LIMIT :batch_size OFFSET :offset"
+        )
+    elif dialect == "mssql":
+        wrapped = (
+            f"SELECT * FROM ("
+            f"  SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT 0)) AS _surrogate_row_num "
+            f"  FROM ({select_query}) AS _offset_src"
+            f") AS _offset_paged "
+            f"WHERE _surrogate_row_num > :offset "
+            f"AND _surrogate_row_num <= :offset + :batch_size "
+            f"ORDER BY _surrogate_row_num"
+        )
+    else:
+        raise ValueError(
+            f"Cannot paginate table without PK or unique index on '{dialect}'. "
+            f"Specify 'pk_columns' in the config or add a primary key to the source table."
+        )
+
+    checkpoint = load_checkpoint(config_name)
+    total_rows = checkpoint.get("rows_processed", 0) if checkpoint else 0
+    start_batch = checkpoint.get("last_batch", 0) if checkpoint else 0
+
+    offset = max(skip_batches, start_batch) * batch_size
+    batch_num = max(skip_batches, start_batch)
+
+    log(
+        f"OFFSET-based pagination ({dialect}) starting at offset={offset}",
+        "⚠️",
+    )
+
+    while True:
+        _check_shutdown(shutdown_event)
+        _check_memory(log, batch_num + 1)
+
+        try:
+            df_batch = _read_batch_with_retry(
+                src_engine,
+                wrapped,
+                {"batch_size": batch_size, "offset": offset},
+                batch_num + 1,
+                log,
+            )
+        except Exception as e:
+            save_checkpoint(config_name, batch_num, total_rows)
+            return total_rows, batch_num, f"Source read error: {e}"
+
+        if df_batch.empty:
+            break
+
+        rows_in_batch = len(df_batch)
+
+        if "ctid" in df_batch.columns:
+            df_batch = df_batch.drop(columns=["ctid"])
+
+        if "_surrogate_row_num" in df_batch.columns:
+            df_batch = df_batch.drop(columns=["_surrogate_row_num"])
+
+        batch_num += 1
+
+        outcome = _process_single_batch(
+            df_batch=df_batch,
+            batch_num=batch_num,
+            config=config,
+            config_name=config_name,
+            target_table=target_table,
+            target_conn_config=target_conn_config,
+            tgt_engine=tgt_engine,
+            total_rows=total_rows,
+            log=log,
+            progress_callback=progress_callback,
+            checkpoint_callback=checkpoint_callback,
+            insert_strategy=insert_strategy,
+            tgt_pk_columns=tgt_pk_columns,
+        )
+
+        if outcome is None:
+            del df_batch
+            gc.collect()
+            offset += batch_size
             continue
 
         total_rows = outcome.rows_cumulative
@@ -580,14 +1026,38 @@ def _process_batches(
         )
 
         if not outcome.success:
-            error_message = outcome.error_message
-            break
+            save_checkpoint(config_name, batch_num - 1, total_rows)
+            return total_rows, batch_num, outcome.error_message
+
+        save_checkpoint(config_name, batch_num, total_rows)
+
+        if job_id:
+            try:
+                _write_heartbeat(job_id, config_name, batch_num)
+            except Exception:
+                pass
+
+        if checkpoint_callback:
+            checkpoint_callback(config_name, batch_num, total_rows)
+        if progress_callback:
+            progress_callback(batch_num, total_rows, rows_in_batch)
+
+        log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
+
+        offset += batch_size
+        del df_batch
+        gc.collect()
 
         if test_mode:
             log("Stopping after first batch (Test Mode)", "🛑")
             break
 
-    return total_rows, batch_num, error_message
+    return total_rows, batch_num, ""
+
+
+# ---------------------------------------------------------------------------
+# Single batch processing (with retry)
+# ---------------------------------------------------------------------------
 
 
 def _process_single_batch(
@@ -603,18 +1073,13 @@ def _process_single_batch(
     log: LogCallback,
     progress_callback,
     checkpoint_callback,
+    insert_strategy: str = "append",
+    tgt_pk_columns: list[str] | None = None,
 ) -> Optional[_BatchOutcome]:
-    """
-    Clean, transform, and insert a single batch.
-
-    Returns:
-        _BatchOutcome on success or insert failure (always notify callback).
-        None if transformation fails (skip batch, no callback needed).
-    """
+    """Clean, transform, and insert a single batch with retry."""
     rows_in_batch = len(df_batch)
     df_batch = clean_dataframe(df_batch)
 
-    # --- Transform ---
     try:
         df_batch, bit_columns, val_warnings = transform_batch(df_batch, config)
     except Exception as e:
@@ -627,18 +1092,18 @@ def _process_single_batch(
     for w in val_warnings:
         log(f"Batch {batch_num} — {w}", "⚠️")
 
-    # --- Insert ---
     try:
         dtype_map = build_dtype_map(
             bit_columns, df_batch, target_conn_config.get("db_type", "")
         )
-        batch_insert(df_batch, target_table, tgt_engine, dtype_map)
+        _insert_with_retry(
+            df_batch, target_table, tgt_engine, dtype_map,
+            batch_num, log, insert_strategy, tgt_pk_columns,
+        )
     except Exception as e:
         user_message = _build_user_friendly_error(
             e, df_batch, config, tgt_engine, target_table, batch_num, log
         )
-
-        save_checkpoint(config_name, batch_num - 1, total_rows)
 
         return _BatchOutcome(
             success=False,
@@ -648,19 +1113,12 @@ def _process_single_batch(
             warnings_json=warnings_json,
         )
 
-    # --- Success bookkeeping ---
     total_rows += rows_in_batch
-    # Save checkpoint every N batches to reduce disk I/O.
-    # Error path (above) always saves so resume works correctly.
-    if batch_num % _CHECKPOINT_INTERVAL == 0:
-        save_checkpoint(config_name, batch_num, total_rows)
 
     if checkpoint_callback:
         checkpoint_callback(config_name, batch_num, total_rows)
     if progress_callback:
         progress_callback(batch_num, total_rows, rows_in_batch)
-
-    log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
 
     return _BatchOutcome(
         success=True,
@@ -671,18 +1129,86 @@ def _process_single_batch(
 
 
 # ---------------------------------------------------------------------------
+# Retry with backoff (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+def _insert_with_retry(
+    df: pd.DataFrame,
+    target_table: str,
+    tgt_engine,
+    dtype_map: dict,
+    batch_num: int,
+    log: LogCallback,
+    insert_strategy: str = "append",
+    tgt_pk_columns: list[str] | None = None,
+) -> None:
+    """Insert a batch with retry on transient errors. Disposes stale pool."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            batch_insert(
+                df, target_table, tgt_engine, dtype_map,
+                insert_strategy=insert_strategy,
+                pk_columns=tgt_pk_columns,
+            )
+            return
+        except (OperationalError, DisconnectionError, InterfaceError) as e:
+            if attempt == MAX_RETRIES - 1:
+                raise
+            delay = RETRY_DELAYS[attempt]
+            log(
+                f"Batch {batch_num}: transient error, retry {attempt + 1}/{MAX_RETRIES} "
+                f"in {delay}s: {e}",
+                "⚠️",
+            )
+            time.sleep(delay)
+            tgt_engine.dispose()
+        except Exception:
+            raise
+
+
+def _read_batch_with_retry(
+    src_engine, query, params: dict, batch_num: int, log: LogCallback,
+    max_retries: int = 3,
+) -> pd.DataFrame:
+    """Read a batch from source with retry on transient errors.
+
+    Accepts either a plain string or sqlalchemy.text() clause.
+    """
+    if isinstance(query, str):
+        query = text(query)
+    for attempt in range(max_retries):
+        try:
+            with src_engine.connect() as conn:
+                df = pd.read_sql(query, conn, params=params, coerce_float=False)
+            return df
+        except (OperationalError, DisconnectionError) as e:
+            if attempt == max_retries - 1:
+                raise
+            delay = RETRY_DELAYS[attempt]
+            log(
+                f"Batch {batch_num}: source read error, retry {attempt + 1}/{max_retries}: {e}",
+                "⚠️",
+            )
+            time.sleep(delay)
+            src_engine.dispose()
+        except Exception:
+            raise
+    return pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
 # Callback safety wrapper
 # ---------------------------------------------------------------------------
 
 
 def _safe_notify_callback(callback, **kwargs) -> None:
-    """Call batch_insert_callback if provided, swallowing errors."""
     if not callback:
         return
     try:
         callback(**kwargs)
     except Exception:
-        pass  # callback failure must never break the migration
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -699,12 +1225,6 @@ def _build_user_friendly_error(
     batch_num: int,
     log: LogCallback,
 ) -> str:
-    """
-    Build a human-readable error message for insert failures.
-
-    For truncation errors: identifies ALL offending columns with details.
-    For other errors: strips SQL noise and adds batch context.
-    """
     error_str = str(error)
     is_truncation = (
         "Truncation" in type(error).__name__ or "truncat" in error_str.lower()
@@ -715,11 +1235,9 @@ def _build_user_friendly_error(
         log(f"Insert Failed at Batch {batch_num}: {short_err}", "❌")
         return short_err
 
-    # --- Truncation: find all offending columns via direct df ↔ schema scan ---
     details = _find_all_truncated_columns(df, tgt_engine, target_table)
 
     if not details:
-        # Schema scan failed — surface what we can from the raw error + df
         return _build_truncation_fallback(error_str, df, batch_num, log)
 
     log(
@@ -753,18 +1271,9 @@ def _build_user_friendly_error(
 def _build_truncation_fallback(
     error_str: str, df: pd.DataFrame, batch_num: int, log: LogCallback
 ) -> str:
-    """
-    Fallback when schema inspection fails: extract the VARCHAR limit from the
-    error string and find the longest string column in the batch to point the
-    user at the most likely offender.
-    """
-    import re as _re2
-
-    # Extract VARCHAR limit from psycopg2: "character varying(10)"
-    limit_match = _re2.search(r"character varying\((\d+)\)", error_str)
+    limit_match = _re.search(r"character varying\((\d+)\)", error_str)
     target_limit = int(limit_match.group(1)) if limit_match else None
 
-    # Find the string column in df with the longest actual value
     best_col: str | None = None
     best_max: int = 0
     best_sample: str = ""
@@ -928,19 +1437,12 @@ def _init_hn_counter(
             f"(next: HN{str(start_from + 1).zfill(9)})",
             "🔢",
         )
-        break  # Only one GENERATE_HN per config
+        break
 
 
 def _find_all_truncated_columns(
     df: pd.DataFrame, tgt_engine, target_table: str,
 ) -> list[_TruncationDetail]:
-    """
-    Scan every df column directly against the target schema's VARCHAR limits.
-
-    After transform_batch(), df columns are already target column names, so we
-    compare df columns ↔ target schema without needing config mappings.
-    Case-insensitive matching handles PostgreSQL's lowercase normalization.
-    """
     results: list[_TruncationDetail] = []
     try:
         tgt_insp = sqlalchemy.inspect(tgt_engine)
@@ -951,7 +1453,6 @@ def _find_all_truncated_columns(
         except Exception:
             raw_cols = tgt_insp.get_columns(target_table)
 
-        # lower(col_name) → (actual_col_name, type)
         tgt_cols_lower: dict[str, tuple[str, object]] = {
             c["name"].lower(): (c["name"], c["type"]) for c in raw_cols
         }
@@ -993,7 +1494,6 @@ def _verify_post_migration(
     tgt_engine, target_table: str, pre_count: int, total_processed: int,
     log: LogCallback,
 ) -> int:
-    """Returns post_count, or -1 if the verify query fails (non-fatal)."""
     try:
         quoted = _quote_identifier(target_table)
         with tgt_engine.connect() as conn:

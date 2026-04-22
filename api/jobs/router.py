@@ -16,7 +16,10 @@ Socket.IO events emitted during execution:
 
 from __future__ import annotations
 
+from fastapi import APIRouter, Request
+
 from api.base.controller import BaseController
+from api.base import json_api
 from api.jobs.schemas import CreateJobSchema, UpdateJobSchema, JobCreatedResponse
 from api.jobs.service import JobsService
 
@@ -34,6 +37,17 @@ class JobsController(BaseController):
 
     def _make_create_response(self, resource_type: str, data: dict, url: str):
         return JobCreatedResponse(**data)
+
+    def _register_pre_routes(self) -> None:
+        svc = self.service
+
+        def list_pipeline_runs(job_id: str, request: Request):
+            rows = svc.find_pipeline_runs(job_id)
+            return json_api.create_collection_response(
+                "pipeline_runs", rows, str(request.url.path)
+            )
+
+        self.router.get("/{job_id}/pipeline-runs")(list_pipeline_runs)
 
 
 def get_jobs_router():

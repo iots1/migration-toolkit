@@ -9,6 +9,7 @@ from api.base.query_params import QueryParams
 from repositories import pipeline_repo
 from repositories import pipeline_node_repo
 from repositories import pipeline_edge_repo
+from repositories import job_repo
 from models.pipeline_config import (
     PipelineRecord,
     PipelineNodeRecord,
@@ -91,6 +92,15 @@ class PipelinesService(BaseService):
         self.find_by_id(id)
         ok, msg = self.execute_db_operation(lambda: pipeline_repo.delete(id))
         self._assert_success(ok, msg)
+
+    def find_jobs(self, pipeline_id: str) -> list[dict]:
+        """Get all jobs for a given pipeline."""
+        try:
+            pid = uuid.UUID(pipeline_id)
+        except ValueError:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=400, detail=f"Invalid UUID: {pipeline_id}")
+        return self.execute_db_operation(lambda: job_repo.get_by_pipeline(pid))
 
     # ------------------------------------------------------------------
     # Private helpers

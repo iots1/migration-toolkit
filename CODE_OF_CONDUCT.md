@@ -53,6 +53,28 @@ from services.transformers import DataTransformer
 from services.transformers import DataTransformer
 ```
 
+### Rule 1.1b: NO API Layer Imports in Services
+
+**Files in `services/` MUST NEVER import from `api/`.** Layer dependencies flow strictly inward:
+
+```
+api/ → services/ → repositories/ → models/
+ ✓   Dependencies flow inward only
+ ✗   NO reverse imports (e.g. services/ MUST NOT import from api/)
+```
+
+When `services/` needs to notify the API layer (e.g. Socket.IO emit), use **callback injection** — the API layer passes a callback function, the service layer calls it without knowing about the API.
+
+```python
+# ✅ CORRECT — callback injection (DIP)
+class PipelineExecutor:
+    def __init__(self, ..., run_event_callback=None):
+        self._run_event_callback = run_event_callback  # Injected by API layer
+
+# ❌ WRONG — service imports from API layer
+from api.socket_manager import emit_from_thread  # Breaks DIP
+```
+
 ### Rule 1.2: Use Repositories for Data Access
 
 **Controllers import from `repositories/`, NOT from `database.py` (legacy facade being removed).**
@@ -66,6 +88,42 @@ from repositories.pipeline_repo import get_list, get_by_name, save as pipeline_s
 # ❌ WRONG - Legacy facade (being removed)
 import database as db
 datasources = db.get_datasources()
+```
+
+### Rule 1.2b: Data Ownership — One Repo, One Table
+
+**Each repository owns exactly ONE database table. A repo MUST NOT query another repo's table.**
+
+```python
+# ✅ CORRECT — job_repo queries only jobs table
+# repositories/job_repo.py
+def get_by_pipeline(pipeline_id: uuid.UUID) -> list[dict]:
+    """Get jobs for a pipeline — queries ONLY jobs table."""
+    ...
+
+# ✅ CORRECT — pipeline_run_repo queries only pipeline_runs table
+# repositories/pipeline_run_repo.py
+def get_by_job(job_id: uuid.UUID) -> list[dict]:
+    """Get pipeline runs for a job — queries ONLY pipeline_runs table."""
+    ...
+
+# ❌ WRONG — job_repo queries pipeline_runs table (violates data ownership)
+# repositories/job_repo.py
+def get_pipeline_runs(job_id: uuid.UUID) -> list[dict]:
+    """WRONG: job_repo has no business querying pipeline_runs table."""
+    # SELECT ... FROM pipeline_runs WHERE job_id = :job_id
+    ...
+```
+
+**Cross-repo lookups** (e.g. "get jobs for pipeline X" or "get pipeline_runs for job Y") go through the **service layer**:
+
+```python
+# ✅ CORRECT — service orchestrates across repos
+class JobsService(BaseService):
+    def find_pipeline_runs(self, job_id: str) -> list[dict]:
+        return self.execute_db_operation(
+            lambda: pipeline_run_repo.get_by_job(jid)  # Uses correct owner
+        )
 ```
 
 ### Rule 1.3: Repository Functions Return Tuples for Mutations
@@ -416,7 +474,111 @@ inject_global_css()
 
 ---
 
-## PostgreSQL-Specific Rules
+## RESTful API Design Rules
+
+### Rule 6.1: OOP-Style Resource URIs (NOT RPC Style)
+
+All endpoints use **resource nouns** — never verb-based action paths.
+
+```
+✅ OOP Style (Resource-Oriented)          ❌ RPC Style (Action-Oriented)
+GET    /api/v1/pipelines                   GET    /api/v1/pipelines/get-all
+GET    /api/v1/pipelines/{id}              GET    /api/v1/pipelines/get-by-id
+GET    /api/v1/pipelines/{id}/nodes        GET    /api/v1/pipelines/get-nodes
+POST   /api/v1/jobs                        POST   /api/v1/jobs/trigger
+```
+
+### Rule 6.2: Single GET Endpoint + Query Params
+
+Use **one GET endpoint with query parameters** for filtering, searching, and sorting. Never create separate endpoints for variations.
+
+```
+✅ Single endpoint + query params                         ❌ Multiple endpoints
+GET /api/v1/pipelines?filter=name||$eq||MyPipeline        GET /api/v1/pipelines/get-by-name
+GET /api/v1/pipelines?filter=status||$eq||running         GET /api/v1/pipelines/get-running
+GET /api/v1/jobs?filter=pipeline_id||$eq||{uuid}          GET /api/v1/pipelines/{id}/jobs
+GET /api/v1/datasources?s=PostgreSQL                      GET /api/v1/datasources/search
+GET /api/v1/pipeline-runs?filter=job_id||$eq||{uuid}      GET /api/v1/jobs/{id}/pipeline-runs
+```
+
+**Available query params:**
+
+| Param    | Format                              | Example                                      |
+|----------|-------------------------------------|----------------------------------------------|
+| `filter` | `{field}\|\|$op\|\|{value}`         | `filter=name\|\|$eq\|\|MyPipeline`            |
+| `s`      | Full-text search (shorthand)        | `s=postgres`                                  |
+| `sort`   | `{field}:{direction}`               | `sort=created_at:desc`                        |
+| `page`   | Page number                         | `page=2`                                      |
+| `limit`  | Items per page                      | `limit=25`                                    |
+
+**Supported filter operators:** `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$like`, `$ilike`, `$in`, `$isnull`
+
+### Rule 6.3: Sub-Resources Only for Direct Ownership
+
+Sub-resources (`/{parent_id}/{child}`) are acceptable **only when the child entity directly belongs to the parent** (1:N ownership, not just a FK filter).
+
+```
+✅ Sub-resource (direct ownership — child cannot exist without parent)
+GET /api/v1/pipelines/{id}/nodes          ← pipeline_nodes belongs to pipeline
+GET /api/v1/pipelines/{id}/edges          ← pipeline_edges belongs to pipeline
+GET /api/v1/configs/{id}/histories        ← config_histories belongs to config
+GET /api/v1/configs/{id}/versions/{ver}   ← specific version of a config
+
+❌ Sub-resource when relationship is just a FK filter — use query params instead
+GET /api/v1/pipelines/{id}/jobs          ← jobs have their own lifecycle, not owned by pipeline
+GET /api/v1/jobs/{id}/pipeline-runs      ← pipeline_runs have their own lifecycle, not owned by job
+```
+
+```python
+# ✅ CORRECT — use filter for FK lookups
+GET /api/v1/jobs?filter=pipeline_id||$eq||{uuid}
+GET /api/v1/pipeline-runs?filter=job_id||$eq||{uuid}
+
+# ❌ WRONG — sub-resource for non-ownership FK relationship
+GET /api/v1/pipelines/{id}/jobs
+GET /api/v1/jobs/{id}/pipeline-runs
+```
+
+### Rule 6.4: PATCH Only for Partial Updates and State Transitions
+
+`PATCH` on a sub-resource is acceptable **only** for partial updates or state transitions where a full `PUT` would be wasteful. This is the **only exception** to OOP-style URIs — use sparingly.
+
+```
+✅ ACCEPTABLE — Partial update / state transition
+PATCH /api/v1/jobs/{id}/status          { "status": "cancelled" }
+PATCH /api/v1/pipeline-runs/{id}/status { "status": "failed" }
+
+❌ WRONG — RPC-style action disguised as PATCH
+PATCH /api/v1/jobs/{id}/cancel
+PATCH /api/v1/pipelines/{id}/run
+```
+
+### Rule 6.5: All Responses Follow JSON:API Format
+
+Every API response MUST use the standard JSON:API envelope:
+
+```json
+{
+  "data": { "type": "resource_type", "id": "uuid", "attributes": { ... } },
+  "links": { "self": "/api/v1/resource/uuid" },
+  "meta": { "timestamp": "..." },
+  "status": { "code": 200000, "message": "Request Succeeded" }
+}
+```
+
+Use `api/base/json_api.py` helpers: `create_success_response`, `create_collection_response`, `create_paginated_response`, `create_created_response`.
+
+```python
+# ✅ CORRECT — use json_api helpers
+from api.base import json_api
+
+def list_items(request: Request):
+    return json_api.create_collection_response("items", data, str(request.url.path))
+
+# ❌ WRONG — raw dict response
+def list_items():
+    return {"data": items}
+```
 
 ### Rule 5.1: Use Thread-Safe Connection Managers
 
@@ -526,9 +688,19 @@ Before merging any code, verify:
 ### Architecture
 
 - [ ] **Model Layer**: No `import streamlit` in `models/`, `repositories/`, `services/`, `protocols/`
+- [ ] **Layer Dependency**: No reverse imports — `services/` MUST NOT import from `api/` (use callback injection)
+- [ ] **Data Ownership**: Each repo queries ONLY its own table — cross-repo lookups go through service layer
 - [ ] **Repository Layer**: All DB access via `repositories/`, NOT `database.py` facade
 - [ ] **View Layer**: No repository imports, no `PageState.set()`, pure rendering only
 - [ ] **Controller Layer**: All state mutations happen here, all data fetches via repositories
+
+### RESTful API Design
+
+- [ ] **OOP URIs**: All endpoints use resource nouns, no verb-based paths (no `/get-all`, `/trigger`)
+- [ ] **Query Params**: Filtering/searching uses `?filter=`, `?s=`, `?sort=` — no separate endpoints for variations
+- [ ] **Sub-Resources**: `/{parent}/{child}` only for direct ownership, not FK filters
+- [ ] **PATCH**: Only for partial updates/state transitions, not RPC-style actions
+- [ ] **JSON:API Format**: All responses wrapped with `json_api.create_*_response()`
 
 ### MVC Pattern
 
@@ -627,7 +799,7 @@ The three rules of MVC here:
 
 ---
 
-**Last Updated**: 2026-04-10
+**Last Updated**: 2026-04-22
 **Status**: ✅ Active — enforced on all new code
-**Architecture**: PostgreSQL + Clean Architecture + SOLID + MVC
+**Architecture**: PostgreSQL + Clean Architecture + SOLID + MVC + REST API
 **Migration**: All 10 phases complete

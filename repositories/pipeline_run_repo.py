@@ -138,3 +138,13 @@ def get_running_runs() -> list[dict]:
             text(f"SELECT {_COLUMNS} FROM pipeline_runs WHERE status = 'running' ORDER BY created_at DESC")
         )
         return rows_to_dicts(result)
+
+
+def get_by_job(job_id: uuid.UUID) -> list[dict]:
+    """Get all batch records for a specific job, ordered by created_at."""
+    with get_transaction() as conn:
+        result = conn.execute(
+            text(f"SELECT {_COLUMNS} FROM pipeline_runs WHERE job_id = :job_id ORDER BY created_at ASC"),
+            {"job_id": job_id},
+        )
+        return rows_to_dicts(result)

@@ -8,6 +8,7 @@ that catches PostgreSQL errors and maps them to HTTP exceptions.
 from __future__ import annotations
 
 import math
+import traceback as _tb
 from abc import ABC, abstractmethod
 from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
@@ -72,10 +73,10 @@ class BaseService(ABC):
             )
         except HTTPException:
             raise
-        except Exception:
+        except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"An unexpected error occurred. Please try again.",
+                detail=f"{type(e).__name__}: {e}\n\n{_tb.format_exc()}",
             )
 
     def _apply_query_params(self, data: list[dict], params: QueryParams) -> list[dict]:

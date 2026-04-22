@@ -15,6 +15,7 @@ from api.socket_manager import emit_from_thread
 from models.job import JobRecord, JobUpdateRecord
 from models.pipeline_config import PipelineConfig, PipelineRunRecord
 from repositories import pipeline_repo, job_repo
+from repositories import pipeline_run_repo
 from repositories.datasource_repo import get_by_id as ds_get_by_id
 from services.pipeline_service import (
     PipelineExecutor,
@@ -65,6 +66,17 @@ class JobsService(BaseService):
         result = self.execute_db_operation(lambda: job_repo.get_by_id(job_id))
         self._assert_found(result, id)
         return self._sanitize_response(result)
+
+    def find_pipeline_runs(self, job_id: str) -> list[dict]:
+        """Get all pipeline_run records for a given job."""
+        try:
+            jid = uuid.UUID(job_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Invalid UUID: {job_id}")
+        rows = self.execute_db_operation(
+            lambda: pipeline_run_repo.get_by_job(jid)
+        )
+        return rows
 
     def update(self, id: str, data: dict) -> dict:
         raise HTTPException(status_code=405, detail="Jobs cannot be updated")
@@ -256,6 +268,10 @@ class JobsService(BaseService):
         config_repo = ConfigRepositoryAdapter()
         run_repo = PipelineRunRepositoryAdapter(job_id=job_id)
         shutdown_event = threading.Event()
+
+        def run_event_callback(event_name: str, data: dict) -> None:
+            emit_from_thread(event_name, data)
+
         executor = PipelineExecutor(
             pipeline=pc,
             source_conn_config={},
@@ -264,6 +280,7 @@ class JobsService(BaseService):
             run_repo=run_repo,
             batch_event_callback=batch_event_callback,
             completion_callback=completion_callback,
+            run_event_callback=run_event_callback,
             shutdown_event=shutdown_event,
             job_id=job_id_str,
         )

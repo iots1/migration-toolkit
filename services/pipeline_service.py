@@ -149,13 +149,14 @@ class PipelineExecutor:
         pipeline: PipelineConfig,
         source_conn_config: dict,
         target_conn_config: dict,
-        config_repo: ConfigRepository,
+        config_repo: PipelineRepository,
         run_repo: PipelineRunRepository,
         log_callback=None,
         progress_callback=None,
         run_id: str | None = None,
         batch_event_callback=None,
         completion_callback=None,
+        run_event_callback=None,
         shutdown_event: threading.Event | None = None,
         job_id: str | None = None,
     ) -> None:
@@ -175,6 +176,9 @@ class PipelineExecutor:
                                    Called after every batch — used for socket.io + DB update.
             completion_callback:   fn(run_id, status, total_rows)
                                    Called once when the whole pipeline finishes.
+            run_event_callback:    fn(event_name: str, data: dict)
+                                   Called for pipeline_run lifecycle events (batch/completed/failed).
+                                   Injected by API layer to emit Socket.IO events (DIP).
             shutdown_event:        threading.Event to signal graceful shutdown between batches.
             job_id:                UUID string of the associated job record.
         """
@@ -188,6 +192,7 @@ class PipelineExecutor:
         self._run_id = run_id
         self._batch_event_callback = batch_event_callback
         self._completion_callback = completion_callback
+        self._run_event_callback = run_event_callback
         self._shutdown_event = shutdown_event
         self._job_id = job_id
         self._migration_logger: MigrationLogger | None = None
@@ -480,6 +485,22 @@ class PipelineExecutor:
                 self._completion_callback(
                     self._run_id, result.status, result.total_rows
                 )
+            if self._run_event_callback:
+                try:
+                    self._run_event_callback(
+                        "pipeline_run:completed",
+                        {
+                            "run_id": self._run_id,
+                            "job_id": self._job_id,
+                            "pipeline_id": self._pipeline.id,
+                            "status": result.status,
+                            "total_rows": result.total_rows,
+                            "total_duration": result.total_duration,
+                            "steps": self._steps_to_json(result.steps),
+                        },
+                    )
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[JOB ERROR] Pipeline '{self._pipeline.name}' crashed: {e}")
             import traceback as _tb
@@ -494,6 +515,20 @@ class PipelineExecutor:
                 print(f"[JOB ERROR] Failed to update run status: {repo_err}")
             if self._completion_callback:
                 self._completion_callback(self._run_id, "failed", 0)
+            if self._run_event_callback:
+                try:
+                    self._run_event_callback(
+                        "pipeline_run:failed",
+                        {
+                            "run_id": self._run_id,
+                            "job_id": self._job_id,
+                            "pipeline_id": self._pipeline.id,
+                            "status": "failed",
+                            "error_message": str(e),
+                        },
+                    )
+                except Exception:
+                    pass
         finally:
             if result is not None and result.status == "completed":
                 clear_pipeline_checkpoint(self._pipeline.name)
@@ -837,7 +872,30 @@ class PipelineExecutor:
             )
 
             # Save to database
-            self._run_repo.save(record)
+            saved_id = self._run_repo.save(record)
+
+            # Emit pipeline_run:batch via callback (injected by API layer)
+            if self._run_event_callback:
+                try:
+                    self._run_event_callback(
+                        "pipeline_run:batch",
+                        {
+                            "id": str(saved_id),
+                            "pipeline_id": str(pipeline_id),
+                            "job_id": str(job_id) if job_id else None,
+                            "config_name": config_name,
+                            "batch_round": batch_round,
+                            "rows_in_batch": rows_in_batch,
+                            "rows_cumulative": rows_cumulative,
+                            "batch_size": batch_size,
+                            "total_records_in_config": total_records_in_config,
+                            "status": status,
+                            "error_message": error_message,
+                            "transformation_warnings": transformation_warnings,
+                        },
+                    )
+                except Exception:
+                    pass
 
             # Also fire batch_event_callback if set (for socket.io, etc.)
             if self._batch_event_callback and self._run_id:

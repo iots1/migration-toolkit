@@ -47,8 +47,8 @@ def update(job_id: uuid.UUID, patch: JobUpdateRecord) -> None:
                 SET status = :status,
                     error_message = COALESCE(:error_message, error_message),
                     total_config = COALESCE(:total_config, total_config),
-                    summary = COALESCE(:summary::jsonb, summary),
-                    last_heartbeat = COALESCE(:last_heartbeat::timestamptz, last_heartbeat),
+                    summary = COALESCE(CAST(:summary AS jsonb), summary),
+                    last_heartbeat = COALESCE(CAST(:last_heartbeat AS timestamptz), last_heartbeat),
                     completed_at = CASE WHEN :status IN ('completed', 'failed', 'partial', 'interrupted')
                         THEN CURRENT_TIMESTAMP ELSE completed_at END,
                     updated_at = CURRENT_TIMESTAMP

@@ -157,7 +157,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
             {
                 "code": "INTERNAL_ERROR",
                 "title": "Something went wrong",
-                "detail": "An unexpected error occurred while processing your request.",
+                "detail": str(exc),
             }
         ],
     )

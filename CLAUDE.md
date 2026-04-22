@@ -294,6 +294,7 @@ Transformers still apply after `pd.read_sql(generate_sql)`.
 - Each repository handles ONE domain (datasource, config, pipeline, pipeline_run, job)
 - Services split into focused modules (db_connector, connection_pool, migration_executor, pipeline_service)
 - Controllers own ONE page's logic; API routers own ONE resource
+- **Data Ownership**: Each repo owns exactly ONE database table. A repo MUST NOT query another repo's table. Cross-repo lookups go through the service layer.
 
 ### ✅ Open/Closed Principle (OCP)
 
@@ -316,6 +317,101 @@ Transformers still apply after `pd.read_sql(generate_sql)`.
 - Controllers depend on protocol interfaces, not concrete implementations
 - `PipelineExecutor` receives repositories via constructor injection
 - `ml_mapper` has no Streamlit dependencies
+- **Layer dependency flow is strictly one-directional**:
+
+```
+api/ → services/ → repositories/ → models/
+ ✓   Dependencies flow inward only
+ ✗   NO reverse imports (e.g. services/ MUST NOT import from api/)
+```
+
+- When `services/` needs to notify the API layer (e.g. Socket.IO emit), use **callback injection** — the API layer passes a callback function, the service layer calls it without knowing about the API.
+
+```python
+# ✅ CORRECT — callback injection (DIP)
+class PipelineExecutor:
+    def __init__(self, ..., run_event_callback=None):
+        self._run_event_callback = run_event_callback  # Injected by API layer
+
+    def _save_batch_record(self, ...):
+        if self._run_event_callback:
+            self._run_event_callback("pipeline_run:batch", {...})
+
+# ❌ WRONG — service imports from API layer
+from api.socket_manager import emit_from_thread  # Breaks DIP
+```
+
+## RESTful API Design
+
+### Resource-Oriented URIs (OOP Style)
+
+All endpoints follow **OOP style** (resource nouns) — **NOT RPC style** (verb-based actions).
+
+```
+✅ OOP Style (Resource-Oriented)          ❌ RPC Style (Action-Oriented)
+GET    /api/v1/pipelines                   GET    /api/v1/pipelines/get-all
+GET    /api/v1/pipelines/{id}              GET    /api/v1/pipelines/get-by-id
+GET    /api/v1/pipelines/{id}/nodes        GET    /api/v1/pipelines/get-nodes
+POST   /api/v1/jobs                        POST   /api/v1/jobs/trigger
+```
+
+### Query Params for Filtering and Search
+
+Use a **single GET endpoint with query parameters** instead of creating multiple endpoints for variations.
+
+```
+✅ Single endpoint + query params                         ❌ Multiple endpoints
+GET /api/v1/pipelines?filter=name||$eq||MyPipeline        GET /api/v1/pipelines/get-by-name
+GET /api/v1/pipelines?filter=status||$eq||running         GET /api/v1/pipelines/get-running
+GET /api/v1/jobs?filter=pipeline_id||$eq||{uuid}          GET /api/v1/pipelines/{id}/jobs
+GET /api/v1/datasources?s=PostgreSQL                      GET /api/v1/datasources/search
+GET /api/v1/pipeline-runs?filter=job_id||$eq||{uuid}      GET /api/v1/jobs/{id}/pipeline-runs
+```
+
+**Query param operators:**
+
+| Param    | Format                              | Example                                      |
+|----------|-------------------------------------|----------------------------------------------|
+| `filter` | `{field}\|\|$op\|\|{value}`         | `filter=name\|\|$eq\|\|MyPipeline`            |
+| `s`      | Full-text search (shorthand)        | `s=postgres`                                  |
+| `sort`   | `{field}:{direction}`               | `sort=created_at:desc`                        |
+| `page`   | Page number                         | `page=2`                                      |
+| `limit`  | Items per page                      | `limit=25`                                    |
+
+**Supported filter operators:** `$eq`, `$ne`, `$gt`, `$gte`, `$lt`, `$lte`, `$like`, `$ilike`, `$in`, `$isnull`
+
+### Sub-Resources (Parent-Child Relationships)
+
+Sub-resources under a parent entity are acceptable for direct ownership relationships:
+
+```
+GET /api/v1/pipelines/{id}/nodes          ← pipeline_nodes belongs to pipeline
+GET /api/v1/pipelines/{id}/edges          ← pipeline_edges belongs to pipeline
+GET /api/v1/configs/{id}/histories        ← config_histories belongs to config
+GET /api/v1/configs/{id}/versions/{ver}   ← specific version of a config
+```
+
+**BUT prefer query params when the relationship is a filter, not ownership:**
+
+```
+✅ Query param (filter by FK)
+GET /api/v1/jobs?filter=pipeline_id||$eq||{uuid}
+
+✅ Sub-resource (direct ownership)
+GET /api/v1/pipelines/{id}/nodes
+```
+
+### PATCH for Partial Updates and State Transitions
+
+`PATCH` on a sub-resource or specific attribute is acceptable for **partial updates** and **state transitions**:
+
+```
+✅ ACCEPTABLE — Partial update / state transition
+PATCH /api/v1/jobs/{id}/status          { "status": "cancelled" }
+PATCH /api/v1/pipeline-runs/{id}/status { "status": "failed" }
+```
+
+This is the **only exception** to OOP-style URIs. Use sparingly — only for operations that modify part of a resource or transition state, where a full `PUT` would be wasteful.
 
 ## Important Notes
 
@@ -351,7 +447,7 @@ Transformers still apply after `pd.read_sql(generate_sql)`.
 
 ---
 
-**Last Updated**: 2026-04-14
+**Last Updated**: 2026-04-22
 **Python Version**: 3.11
 **Database**: PostgreSQL 18+
 **Architecture**: Clean Architecture + SOLID + MVC + REST API

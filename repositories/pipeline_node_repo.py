@@ -9,11 +9,15 @@ from repositories.connection import get_transaction
 from repositories.utils import rows_to_dicts
 from models.pipeline_config import PipelineNodeRecord
 
-_COLUMNS = """
-    id::text AS id,
-    pipeline_id::text AS pipeline_id,
-    config_id::text AS config_id,
-    position_x, position_y, order_sort
+_COLUMNS_JOIN = """
+    pn.id::text AS id,
+    pn.pipeline_id::text AS pipeline_id,
+    pn.config_id::text AS config_id,
+    c.config_name,
+    c.table_name,
+    c.json_data,
+    c.config_type,
+    pn.position_x, pn.position_y, pn.order_sort
 """
 
 
@@ -42,7 +46,14 @@ def bulk_insert(records: list[PipelineNodeRecord]) -> None:
 def get_by_pipeline(pipeline_id: uuid.UUID) -> list[dict]:
     with get_transaction() as conn:
         result = conn.execute(
-            text(f"SELECT {_COLUMNS} FROM pipeline_nodes WHERE pipeline_id = :pipeline_id ORDER BY order_sort ASC"),
+            text(f"""
+                SELECT {_COLUMNS_JOIN}
+                FROM pipeline_nodes pn
+                JOIN configs c ON c.id = pn.config_id
+                WHERE pn.pipeline_id = :pipeline_id
+                  AND pn.is_deleted = false
+                ORDER BY pn.order_sort ASC
+            """),
             {"pipeline_id": pipeline_id},
         )
         return rows_to_dicts(result)
@@ -81,11 +92,12 @@ def get_nodes_by_pipeline_ids(pipeline_ids: list[str]) -> dict[str, list[dict]]:
     with get_transaction() as conn:
         result = conn.execute(
             text(f"""
-                SELECT {_COLUMNS}
-                FROM pipeline_nodes
-                WHERE pipeline_id::text = ANY(:ids)
-                  AND is_deleted = false
-                ORDER BY order_sort ASC
+                SELECT {_COLUMNS_JOIN}
+                FROM pipeline_nodes pn
+                JOIN configs c ON c.id = pn.config_id
+                WHERE pn.pipeline_id::text = ANY(:ids)
+                  AND pn.is_deleted = false
+                ORDER BY pn.order_sort ASC
             """),
             {"ids": pipeline_ids},
         )

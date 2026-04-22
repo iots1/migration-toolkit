@@ -144,15 +144,16 @@ class PipelinesService(BaseService):
         self.execute_db_operation(lambda: pipeline_edge_repo.bulk_insert(records))
 
     def _attach_children_single(self, pipeline: dict) -> dict:
-        pipeline_id = uuid.UUID(pipeline["id"])
-        nodes = self.execute_db_operation(
-            lambda: pipeline_node_repo.get_by_pipeline(pipeline_id)
-        )
-        edges = self.execute_db_operation(
-            lambda: pipeline_edge_repo.get_by_pipeline(pipeline_id)
-        )
-        pipeline["nodes"] = nodes
-        pipeline["edges"] = edges
+        if "nodes" not in pipeline or "edges" not in pipeline:
+            pipeline_id = uuid.UUID(pipeline["id"])
+            nodes = self.execute_db_operation(
+                lambda: pipeline_node_repo.get_by_pipeline(pipeline_id)
+            )
+            edges = self.execute_db_operation(
+                lambda: pipeline_edge_repo.get_by_pipeline(pipeline_id)
+            )
+            pipeline["nodes"] = nodes
+            pipeline["edges"] = edges
         return pipeline
 
     def _attach_children(self, pipelines: list[dict]) -> list[dict]:

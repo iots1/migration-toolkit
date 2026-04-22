@@ -136,6 +136,9 @@ def get_by_id(pipeline_id: str) -> dict | None:
                        pn.pipeline_id::text AS pipeline_id,
                        pn.config_id::text AS config_id,
                        c.config_name,
+                       c.table_name,
+                       c.json_data,
+                       c.config_type,
                        pn.position_x, pn.position_y, pn.order_sort
                 FROM pipeline_nodes pn
                 JOIN configs c ON c.id = pn.config_id

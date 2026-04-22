@@ -70,4 +70,5 @@ VALIDATOR_OPTIONS = [
     "NOT_EMPTY", "MIN_LENGTH_13", "NUMERIC_ONLY"
 ]
 
-DB_TYPES = ["MySQL", "Microsoft SQL Server", "PostgreSQL"]
+from models.db_type import DbType  # noqa: E402 — kept at bottom for legacy compat
+DB_TYPES = [DbType.MYSQL, DbType.MSSQL, DbType.POSTGRESQL]

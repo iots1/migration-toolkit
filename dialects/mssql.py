@@ -2,12 +2,13 @@
 
 from sqlalchemy import URL
 from dialects.base import BaseDialect
+from models.db_type import DbType
 
 
 class MSSQLDialect(BaseDialect):
     """Microsoft SQL Server dialect implementation."""
 
-    name = "Microsoft SQL Server"
+    name = DbType.MSSQL
     default_port = "1433"
     default_charset = "utf8"
 

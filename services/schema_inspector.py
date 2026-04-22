@@ -10,6 +10,7 @@ This module should be used for read-only schema inspection operations.
 from __future__ import annotations
 import re
 
+from models.db_type import DbType
 from services.connection_pool import _connection_pool
 
 
@@ -65,16 +66,16 @@ def get_tables_from_datasource(
     try:
         _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password, charset)
 
-        if db_type == "MySQL":
+        if db_type == DbType.MYSQL:
             cursor.execute("SHOW TABLES")
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(
                 f"SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES "
                 f"WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = '{schema_filter}' "
                 f"ORDER BY TABLE_NAME"
             )
-        elif db_type == "PostgreSQL":
+        elif db_type == DbType.POSTGRESQL:
             schema_filter = _safe_id(schema) if schema else 'public'
             cursor.execute(
                 f"SELECT table_name FROM information_schema.tables "
@@ -123,14 +124,14 @@ def get_columns_from_table(
     try:
         _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password, charset)
         safe_table = _safe_id(table_name)
-        schema_filter = _safe_id(schema) if schema else ('public' if db_type == "PostgreSQL" else None)
+        schema_filter = _safe_id(schema) if schema else ('public' if db_type == DbType.POSTGRESQL else None)
 
         # Fetch primary keys
         primary_keys = set()
-        if db_type == "MySQL":
+        if db_type == DbType.MYSQL:
             cursor.execute(f"SHOW KEYS FROM `{safe_table}` WHERE Key_name = 'PRIMARY'")
             primary_keys = {row[4] for row in cursor.fetchall()}
-        elif db_type == "PostgreSQL":
+        elif db_type == DbType.POSTGRESQL:
             cursor.execute(
                 f"SELECT a.attname FROM pg_index i "
                 f"JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
@@ -139,7 +140,7 @@ def get_columns_from_table(
                 f"WHERE i.indisprimary AND c.relname = '{safe_table}' AND n.nspname = '{schema_filter}'"
             )
             primary_keys = {row[0] for row in cursor.fetchall()}
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(
                 f"SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE "
@@ -150,7 +151,7 @@ def get_columns_from_table(
 
         # Fetch indexes
         indexes_by_column = {}
-        if db_type == "MySQL":
+        if db_type == DbType.MYSQL:
             cursor.execute(f"SHOW INDEX FROM `{safe_table}`")
             for row in cursor.fetchall():
                 col_name = row[4]
@@ -162,7 +163,7 @@ def get_columns_from_table(
                     "name": index_name,
                     "unique": is_unique
                 })
-        elif db_type == "PostgreSQL":
+        elif db_type == DbType.POSTGRESQL:
             cursor.execute(
                 f"SELECT a.attname, i.relname, ix.indisunique, ix.indisprimary "
                 f"FROM pg_index ix "
@@ -181,7 +182,7 @@ def get_columns_from_table(
                     "unique": is_unique,
                     "primary": is_primary
                 })
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(
                 f"SELECT c.name, i.name, i.is_unique, i.is_primary_key "
@@ -204,7 +205,7 @@ def get_columns_from_table(
 
         # Fetch constraints (NOT NULL, UNIQUE, CHECK, etc.)
         constraints_by_column = {}
-        if db_type == "PostgreSQL":
+        if db_type == DbType.POSTGRESQL:
             cursor.execute(
                 f"SELECT a.attname, con.conname, con.contype "
                 f"FROM pg_constraint con "
@@ -221,7 +222,7 @@ def get_columns_from_table(
                     "name": constr_name,
                     "type": {'c': 'CHECK', 'f': 'FOREIGN KEY', 'p': 'PRIMARY KEY', 'u': 'UNIQUE', 'x': 'EXCLUSION'}.get(constr_type, 'UNKNOWN')
                 })
-        elif db_type == "MySQL":
+        elif db_type == DbType.MYSQL:
             cursor.execute(
                 f"SELECT k.COLUMN_NAME, tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE "
                 f"FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc "
@@ -236,7 +237,7 @@ def get_columns_from_table(
                     "name": constr_name,
                     "type": constr_type
                 })
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(
                 f"SELECT ccu.COLUMN_NAME, tc.CONSTRAINT_NAME, tc.CONSTRAINT_TYPE "
@@ -257,7 +258,7 @@ def get_columns_from_table(
                 })
 
         # Fetch column details
-        if db_type == "MySQL":
+        if db_type == DbType.MYSQL:
             cursor.execute(
                 f"SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
                 f"CHARACTER_MAXIMUM_LENGTH, NUMERIC_PRECISION, NUMERIC_SCALE, COLUMN_COMMENT "
@@ -282,7 +283,7 @@ def get_columns_from_table(
                     "constraints": constraints_by_column.get(col_name, []),
                     "indexes": indexes_by_column.get(col_name, [])
                 })
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             schema_filter = _safe_id(schema) if schema else 'dbo'
             cursor.execute(
                 f"SELECT c.COLUMN_NAME, c.DATA_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, "
@@ -320,7 +321,7 @@ def get_columns_from_table(
                     "constraints": constraints_by_column.get(col_name, []),
                     "indexes": indexes_by_column.get(col_name, [])
                 })
-        elif db_type == "PostgreSQL":
+        elif db_type == DbType.POSTGRESQL:
             cursor.execute(
                 f"SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, "
                 f"c.character_maximum_length, c.numeric_precision, c.numeric_scale, "
@@ -403,7 +404,7 @@ def get_foreign_keys(
         _, cursor = _connection_pool.get_connection(db_type, host, port, db_name, user, password)
         relationships = []
 
-        if db_type == "MySQL":
+        if db_type == DbType.MYSQL:
             safe_db = _safe_id(db_name)
             query = f"""
                 SELECT TABLE_NAME, COLUMN_NAME, REFERENCED_TABLE_NAME, REFERENCED_COLUMN_NAME
@@ -420,7 +421,7 @@ def get_foreign_keys(
                     "ref_col": row[3]
                 })
 
-        elif db_type == "PostgreSQL":
+        elif db_type == DbType.POSTGRESQL:
             schema_filter = _safe_id(schema) if schema else 'public'
             query = f"""
                 SELECT
@@ -446,7 +447,7 @@ def get_foreign_keys(
                     "ref_col": row[3]
                 })
 
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             query = """
                 SELECT
                     tp.name, cp.name, tr.name, cr.name
@@ -517,13 +518,13 @@ def get_table_sample_data(
 
         table_ref = safe_table
         if safe_schema:
-            if db_type == "Microsoft SQL Server":
+            if db_type == DbType.MSSQL:
                 table_ref = f"[{safe_schema}].[{safe_table}]"
-            elif db_type == "PostgreSQL":
+            elif db_type == DbType.POSTGRESQL:
                 table_ref = f'"{safe_schema}"."{safe_table}"'
 
         query = ""
-        if db_type == "Microsoft SQL Server":
+        if db_type == DbType.MSSQL:
             query = f"SELECT TOP {limit} * FROM {table_ref}"
         else:
             query = f"SELECT * FROM {table_ref} LIMIT {limit}"
@@ -578,24 +579,24 @@ def get_column_sample_values(
 
         table_ref = safe_table
         if safe_schema:
-            if db_type == "Microsoft SQL Server":
+            if db_type == DbType.MSSQL:
                 table_ref = f"[{safe_schema}].[{safe_table}]"
-            elif db_type == "PostgreSQL":
+            elif db_type == DbType.POSTGRESQL:
                 table_ref = f'"{safe_schema}"."{safe_table}"'
 
-        if db_type == "MySQL":
+        if db_type == DbType.MYSQL:
             query = (
                 f"SELECT DISTINCT `{safe_col}` FROM {table_ref} "
                 f"WHERE `{safe_col}` IS NOT NULL AND CAST(`{safe_col}` AS CHAR) <> '' "
                 f"LIMIT {limit}"
             )
-        elif db_type == "PostgreSQL":
+        elif db_type == DbType.POSTGRESQL:
             query = (
                 f'SELECT DISTINCT "{safe_col}" FROM {table_ref} '
                 f'WHERE "{safe_col}" IS NOT NULL AND CAST("{safe_col}" AS TEXT) <> \'\' '
                 f'LIMIT {limit}'
             )
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             query = (
                 f"SELECT DISTINCT TOP {limit} [{safe_col}] FROM {table_ref} "
                 f"WHERE [{safe_col}] IS NOT NULL AND CAST([{safe_col}] AS NVARCHAR(MAX)) <> ''"

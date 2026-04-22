@@ -2,12 +2,13 @@
 
 from sqlalchemy import URL
 from dialects.base import BaseDialect
+from models.db_type import DbType
 
 
 class PostgreSQLDialect(BaseDialect):
     """PostgreSQL dialect implementation."""
 
-    name = "PostgreSQL"
+    name = DbType.POSTGRESQL
     default_port = "5432"
     default_charset = "utf8"
 

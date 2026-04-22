@@ -10,6 +10,7 @@ import csv as _csv
 import pandas as pd
 from sqlalchemy import text
 
+from models.db_type import DbType
 from services.transformers import DataTransformer
 
 
@@ -17,7 +18,7 @@ from services.transformers import DataTransformer
 # Query Generation
 # ---------------------------------------------------------------------------
 
-def build_select_query(config: dict, source_table: str, db_type: str = "MySQL") -> str:
+def build_select_query(config: dict, source_table: str, db_type: str = DbType.MYSQL) -> str:
     """
     Generate a SELECT query from a mapping config.
 
@@ -33,7 +34,7 @@ def build_select_query(config: dict, source_table: str, db_type: str = "MySQL") 
             if mapping.get("ignore", False) or "GENERATE_HN" in mapping.get("transformers", []):
                 continue
             col = mapping["source"]
-            if db_type == "Microsoft SQL Server" and "TRIM" in mapping.get("transformers", []):
+            if db_type == DbType.MSSQL and "TRIM" in mapping.get("transformers", []):
                 selected_cols.append(f'TRIM("{col}") AS "{col}"')
             else:
                 selected_cols.append(f'"{col}"')
@@ -249,17 +250,17 @@ def build_dtype_map(bit_columns: list[str], df: pd.DataFrame, db_type: str) -> d
         return {}
 
     dtype_map: dict = {}
-    if db_type == "PostgreSQL":
+    if db_type == DbType.POSTGRESQL:
         from sqlalchemy.dialects.postgresql import BIT
         for col in bit_columns:
             if col in df.columns:
                 dtype_map[col] = BIT(1)
-    elif db_type == "MySQL":
+    elif db_type == DbType.MYSQL:
         from sqlalchemy.types import Integer
         for col in bit_columns:
             if col in df.columns:
                 dtype_map[col] = Integer()
-    elif db_type == "Microsoft SQL Server":
+    elif db_type == DbType.MSSQL:
         from sqlalchemy.dialects.mssql import BIT as MSSQL_BIT
         for col in bit_columns:
             if col in df.columns:

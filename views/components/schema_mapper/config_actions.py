@@ -16,6 +16,7 @@ import streamlit as st
 
 from sqlalchemy import text
 from repositories import config_repo
+from models.db_type import DbType
 from models.migration_config import ConfigRecord
 from services.datasource_repository import DatasourceRepository as DSRepo
 from views.components.shared.dialogs import show_json_preview
@@ -401,7 +402,7 @@ def build_preview_sql(config_data: dict, limit: int = 1000, db_type: str = "") -
     lookup = config_data.get("lookup", "")
 
     source_table = source.get("table", "")
-    is_mssql = db_type.lower().startswith("microsoft sql server") if db_type else False
+    is_mssql = db_type == DbType.MSSQL if db_type else False
 
     active_mappings = [m for m in mappings if not m.get("ignore", False)]
 

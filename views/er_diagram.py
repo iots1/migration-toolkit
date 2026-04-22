@@ -1,5 +1,6 @@
 import streamlit as st
 import database as db
+from models.db_type import DbType
 from services.db_connector import get_tables_from_datasource, get_columns_from_table, get_foreign_keys
 
 # Import Agraph for Interactive Graph
@@ -23,9 +24,9 @@ def render_er_diagram_page():
 
     # 2. Schema Selection
     schema_input = None
-    if ds['db_type'] in ["PostgreSQL", "Microsoft SQL Server"]:
+    if ds['db_type'] in [DbType.POSTGRESQL, DbType.MSSQL]:
         with col2:
-            default_schema = "public" if ds['db_type'] == "PostgreSQL" else "dbo"
+            default_schema = "public" if ds['db_type'] == DbType.POSTGRESQL else "dbo"
             schema_input = st.text_input("Schema", value=default_schema)
 
     # 3. Layout Settings (ตัวช่วยแก้ปัญหาทับกัน)

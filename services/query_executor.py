@@ -14,6 +14,7 @@ import re
 import time
 import uuid
 
+from models.db_type import DbType
 from services.connection_pool import DatabaseConnectionPool
 from services.sql_validator import SqlValidator, SqlValidationError
 from dialects.registry import get as get_dialect
@@ -177,7 +178,7 @@ class QueryExecutor:
 
             row_dicts = [dict(zip(columns, row)) for row in rows]
 
-            if ds["db_type"] == "Microsoft SQL Server":
+            if ds["db_type"] == DbType.MSSQL:
                 row_dicts = _fix_tis620_mojibake(row_dicts)
 
             logger.info(

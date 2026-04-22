@@ -2,12 +2,13 @@
 
 from sqlalchemy import URL
 from dialects.base import BaseDialect
+from models.db_type import DbType
 
 
 class MySQLDialect(BaseDialect):
     """MySQL dialect implementation."""
 
-    name = "MySQL"
+    name = DbType.MYSQL
     default_port = "3306"
     default_charset = "utf8mb4"
 

@@ -2,6 +2,8 @@
 import streamlit as st
 from streamlit_agraph import agraph, Node, Edge, Config
 
+from models.db_type import DbType
+
 
 def render_er_diagram_page(datasources_df, form_state: dict, callbacks: dict) -> None:
     """
@@ -31,9 +33,9 @@ def render_er_diagram_page(datasources_df, form_state: dict, callbacks: dict) ->
     if not ds_row.empty:
         ds_type = ds_row.iloc[0]['db_type']
         schema_input = None
-        if ds_type in ["PostgreSQL", "Microsoft SQL Server"]:
+        if ds_type in [DbType.POSTGRESQL, DbType.MSSQL]:
             with col2:
-                default_schema = "public" if ds_type == "PostgreSQL" else "dbo"
+                default_schema = "public" if ds_type == DbType.POSTGRESQL else "dbo"
                 schema_input = st.text_input("Schema", value=default_schema)
 
     # 3. Build Graph Button

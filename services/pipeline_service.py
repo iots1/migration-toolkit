@@ -39,6 +39,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional, Protocol, runtime_checkable
 
+from models.db_type import DbType
 from models.pipeline_config import PipelineConfig, PipelineStep
 from services.migration_executor import (
     run_single_migration,
@@ -753,7 +754,7 @@ class PipelineExecutor:
             return f"Source datasource (id={src_ds_id}) not found"
 
         src_charset = src_ds.get("charset") or config.get("source", {}).get("charset") or None
-        if src_ds["db_type"] == "PostgreSQL" and src_charset == "tis620":
+        if src_ds["db_type"] == DbType.POSTGRESQL and src_charset == "tis620":
             src_charset = "WIN874"
 
         src_conn = {

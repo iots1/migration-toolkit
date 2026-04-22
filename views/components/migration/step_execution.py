@@ -23,6 +23,7 @@ import streamlit as st
 from datetime import datetime
 from sqlalchemy import text
 
+from models.db_type import DbType
 from services.datasource_repository import DatasourceRepository as DSRepo
 from services.migration_logger import create_log_file, write_log, read_log_file
 from services.migration_executor import run_single_migration
@@ -102,7 +103,7 @@ def _run_migration(add_log, status_box, metric_processed, metric_batch, metric_t
         raise ValueError("Could not retrieve datasource credentials.")
 
     src_charset = st.session_state.get("src_charset")
-    if src_ds["db_type"] == "PostgreSQL" and src_charset == "tis620":
+    if src_ds["db_type"] == DbType.POSTGRESQL and src_charset == "tis620":
         add_log("Auto-adjusting encoding: 'tis620' -> 'WIN874' (PostgreSQL Standard)", "🔧")
         src_charset = "WIN874"
 

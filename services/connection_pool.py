@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 from typing import Dict, Any
 
+from models.db_type import DbType
+
 
 class DatabaseConnectionPool:
     """
@@ -78,7 +80,7 @@ class DatabaseConnectionPool:
         except ValueError:
             raise ValueError(f"Invalid port number: {port}")
 
-        if db_type == "MySQL":
+        if db_type == DbType.MYSQL:
             try:
                 import pymysql
                 connect_args = {
@@ -91,7 +93,7 @@ class DatabaseConnectionPool:
             except ImportError:
                 raise ImportError("Library 'pymysql' not found. Run: pip install pymysql")
 
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             try:
                 import pymssql
                 connect_args = {
@@ -104,7 +106,7 @@ class DatabaseConnectionPool:
             except ImportError:
                 raise ImportError("Library 'pymssql' not found. Run: pip install pymssql")
 
-        elif db_type == "PostgreSQL":
+        elif db_type == DbType.POSTGRESQL:
             try:
                 import psycopg2
                 connect_args = {

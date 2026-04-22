@@ -16,6 +16,8 @@ from typing import Optional
 from sqlalchemy import Engine, URL
 from sqlalchemy import create_engine
 
+from models.db_type import DbType
+
 
 def create_sqlalchemy_engine(
     db_type: str,
@@ -67,7 +69,7 @@ def create_sqlalchemy_engine(
         # Convert port to int if exists
         port_int = int(port) if port and str(port).strip() else None
 
-        if db_type == "MySQL":
+        if db_type == DbType.MYSQL:
             # Requires: pip install pymysql
             mysql_charset = charset if charset else "utf8mb4"
             connection_url = URL.create(
@@ -83,7 +85,7 @@ def create_sqlalchemy_engine(
                 }
             )
 
-        elif db_type == "PostgreSQL":
+        elif db_type == DbType.POSTGRESQL:
             # Requires: pip install psycopg2-binary
             pg_encoding = charset if charset else "utf8"
             connection_url = URL.create(
@@ -96,7 +98,7 @@ def create_sqlalchemy_engine(
                 query={"client_encoding": pg_encoding}
             )
 
-        elif db_type == "Microsoft SQL Server":
+        elif db_type == DbType.MSSQL:
             # Requires: pip install pymssql
             mssql_charset = charset if charset else "utf8"
             connection_url = URL.create(

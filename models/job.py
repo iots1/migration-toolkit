@@ -6,7 +6,7 @@ JobUpdateRecord:  write model for patching job status / error.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import uuid
 
 
@@ -26,8 +26,10 @@ class JobRecord:
 
 @dataclass
 class JobUpdateRecord:
-    """Write model for patching jobs (status, error_message, total_config)."""
+    """Write model for patching jobs (status, error_message, total_config, summary)."""
 
     status: str
     error_message: str | None = None
     total_config: int | None = None
+    summary: dict | None = None
+    last_heartbeat: str | None = None

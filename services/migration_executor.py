@@ -138,6 +138,7 @@ def run_single_migration(
     batch_insert_callback=None,
     shutdown_event: threading.Event | None = None,
     job_id: str | None = None,
+    migration_logger=None,
 ) -> MigrationResult:
     """
     Run a full single-table migration and return a MigrationResult.
@@ -154,6 +155,7 @@ def run_single_migration(
     source_table = config.get("source", {}).get("table", "")
     target_table = config.get("target", {}).get("table", "")
     start_time = time.time()
+    mlog = migration_logger
 
     if config.get("config_type") == "custom":
         tgt_engine = connector.create_sqlalchemy_engine(
@@ -256,6 +258,7 @@ def run_single_migration(
             job_id=job_id,
             insert_strategy=insert_strategy,
             tgt_pk_columns=tgt_pk_columns,
+            migration_logger=mlog,
         )
 
         if error_message:
@@ -274,6 +277,10 @@ def run_single_migration(
         clear_checkpoint(config_name)
         log("Checkpoint cleared (migration complete)", "🧹")
 
+        if mlog:
+            mlog.log(step=config_name, batch=batch_num, event="step_completed",
+                     total_rows=total_rows, duration_s=round(time.time() - start_time, 1))
+
         return MigrationResult(
             status="success",
             rows_processed=total_rows,
@@ -285,6 +292,8 @@ def run_single_migration(
 
     except MigrationInterrupted:
         log("Migration interrupted by shutdown signal", "🛑")
+        if mlog:
+            mlog.log(step=config_name, event="step_interrupted")
         return MigrationResult(
             status="interrupted",
             rows_processed=0,
@@ -295,6 +304,9 @@ def run_single_migration(
     except Exception as e:
         error_msg = str(e)
         log(f"Migration failed with unexpected error: {error_msg}", "❌")
+
+        if mlog:
+            mlog.log(step=config_name, event="step_failed", error=error_msg[:500])
 
         _safe_notify_callback(
             batch_insert_callback,
@@ -680,6 +692,7 @@ def _process_batches(
     job_id: str | None = None,
     insert_strategy: str = "append",
     tgt_pk_columns: list[str] | None = None,
+    migration_logger=None,
 ) -> tuple[int, int, str]:
     """
     Iterate over source data in cursor-paginated batches and insert into target.
@@ -718,6 +731,7 @@ def _process_batches(
             job_id=job_id,
             insert_strategy=insert_strategy,
             tgt_pk_columns=tgt_pk_columns,
+            migration_logger=migration_logger,
         )
 
     checkpoint = load_checkpoint(config_name)
@@ -748,10 +762,18 @@ def _process_batches(
         _check_shutdown(shutdown_event)
 
         _check_memory(log, batch_num + 1)
+        if migration_logger:
+            try:
+                import psutil as _psutil
+                migration_logger.record_memory(_psutil.virtual_memory().percent)
+            except Exception:
+                pass
 
         query, params = pagination_fn(
             select_query, pk_columns, last_seen_pk, adaptive_batch_size
         )
+
+        batch_start = time.time()
 
         try:
             df_batch = _read_batch_with_retry(
@@ -802,6 +824,7 @@ def _process_batches(
             checkpoint_callback=checkpoint_callback,
             insert_strategy=insert_strategy,
             tgt_pk_columns=tgt_pk_columns,
+            migration_logger=migration_logger,
         )
 
         if outcome is None:
@@ -842,6 +865,21 @@ def _process_batches(
             progress_callback(batch_num, total_rows, rows_in_batch)
 
         log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
+
+        batch_duration = time.time() - batch_start
+        if migration_logger:
+            migration_logger.log(
+                step=config_name, batch=batch_num, event="batch_inserted",
+                rows=rows_in_batch, duration_s=round(batch_duration, 3),
+                total_rows=total_rows,
+            )
+            migration_logger.record_batch_time(config_name, batch_duration)
+            migration_logger.record_rows(config_name, total_rows)
+            eta = migration_logger.estimate_eta(
+                config_name, batch_num, total_source_rows, total_rows
+            )
+            if eta and batch_num % 10 == 0:
+                log(f"ETA: {eta}", "⏱️")
 
         if first_batch:
             try:
@@ -917,6 +955,7 @@ def _process_batches_offset(
     job_id: str | None = None,
     insert_strategy: str = "append",
     tgt_pk_columns: list[str] | None = None,
+    migration_logger=None,
 ) -> tuple[int, int, str]:
     """Fallback: OFFSET-based pagination for tables without PK.
 
@@ -962,6 +1001,7 @@ def _process_batches_offset(
     while True:
         _check_shutdown(shutdown_event)
         _check_memory(log, batch_num + 1)
+        batch_start = time.time()
 
         try:
             df_batch = _read_batch_with_retry(
@@ -1002,6 +1042,7 @@ def _process_batches_offset(
             checkpoint_callback=checkpoint_callback,
             insert_strategy=insert_strategy,
             tgt_pk_columns=tgt_pk_columns,
+            migration_logger=migration_logger,
         )
 
         if outcome is None:
@@ -1044,6 +1085,16 @@ def _process_batches_offset(
 
         log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
 
+        batch_duration = time.time() - batch_start
+        if migration_logger:
+            migration_logger.log(
+                step=config_name, batch=batch_num, event="batch_inserted",
+                rows=rows_in_batch, duration_s=round(batch_duration, 3),
+                total_rows=total_rows, pagination="offset",
+            )
+            migration_logger.record_batch_time(config_name, batch_duration)
+            migration_logger.record_rows(config_name, total_rows)
+
         offset += batch_size
         del df_batch
         gc.collect()
@@ -1058,6 +1109,10 @@ def _process_batches_offset(
 # ---------------------------------------------------------------------------
 # Single batch processing (with retry)
 # ---------------------------------------------------------------------------
+
+
+MAX_QUARANTINED_PER_BATCH = 100
+QUARANTINE_CHUNK_SIZE = 50
 
 
 def _process_single_batch(
@@ -1075,6 +1130,7 @@ def _process_single_batch(
     checkpoint_callback,
     insert_strategy: str = "append",
     tgt_pk_columns: list[str] | None = None,
+    migration_logger=None,
 ) -> Optional[_BatchOutcome]:
     """Clean, transform, and insert a single batch with retry."""
     rows_in_batch = len(df_batch)
@@ -1092,24 +1148,64 @@ def _process_single_batch(
     for w in val_warnings:
         log(f"Batch {batch_num} — {w}", "⚠️")
 
+    dtype_map = build_dtype_map(
+        bit_columns, df_batch, target_conn_config.get("db_type", "")
+    )
+
     try:
-        dtype_map = build_dtype_map(
-            bit_columns, df_batch, target_conn_config.get("db_type", "")
-        )
         _insert_with_retry(
             df_batch, target_table, tgt_engine, dtype_map,
             batch_num, log, insert_strategy, tgt_pk_columns,
         )
-    except Exception as e:
-        user_message = _build_user_friendly_error(
-            e, df_batch, config, tgt_engine, target_table, batch_num, log
+    except Exception as batch_error:
+        if config.get("error_handling") != "skip_bad_rows":
+            user_message = _build_user_friendly_error(
+                batch_error, df_batch, config, tgt_engine, target_table, batch_num, log
+            )
+            return _BatchOutcome(
+                success=False,
+                rows_in_batch=rows_in_batch,
+                rows_cumulative=total_rows,
+                error_message=user_message,
+                warnings_json=warnings_json,
+            )
+
+        log(
+            f"Batch {batch_num}: Batch insert failed — "
+            f"switching to quarantine mode",
+            "⚠️",
         )
 
+        inserted, quarantined = _insert_with_quarantine(
+            df_batch=df_batch,
+            target_table=target_table,
+            tgt_engine=tgt_engine,
+            dtype_map=dtype_map,
+            batch_num=batch_num,
+            config_name=config_name,
+            config=config,
+            log=log,
+            migration_logger=migration_logger,
+        )
+
+        if migration_logger and quarantined > 0:
+            migration_logger.record_quarantined(config_name, quarantined)
+            migration_logger.log(
+                step=config_name, batch=batch_num, event="rows_quarantined",
+                quarantined=quarantined, inserted=inserted,
+            )
+
+        total_rows += inserted
+
+        if checkpoint_callback:
+            checkpoint_callback(config_name, batch_num, total_rows)
+        if progress_callback:
+            progress_callback(batch_num, total_rows, inserted)
+
         return _BatchOutcome(
-            success=False,
-            rows_in_batch=rows_in_batch,
+            success=True,
+            rows_in_batch=inserted,
             rows_cumulative=total_rows,
-            error_message=user_message,
             warnings_json=warnings_json,
         )
 
@@ -1126,6 +1222,84 @@ def _process_single_batch(
         rows_cumulative=total_rows,
         warnings_json=warnings_json,
     )
+
+
+# ---------------------------------------------------------------------------
+# Dead Letter Queue — quarantine bad rows (Phase 9)
+# ---------------------------------------------------------------------------
+
+
+def _insert_with_quarantine(
+    *,
+    df_batch: pd.DataFrame,
+    target_table: str,
+    tgt_engine,
+    dtype_map: dict,
+    batch_num: int,
+    config_name: str,
+    config: dict,
+    log: LogCallback,
+    migration_logger=None,
+) -> tuple[int, int]:
+    """Try sub-batch insert. On failure, row-by-row to isolate bad rows.
+
+    Returns (inserted_count, quarantined_count).
+    """
+    inserted = 0
+    quarantined = 0
+
+    for chunk_start in range(0, len(df_batch), QUARANTINE_CHUNK_SIZE):
+        if quarantined >= MAX_QUARANTINED_PER_BATCH:
+            break
+
+        chunk_end = min(chunk_start + QUARANTINE_CHUNK_SIZE, len(df_batch))
+        chunk = df_batch.iloc[chunk_start:chunk_end]
+
+        try:
+            _insert_with_retry(
+                chunk, target_table, tgt_engine, dtype_map,
+                batch_num, log, "append", None,
+            )
+            inserted += len(chunk)
+        except Exception:
+            for idx in chunk.index:
+                if quarantined >= MAX_QUARANTINED_PER_BATCH:
+                    break
+                row_df = df_batch.loc[[idx]]
+                try:
+                    _insert_with_retry(
+                        row_df, target_table, tgt_engine, dtype_map,
+                        batch_num, log, "append", None,
+                    )
+                    inserted += 1
+                except Exception as row_error:
+                    quarantined += 1
+                    if migration_logger:
+                        try:
+                            row_data = df_batch.loc[idx].to_dict()
+                            for k, v in row_data.items():
+                                if hasattr(v, "item"):
+                                    row_data[k] = v.item()
+                                elif hasattr(v, "isoformat"):
+                                    row_data[k] = v.isoformat()
+                            migration_logger.log(
+                                step=config_name, batch=batch_num,
+                                event="row_quarantined",
+                                row_idx=int(idx) if isinstance(idx, int) else str(idx),
+                                row=row_data,
+                                error=str(row_error)[:300],
+                            )
+                        except Exception:
+                            pass
+
+    if quarantined > 0:
+        log(
+            f"Batch {batch_num}: Quarantined {quarantined} bad rows, "
+            f"inserted {inserted}",
+            "⚠️",
+        )
+
+    return inserted, quarantined
 
 
 # ---------------------------------------------------------------------------

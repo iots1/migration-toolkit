@@ -47,6 +47,7 @@ from services.migration_executor import (
     _read_heartbeat,
     _clean_heartbeat,
 )
+from services.migration_logger import MigrationLogger
 from services.checkpoint_manager import (
     load_pipeline_checkpoint,
     save_pipeline_checkpoint,
@@ -189,6 +190,7 @@ class PipelineExecutor:
         self._completion_callback = completion_callback
         self._shutdown_event = shutdown_event
         self._job_id = job_id
+        self._migration_logger: MigrationLogger | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -313,15 +315,16 @@ class PipelineExecutor:
                     batch_insert_callback=self._save_batch_record,
                     shutdown_event=self._shutdown_event,
                     job_id=self._job_id,
+                    migration_logger=self._migration_logger,
                 )
             except MigrationInterrupted:
                 results[config_name] = StepResult(
-                    status="failed",
+                    status="interrupted",
                     config_name=config_name,
                     error_message="Migration interrupted by shutdown signal",
                 )
                 self._log(f"[{config_name}] Interrupted — shutdown requested", "🛑")
-                print(f"[JOB ERROR] [{config_name}] Interrupted — shutdown requested")
+                print(f"[JOB] [{config_name}] Interrupted — shutdown requested")
                 self._flush_run_state(results)
                 if self._pipeline.error_strategy == "fail_fast":
                     break
@@ -381,10 +384,11 @@ class PipelineExecutor:
 
         succeeded = sum(1 for r in results.values() if r.status == "success")
         failed = sum(1 for r in results.values() if r.status == "failed")
+        interrupted = sum(1 for r in results.values() if r.status == "interrupted")
 
-        if failed == 0:
+        if failed == 0 and interrupted == 0:
             overall = "completed"
-        elif succeeded > 0:
+        elif succeeded > 0 or interrupted > 0:
             overall = "partial"
         else:
             overall = "failed"
@@ -408,6 +412,8 @@ class PipelineExecutor:
         This run_id is just a UUID for correlation with job_id.
         """
         self._run_id = str(uuid.uuid4())
+        if self._job_id:
+            self._migration_logger = MigrationLogger(self._job_id)
         thread = threading.Thread(
             target=self._background_run,
             daemon=True,
@@ -424,11 +430,52 @@ class PipelineExecutor:
         """Thread entry point — wraps execute() with DB bookkeeping."""
         result = None
         try:
+            _heartbeat_stop = threading.Event()
+
+            def _heartbeat_flusher():
+                if not self._job_id:
+                    return
+                while not _heartbeat_stop.wait(30):
+                    try:
+                        hb = _read_heartbeat(self._job_id)
+                        if hb and _time.time() - hb["timestamp"] < 60:
+                            from repositories import job_repo as _job_repo
+                            from models.job import JobUpdateRecord as _JobUpdate
+                            from datetime import datetime, timezone
+                            _job_repo.update(
+                                uuid.UUID(self._job_id),
+                                _JobUpdate(
+                                    status="running",
+                                    last_heartbeat=datetime.now(timezone.utc).isoformat(),
+                                ),
+                            )
+                    except Exception:
+                        pass
+
+            hb_thread = threading.Thread(
+                target=_heartbeat_flusher, daemon=True, name="heartbeat-flusher"
+            )
+            hb_thread.start()
+
             result = self.execute()
+            _heartbeat_stop.set()
             self._run_repo.update(
                 self._run_id,
                 PipelineRunUpdateRecord(status=result.status),
             )
+            if self._migration_logger and self._job_id:
+                try:
+                    from repositories import job_repo as _job_repo
+                    from models.job import JobUpdateRecord as _JobUpdate
+                    summary = self._migration_logger.build_summary(
+                        result.total_rows, result.status
+                    )
+                    _job_repo.update(
+                        uuid.UUID(self._job_id),
+                        _JobUpdate(status=result.status, summary=summary),
+                    )
+                except Exception:
+                    pass
             if self._completion_callback:
                 self._completion_callback(
                     self._run_id, result.status, result.total_rows
@@ -459,6 +506,20 @@ class PipelineExecutor:
                 )
             if self._job_id:
                 _clean_heartbeat(self._job_id)
+            if self._migration_logger:
+                try:
+                    summary = self._migration_logger.build_summary(
+                        result.total_rows if result else 0,
+                        result.status if result else "failed",
+                    )
+                    self._migration_logger.log(
+                        event="pipeline_finished",
+                        status=result.status if result else "failed",
+                        summary=summary,
+                    )
+                except Exception:
+                    pass
+                self._migration_logger.close()
 
     # ------------------------------------------------------------------
     # Private — Kahn's topological sort

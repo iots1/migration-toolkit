@@ -21,7 +21,14 @@ class PipelinesController(BaseController):
                 "jobs", rows, str(request.url.path)
             )
 
+        def duplicate_pipeline(id: str, request: Request):
+            duplicated = svc.duplicate(id)
+            return json_api.create_created_response(
+                "pipelines", duplicated, str(request.url.path)
+            )
+
         self.router.get("/{pipeline_id}/jobs")(list_jobs)
+        self.router.post("/{id}/duplicate")(duplicate_pipeline)
 
 
 def get_pipelines_router():

@@ -123,6 +123,22 @@ class ConfigsService(BaseService):
         )
         self._assert_success(ok, msg)
 
+    def duplicate(self, id: str) -> dict:
+        existing = self.find_by_id(id)
+        new_name = f"{existing['config_name']} copy"
+        return self.create({
+            "config_name": new_name,
+            "table_name": existing.get("table_name", ""),
+            "json_data": existing.get("json_data", {}),
+            "datasource_source_id": existing.get("datasource_source_id"),
+            "datasource_target_id": existing.get("datasource_target_id"),
+            "config_type": existing.get("config_type", "std"),
+            "script": existing.get("script"),
+            "generate_sql": existing.get("generate_sql"),
+            "condition": existing.get("condition"),
+            "lookup": existing.get("lookup"),
+        })
+
     def get_history(self, config_name: str) -> list[dict]:
         """Get config version history."""
         df = self.execute_db_operation(lambda: config_repo.get_history(config_name))

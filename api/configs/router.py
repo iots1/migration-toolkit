@@ -42,4 +42,11 @@ def get_configs_router():
             str(request.url.path),
         )
 
+    @controller.router.post("/{id}/duplicate")
+    def duplicate_config(id: str, request: Request):
+        duplicated = service.duplicate(id)
+        return json_api.create_created_response(
+            "configs", duplicated, str(request.url.path)
+        )
+
     return controller.router

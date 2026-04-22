@@ -102,6 +102,32 @@ class PipelinesService(BaseService):
             raise HTTPException(status_code=400, detail=f"Invalid UUID: {pipeline_id}")
         return self.execute_db_operation(lambda: job_repo.get_by_pipeline(pid))
 
+    def duplicate(self, id: str) -> dict:
+        existing = self.find_by_id(id)
+        new_name = f"{existing['name']} copy"
+        nodes = [
+            {
+                "config_id": n["config_id"],
+                "position_x": n.get("position_x", 0),
+                "position_y": n.get("position_y", 0),
+                "order_sort": n.get("order_sort", 0),
+            }
+            for n in existing.get("nodes", [])
+        ]
+        edges = [
+            {
+                "source_config_uuid": e["source_config_uuid"],
+                "target_config_uuid": e["target_config_uuid"],
+            }
+            for e in existing.get("edges", [])
+        ]
+        return self.create({
+            "name": new_name,
+            "description": existing.get("description", ""),
+            "nodes": nodes,
+            "edges": edges,
+        })
+
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------

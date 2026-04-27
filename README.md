@@ -267,8 +267,8 @@ make help
 make setup              # Create venv + install dependencies (first time)
 make install           # Install dependencies only (venv must exist)
 make run               # Start app with hot-reload (default)
-makea run-reloadaa        # Start app with hot-reload (explicit)
-make run-no-reload a    # Start app without hot-reload
+make run-reload        # Start app with hot-reload (explicit)
+make run-no-reload     # Start app without hot-reload
 
 make test              # Run all unit tests (pytest discovers everything)
 make test-simple       # Run AI pattern detection tests only

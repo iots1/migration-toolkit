@@ -161,13 +161,13 @@ his-analyzer/
 
 ### Layer Responsibilities
 
-| Layer | Rule |
-|-------|------|
-| `models/` | Pure dataclasses — no I/O, no Streamlit |
-| `services/` | Business logic — no `st.*` calls |
-| `views/` | Thin orchestrators — call components, manage step flow |
+| Layer               | Rule                                                             |
+| ------------------- | ---------------------------------------------------------------- |
+| `models/`           | Pure dataclasses — no I/O, no Streamlit                          |
+| `services/`         | Business logic — no `st.*` calls                                 |
+| `views/`            | Thin orchestrators — call components, manage step flow           |
 | `views/components/` | Reusable UI widgets — read/write `session_state`, render widgets |
-| `utils/` | Stateless pure helpers + `PageState` session abstraction |
+| `utils/`            | Stateless pure helpers + `PageState` session abstraction         |
 
 ### Data Flow Architecture (v9.0)
 
@@ -267,8 +267,8 @@ make help
 make setup              # Create venv + install dependencies (first time)
 make install           # Install dependencies only (venv must exist)
 make run               # Start app with hot-reload (default)
-make run-reload        # Start app with hot-reload (explicit)
-make run-no-reload     # Start app without hot-reload
+makea run-reloadaa        # Start app with hot-reload (explicit)
+make run-no-reload a    # Start app without hot-reload
 
 make test              # Run all unit tests (pytest discovers everything)
 make test-simple       # Run AI pattern detection tests only
@@ -1374,14 +1374,14 @@ python3.11 -m pytest tests/test_helpers.py -v
 
 ### Test Coverage (46 tests)
 
-| Test File | Module Under Test | Tests |
-|-----------|-------------------|-------|
-| `test_checkpoint_manager.py` | `services/checkpoint_manager.py` | 4 |
-| `test_encoding_helper.py` | `services/encoding_helper.py` | 8 |
-| `test_helpers.py` | `utils/helpers.py` | 14 |
-| `test_migration_logger.py` | `services/migration_logger.py` | 5 |
-| `test_models.py` | `models/` (MigrationConfig, Datasource) | 5 |
-| `test_query_builder.py` | `services/query_builder.py` | 10 |
+| Test File                    | Module Under Test                       | Tests |
+| ---------------------------- | --------------------------------------- | ----- |
+| `test_checkpoint_manager.py` | `services/checkpoint_manager.py`        | 4     |
+| `test_encoding_helper.py`    | `services/encoding_helper.py`           | 8     |
+| `test_helpers.py`            | `utils/helpers.py`                      | 14    |
+| `test_migration_logger.py`   | `services/migration_logger.py`          | 5     |
+| `test_models.py`             | `models/` (MigrationConfig, Datasource) | 5     |
+| `test_query_builder.py`      | `services/query_builder.py`             | 10    |
 
 ### Writing New Tests
 

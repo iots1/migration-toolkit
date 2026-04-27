@@ -627,7 +627,7 @@ def _prepare_select_query(
         ]
         config = {**config, "mappings": remapped}
         log(f"Remapped {len(remapped)} active mappings (source → target name)", "🔁")
-        return generate_sql, config
+        return generate_sql.rstrip(";"), config
 
     log("generate_sql not set — using dynamic SELECT from mappings", "🔧")
     return build_select_query(config, source_table, src_db_type), config
@@ -700,409 +700,74 @@ def _process_batches(
 
     Returns (total_rows_processed, batch_count, error_message).
     """
-    source_table = config.get("source", {}).get("table", "")
+    total_rows = 0
+    batch_num = 0
+    error_message = ""
+    is_pg = "postgresql" in str(src_engine.url)
 
-    config_pk = config.get("pk_columns")
-    pk_columns = config_pk if config_pk else _detect_pk_columns(src_engine, source_table)
-
-    if pk_columns is None:
-        log(
-            "WARNING: No PK or unique index detected on source table. "
-            "Falling back to OFFSET-based pagination (non-deterministic for resume). "
-            "Consider adding a PK, unique index, or specify 'pk_columns' in the config.",
-            "⚠️",
-        )
-        return _process_batches_offset(
-            src_engine=src_engine,
-            tgt_engine=tgt_engine,
-            select_query=select_query,
-            config=config,
-            config_name=config_name,
-            target_table=target_table,
-            target_conn_config=target_conn_config,
-            batch_size=batch_size,
-            skip_batches=skip_batches,
-            test_mode=test_mode,
-            total_source_rows=total_source_rows,
-            log=log,
-            progress_callback=progress_callback,
-            checkpoint_callback=checkpoint_callback,
-            batch_insert_callback=batch_insert_callback,
-            shutdown_event=shutdown_event,
-            job_id=job_id,
-            insert_strategy=insert_strategy,
-            tgt_pk_columns=tgt_pk_columns,
-            migration_logger=migration_logger,
-        )
-
-    checkpoint = load_checkpoint(config_name)
-    last_seen_pk = _load_last_seen_pk(checkpoint, config_name)
-
-    if skip_batches > 0 and last_seen_pk is None:
-        log(
-            f"Checkpoint has skip_batches={skip_batches} but no last_seen_pk. "
-            f"OFFSET skip will be applied before cursor pagination begins.",
-            "⚠️",
-        )
-
-    pagination_fn = select_pagination_builder(src_engine)
-
-    total_rows = checkpoint.get("rows_processed", 0) if checkpoint else 0
-    batch_num = checkpoint.get("last_batch", 0) if checkpoint else 0
-
-    adaptive_batch_size = batch_size
-    first_batch = True
-
-    log(
-        f"Cursor-based pagination on PK: {pk_columns}"
-        + (f" | Resuming from PK={last_seen_pk}" if last_seen_pk else ""),
-        "🔍",
-    )
-
-    while True:
-        _check_shutdown(shutdown_event)
-
-        _check_memory(log, batch_num + 1)
-        if migration_logger:
-            try:
-                import psutil as _psutil
-                migration_logger.record_memory(_psutil.virtual_memory().percent)
-            except Exception:
-                pass
-
-        query, params = pagination_fn(
-            select_query, pk_columns, last_seen_pk, adaptive_batch_size
-        )
-
-        batch_start = time.time()
-
-        try:
-            df_batch = _read_batch_with_retry(
-                src_engine, query, params, batch_num + 1, log
-            )
-        except Exception as e:
-            save_checkpoint(config_name, batch_num, total_rows, last_seen_pk=last_seen_pk)
-            return total_rows, batch_num, f"Source read error: {e}"
-
-        if df_batch.empty:
-            break
-
-        rows_in_batch = len(df_batch)
-
-        try:
-            last_seen_pk = tuple(df_batch[pk].iloc[-1] for pk in pk_columns)
-        except (KeyError, IndexError):
-            log(
-                f"WARNING: PK column missing from batch DataFrame. "
-                f"Expected PK columns: {pk_columns}, got: {list(df_batch.columns)}",
-                "⚠️",
-            )
-            save_checkpoint(config_name, batch_num, total_rows)
-            return total_rows, batch_num, (
-                f"PK column missing from query result. "
-                f"Expected: {pk_columns}, got: {list(df_batch.columns)}"
-            )
-
-        batch_num += 1
-
-        if skip_batches > 0:
-            skip_batches -= 1
-            total_rows += rows_in_batch
-            log(f"Batch {batch_num}: Skipped (checkpoint)", "⏭️")
-            continue
-
-        outcome = _process_single_batch(
-            df_batch=df_batch,
-            batch_num=batch_num,
-            config=config,
-            config_name=config_name,
-            target_table=target_table,
-            target_conn_config=target_conn_config,
-            tgt_engine=tgt_engine,
-            total_rows=total_rows,
-            log=log,
-            progress_callback=progress_callback,
-            checkpoint_callback=checkpoint_callback,
-            insert_strategy=insert_strategy,
-            tgt_pk_columns=tgt_pk_columns,
-            migration_logger=migration_logger,
-        )
-
-        if outcome is None:
-            del df_batch
-            gc.collect()
-            continue
-
-        total_rows = outcome.rows_cumulative
-
-        _safe_notify_callback(
-            batch_insert_callback,
-            config_name=config_name,
-            batch_round=batch_num - 1,
-            rows_in_batch=outcome.rows_in_batch if outcome.success else 0,
-            rows_cumulative=outcome.rows_cumulative,
-            batch_size=adaptive_batch_size,
-            total_records_in_config=total_source_rows,
-            status="success" if outcome.success else "failed",
-            error_message=outcome.error_message or None,
-            transformation_warnings=outcome.warnings_json,
-        )
-
-        if not outcome.success:
-            save_checkpoint(config_name, batch_num - 1, total_rows, last_seen_pk=last_seen_pk)
-            return total_rows, batch_num, outcome.error_message
-
-        save_checkpoint(config_name, batch_num, total_rows, last_seen_pk=last_seen_pk)
-
-        if job_id:
-            try:
-                _write_heartbeat(job_id, config_name, batch_num)
-            except Exception:
-                pass
-
-        if checkpoint_callback:
-            checkpoint_callback(config_name, batch_num, total_rows)
-        if progress_callback:
-            progress_callback(batch_num, total_rows, rows_in_batch)
-
-        log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
-
-        batch_duration = time.time() - batch_start
-        if migration_logger:
-            migration_logger.log(
-                step=config_name, batch=batch_num, event="batch_inserted",
-                rows=rows_in_batch, duration_s=round(batch_duration, 3),
-                total_rows=total_rows,
-            )
-            migration_logger.record_batch_time(config_name, batch_duration)
-            migration_logger.record_rows(config_name, total_rows)
-            eta = migration_logger.estimate_eta(
-                config_name, batch_num, total_source_rows, total_rows
-            )
-            if eta and batch_num % 10 == 0:
-                log(f"ETA: {eta}", "⏱️")
-
-        if first_batch:
-            try:
-                batch_mem_mb = df_batch.memory_usage(deep=True).sum() / (1024 * 1024)
-                if batch_mem_mb > MEMORY_PER_BATCH_TARGET_MB:
-                    scale = MEMORY_PER_BATCH_TARGET_MB / batch_mem_mb
-                    adaptive_batch_size = max(100, int(batch_size * scale))
-                    log(
-                        f"Batch 1 memory: {batch_mem_mb:.0f}MB — "
-                        f"reducing batch_size from {batch_size} to {adaptive_batch_size}",
-                        "⚠️",
-                    )
-            except Exception:
-                pass
-            first_batch = False
-
-        if batch_num > 1 and batch_num % REEVAL_INTERVAL == 0:
-            try:
-                batch_mem_mb = df_batch.memory_usage(deep=True).sum() / (1024 * 1024)
-                if batch_mem_mb > MEMORY_PER_BATCH_TARGET_MB * 1.5:
-                    scale = MEMORY_PER_BATCH_TARGET_MB / batch_mem_mb
-                    adaptive_batch_size = max(100, int(adaptive_batch_size * scale))
-                    log(
-                        f"Batch {batch_num}: memory {batch_mem_mb:.0f}MB — "
-                        f"reducing batch_size to {adaptive_batch_size}",
-                        "⚠️",
-                    )
-                elif batch_mem_mb < MEMORY_PER_BATCH_TARGET_MB * 0.3:
-                    new_size = min(batch_size, int(adaptive_batch_size * 1.5))
-                    if new_size != adaptive_batch_size:
-                        adaptive_batch_size = new_size
-                        log(
-                            f"Batch {batch_num}: memory {batch_mem_mb:.0f}MB — "
-                            f"increasing batch_size to {adaptive_batch_size}",
-                            "ℹ️",
-                        )
-            except Exception:
-                pass
-
-        del df_batch
-        gc.collect()
-
-        if test_mode:
-            log("Stopping after first batch (Test Mode)", "🛑")
-            break
-
-    return total_rows, batch_num, ""
-
-
-# ---------------------------------------------------------------------------
-# OFFSET fallback for tables without PK
-# ---------------------------------------------------------------------------
-
-
-def _process_batches_offset(
-    *,
-    src_engine,
-    tgt_engine,
-    select_query: str,
-    config: dict,
-    config_name: str,
-    target_table: str,
-    target_conn_config: dict,
-    batch_size: int,
-    skip_batches: int,
-    test_mode: bool,
-    total_source_rows: int,
-    log: LogCallback,
-    progress_callback,
-    checkpoint_callback,
-    batch_insert_callback,
-    shutdown_event: threading.Event | None = None,
-    job_id: str | None = None,
-    insert_strategy: str = "append",
-    tgt_pk_columns: list[str] | None = None,
-    migration_logger=None,
-) -> tuple[int, int, str]:
-    """Fallback: OFFSET-based pagination for tables without PK.
-
-    For PostgreSQL source: uses ctid for deterministic physical ordering.
-    For MSSQL source: uses ROW_NUMBER() OVER (ORDER BY (SELECT 0)) surrogate key.
-    For other databases: raises ValueError.
-    """
-    dialect = src_engine.dialect.name if hasattr(src_engine, "dialect") else ""
-
-    if dialect == "postgresql":
-        wrapped = (
-            f"SELECT *, ctid FROM ({select_query}) AS _offset_src "
-            f"ORDER BY ctid LIMIT :batch_size OFFSET :offset"
-        )
-    elif dialect == "mssql":
-        wrapped = (
-            f"SELECT * FROM ("
-            f"  SELECT *, ROW_NUMBER() OVER (ORDER BY (SELECT 0)) AS _surrogate_row_num "
-            f"  FROM ({select_query}) AS _offset_src"
-            f") AS _offset_paged "
-            f"WHERE _surrogate_row_num > :offset "
-            f"AND _surrogate_row_num <= :offset + :batch_size "
-            f"ORDER BY _surrogate_row_num"
-        )
+    if is_pg:
+        src_read_target = src_engine.connect()
+        src_read_target.execute(text("SET statement_timeout = 0"))
+        src_read_target.commit()
     else:
-        raise ValueError(
-            f"Cannot paginate table without PK or unique index on '{dialect}'. "
-            f"Specify 'pk_columns' in the config or add a primary key to the source table."
+        src_read_target = src_engine
+
+    try:
+        data_iterator = pd.read_sql(
+            select_query, src_read_target, chunksize=batch_size, coerce_float=False
         )
 
-    checkpoint = load_checkpoint(config_name)
-    total_rows = checkpoint.get("rows_processed", 0) if checkpoint else 0
-    start_batch = checkpoint.get("last_batch", 0) if checkpoint else 0
+        for df_batch in data_iterator:
+            batch_num += 1
+            rows_in_batch = len(df_batch)
 
-    offset = max(skip_batches, start_batch) * batch_size
-    batch_num = max(skip_batches, start_batch)
+            if batch_num <= skip_batches:
+                total_rows += rows_in_batch
+                log(f"Batch {batch_num}: Skipped (checkpoint)", "⏭️")
+                continue
 
-    log(
-        f"OFFSET-based pagination ({dialect}) starting at offset={offset}",
-        "⚠️",
-    )
-
-    while True:
-        _check_shutdown(shutdown_event)
-        _check_memory(log, batch_num + 1)
-        batch_start = time.time()
-
-        try:
-            df_batch = _read_batch_with_retry(
-                src_engine,
-                wrapped,
-                {"batch_size": batch_size, "offset": offset},
-                batch_num + 1,
-                log,
+            outcome = _process_single_batch(
+                df_batch=df_batch,
+                batch_num=batch_num,
+                config=config,
+                config_name=config_name,
+                target_table=target_table,
+                target_conn_config=target_conn_config,
+                tgt_engine=tgt_engine,
+                total_rows=total_rows,
+                log=log,
+                progress_callback=progress_callback,
+                checkpoint_callback=checkpoint_callback,
             )
-        except Exception as e:
-            save_checkpoint(config_name, batch_num, total_rows)
-            return total_rows, batch_num, f"Source read error: {e}"
 
-        if df_batch.empty:
-            break
+            if outcome is None:
+                continue
 
-        rows_in_batch = len(df_batch)
+            total_rows = outcome.rows_cumulative
 
-        if "ctid" in df_batch.columns:
-            df_batch = df_batch.drop(columns=["ctid"])
-
-        if "_surrogate_row_num" in df_batch.columns:
-            df_batch = df_batch.drop(columns=["_surrogate_row_num"])
-
-        batch_num += 1
-
-        outcome = _process_single_batch(
-            df_batch=df_batch,
-            batch_num=batch_num,
-            config=config,
-            config_name=config_name,
-            target_table=target_table,
-            target_conn_config=target_conn_config,
-            tgt_engine=tgt_engine,
-            total_rows=total_rows,
-            log=log,
-            progress_callback=progress_callback,
-            checkpoint_callback=checkpoint_callback,
-            insert_strategy=insert_strategy,
-            tgt_pk_columns=tgt_pk_columns,
-            migration_logger=migration_logger,
-        )
-
-        if outcome is None:
-            del df_batch
-            gc.collect()
-            offset += batch_size
-            continue
-
-        total_rows = outcome.rows_cumulative
-
-        _safe_notify_callback(
-            batch_insert_callback,
-            config_name=config_name,
-            batch_round=batch_num - 1,
-            rows_in_batch=outcome.rows_in_batch if outcome.success else 0,
-            rows_cumulative=outcome.rows_cumulative,
-            batch_size=batch_size,
-            total_records_in_config=total_source_rows,
-            status="success" if outcome.success else "failed",
-            error_message=outcome.error_message or None,
-            transformation_warnings=outcome.warnings_json,
-        )
-
-        if not outcome.success:
-            save_checkpoint(config_name, batch_num - 1, total_rows)
-            return total_rows, batch_num, outcome.error_message
-
-        save_checkpoint(config_name, batch_num, total_rows)
-
-        if job_id:
-            try:
-                _write_heartbeat(job_id, config_name, batch_num)
-            except Exception:
-                pass
-
-        if checkpoint_callback:
-            checkpoint_callback(config_name, batch_num, total_rows)
-        if progress_callback:
-            progress_callback(batch_num, total_rows, rows_in_batch)
-
-        log(f"Batch {batch_num}: Inserted {rows_in_batch} rows", "💾")
-
-        batch_duration = time.time() - batch_start
-        if migration_logger:
-            migration_logger.log(
-                step=config_name, batch=batch_num, event="batch_inserted",
-                rows=rows_in_batch, duration_s=round(batch_duration, 3),
-                total_rows=total_rows, pagination="offset",
+            _safe_notify_callback(
+                batch_insert_callback,
+                config_name=config_name,
+                batch_round=batch_num - 1,
+                rows_in_batch=outcome.rows_in_batch if outcome.success else 0,
+                rows_cumulative=outcome.rows_cumulative,
+                batch_size=batch_size,
+                total_records_in_config=total_source_rows,
+                status="success" if outcome.success else "failed",
+                error_message=outcome.error_message or None,
+                transformation_warnings=outcome.warnings_json,
             )
-            migration_logger.record_batch_time(config_name, batch_duration)
-            migration_logger.record_rows(config_name, total_rows)
 
-        offset += batch_size
-        del df_batch
-        gc.collect()
+            if not outcome.success:
+                error_message = outcome.error_message
+                break
 
-        if test_mode:
-            log("Stopping after first batch (Test Mode)", "🛑")
-            break
+            if test_mode:
+                log("Stopping after first batch (Test Mode)", "🛑")
+                break
+    finally:
+        if is_pg:
+            src_read_target.close()
 
     return total_rows, batch_num, ""
 

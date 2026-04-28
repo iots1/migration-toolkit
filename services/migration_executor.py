@@ -727,11 +727,17 @@ def _process_batches(
     source_table = config.get("source", {}).get("table", "")
 
     config_pk = config.get("pk_columns")
-    pk_columns = config_pk if config_pk else _detect_pk_columns(src_engine, source_table)
+    # When generate_sql is set without explicit pk_columns, the custom SELECT may not
+    # include the auto-detected schema PK, making cursor ORDER BY invalid.
+    # Only cursor-paginate if pk_columns were explicitly configured by the user.
+    if not config_pk and config.get("generate_sql"):
+        pk_columns = None
+    else:
+        pk_columns = config_pk if config_pk else _detect_pk_columns(src_engine, source_table)
 
     if pk_columns is None:
         log(
-            "WARNING: No PK or unique index detected on source table. "
+            "WARNING: No PK or unique index detected on source table (or generate_sql used without pk_columns). "
             "Falling back to OFFSET-based pagination (non-deterministic for resume). "
             "Consider adding a PK, unique index, or specify 'pk_columns' in the config.",
             "⚠️",

@@ -112,7 +112,7 @@ def build_paginated_select_expanded(
 
         WHERE a > :pk_0 OR (a = :pk_0 AND b > :pk_1)
 
-    Works on ALL databases including MySQL 5.x and MSSQL.
+    Works on MySQL 5.x and other databases that support LIMIT.
     """
     pk_params: dict = {"batch_size": batch_size}
 
@@ -143,14 +143,57 @@ def build_paginated_select_expanded(
     ), pk_params
 
 
+def build_paginated_select_mssql(
+    base_query: str,
+    pk_columns: list[str],
+    last_seen_pk: tuple | None = None,
+    batch_size: int = 1000,
+) -> tuple[text, dict]:
+    """MSSQL cursor pagination using expanded OR-chain + FETCH NEXT syntax.
+
+    MSSQL does not support LIMIT; uses ``OFFSET 0 ROWS FETCH NEXT n ROWS ONLY``
+    which requires an ORDER BY clause (always present here).
+    """
+    pk_params: dict = {"batch_size": batch_size}
+
+    if last_seen_pk is not None:
+        for i, v in enumerate(last_seen_pk):
+            pk_params[f"pk_{i}"] = v
+
+        conditions = []
+        for depth in range(len(pk_columns)):
+            eq_parts = []
+            for i in range(depth):
+                eq_parts.append(f'"{pk_columns[i]}" = :pk_{i}')
+            gt_part = f'"{pk_columns[depth]}" > :pk_{depth}'
+            if eq_parts:
+                conditions.append(f"({' AND '.join(eq_parts)} AND {gt_part})")
+            else:
+                conditions.append(gt_part)
+        where_clause = f"WHERE ({' OR '.join(conditions)})"
+    else:
+        where_clause = ""
+
+    order_clause = ", ".join(f'"{c}"' for c in pk_columns)
+    return text(
+        f"SELECT * FROM ({base_query}) AS _paginated_src "
+        f"{where_clause} "
+        f"ORDER BY {order_clause} "
+        f"OFFSET 0 ROWS FETCH NEXT :batch_size ROWS ONLY"
+    ), pk_params
+
+
 def select_pagination_builder(engine) -> callable:
     """Return the correct pagination builder for the engine's dialect.
 
-    PostgreSQL uses row-value comparison; MySQL/MSSQL use expanded OR-chain.
+    PostgreSQL uses row-value comparison; MSSQL uses FETCH NEXT syntax;
+    MySQL/others use expanded OR-chain with LIMIT.
     """
     dialect = engine.dialect.name if hasattr(engine, "dialect") else ""
     if dialect == "postgresql":
         return build_paginated_select
+    if dialect == "mssql":
+        return build_paginated_select_mssql
     return build_paginated_select_expanded
 
 

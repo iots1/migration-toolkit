@@ -153,8 +153,10 @@ def run_single_migration(
             log_callback(msg, icon)
 
     config_name = config.get("config_name", "migration")
-    source_table = config.get("source", {}).get("table", "")
-    target_table = config.get("target", {}).get("table", "")
+    src_db_type = source_conn_config.get("db_type", "")
+    tgt_db_type = target_conn_config.get("db_type", "")
+    source_table = _qualify_table_name(config.get("source", {}).get("table", ""), src_db_type)
+    target_table = _qualify_table_name(config.get("target", {}).get("table", ""), tgt_db_type)
     start_time = time.time()
     mlog = migration_logger
 
@@ -202,7 +204,6 @@ def run_single_migration(
     _set_keepalive(tgt_engine)
 
     try:
-        src_db_type = source_conn_config.get("db_type", "")
         log(
             f"Source connected: {src_db_type} "
             f"(charset: {source_conn_config.get('charset') or 'default'})",
@@ -495,6 +496,28 @@ def _quote_identifier(name: str) -> str:
     return ".".join(f'"{part.strip().strip(chr(34))}"' for part in name.split("."))
 
 
+def _qualify_table_name(table: str, db_type: str) -> str:
+    if not table:
+        return table
+    if db_type == "Microsoft SQL Server" and "." not in table:
+        return f"dbo.{table}"
+    return table
+
+
+def _qualify_sql_tables(sql: str, db_type: str) -> str:
+    if db_type != "Microsoft SQL Server":
+        return sql
+    pattern = r'\b(FROM|JOIN)\s+([a-zA-Z_][\w]*(?:\.[a-zA-Z_][\w]*)?)\b'
+
+    def _replacer(m):
+        keyword, table_ref = m.group(1), m.group(2)
+        if "." not in table_ref:
+            return f"{keyword} dbo.{table_ref}"
+        return m.group(0)
+
+    return _re.sub(pattern, _replacer, sql, flags=_re.IGNORECASE)
+
+
 # ---------------------------------------------------------------------------
 # SQL statement splitter (dollar-quote aware)
 # ---------------------------------------------------------------------------
@@ -620,6 +643,7 @@ def _prepare_select_query(
 
     if generate_sql:
         log("generate_sql found — using custom SQL (JOIN/WHERE included)", "📋")
+        generate_sql = _qualify_sql_tables(generate_sql.rstrip(";"), src_db_type)
         remapped = [
             {**m, "source": m["target"]}
             for m in config.get("mappings", [])

@@ -24,7 +24,11 @@ def build_select_query(config: dict, source_table: str, db_type: str = DbType.MY
 
     - Skips ignored columns and GENERATE_HN columns (generated in-process).
     - Applies TRIM at SQL level for MSSQL CHAR columns to remove padding.
+    - Auto-qualifies table name with default schema for MSSQL (dbo).
     """
+    if db_type == "Microsoft SQL Server" and "." not in source_table:
+        source_table = f"dbo.{source_table}"
+
     try:
         if not config or "mappings" not in config:
             return f"SELECT * FROM {source_table}"

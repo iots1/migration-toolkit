@@ -984,7 +984,7 @@ def _process_batches_offset(
 ) -> tuple[int, int, str]:
     """Fallback: OFFSET-based pagination for tables without PK.
 
-    For PostgreSQL source: uses ctid for deterministic physical ordering.
+    For PostgreSQL source: plain LIMIT/OFFSET (non-deterministic — no stable sort available in subquery).
     For MSSQL source: uses ROW_NUMBER() OVER (ORDER BY (SELECT 0)) surrogate key.
     For other databases: raises ValueError.
     """
@@ -992,8 +992,8 @@ def _process_batches_offset(
 
     if dialect == "postgresql":
         wrapped = (
-            f"SELECT *, ctid FROM ({select_query}) AS _offset_src "
-            f"ORDER BY ctid LIMIT :batch_size OFFSET :offset"
+            f"SELECT * FROM ({select_query}) AS _offset_src "
+            f"LIMIT :batch_size OFFSET :offset"
         )
     elif dialect == "mssql":
         wrapped = (

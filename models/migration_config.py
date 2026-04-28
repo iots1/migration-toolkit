@@ -142,3 +142,4 @@ class ConfigRecord:
     generate_sql: str | None = None
     condition: str | None = None
     lookup: str | None = None
+    pk_columns: str | None = None

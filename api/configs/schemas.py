@@ -21,6 +21,7 @@ class CreateConfigSchema(BaseModel):
     generate_sql: str | None = None
     condition: str | None = None
     lookup: str | None = None
+    pk_columns: str | None = None
 
 
 class UpdateConfigSchema(BaseModel):
@@ -36,6 +37,7 @@ class UpdateConfigSchema(BaseModel):
     generate_sql: str | None = None
     condition: str | None = None
     lookup: str | None = None
+    pk_columns: str | None = None
 
 
 class ConfigSchema(BaseModel):

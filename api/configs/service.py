@@ -27,6 +27,7 @@ class ConfigsService(BaseService):
         "generate_sql",
         "condition",
         "lookup",
+        "pk_columns",
         "created_at",
         "created_by",
         "updated_at",
@@ -126,6 +127,7 @@ class ConfigsService(BaseService):
             "generate_sql": existing.get("generate_sql"),
             "condition": existing.get("condition"),
             "lookup": existing.get("lookup"),
+            "pk_columns": existing.get("pk_columns"),
         })
 
     def get_history(self, config_name: str) -> list[dict]:
@@ -174,4 +176,5 @@ class ConfigsService(BaseService):
             generate_sql=data.get("generate_sql") if "generate_sql" in data else ex.get("generate_sql"),
             condition=data.get("condition") if "condition" in data else ex.get("condition"),
             lookup=data.get("lookup") if "lookup" in data else ex.get("lookup"),
+            pk_columns=data.get("pk_columns") if "pk_columns" in data else ex.get("pk_columns"),
         )

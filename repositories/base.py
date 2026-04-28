@@ -44,6 +44,7 @@ TABLES_DDL = [
         generate_sql TEXT,
         condition TEXT,
         lookup TEXT,
+        pk_columns TEXT,
         updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         created_by UUID,

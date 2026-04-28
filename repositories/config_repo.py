@@ -28,6 +28,7 @@ def save(record: ConfigRecord, config_id: str | None = None) -> tuple[bool, str]
         "generate_sql": record.generate_sql or None,
         "condition": record.condition or None,
         "lookup": record.lookup or None,
+        "pk_columns": record.pk_columns or None,
     }
 
     try:
@@ -59,6 +60,7 @@ def save(record: ConfigRecord, config_id: str | None = None) -> tuple[bool, str]
                             generate_sql = :generate_sql,
                             condition = :condition,
                             lookup = :lookup,
+                            pk_columns = :pk_columns,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE id = :id
                     """),
@@ -70,12 +72,12 @@ def save(record: ConfigRecord, config_id: str | None = None) -> tuple[bool, str]
                         INSERT INTO configs (
                             config_name, table_name, json_data,
                             datasource_source_id, datasource_target_id,
-                            config_type, script, generate_sql, condition, lookup,
+                            config_type, script, generate_sql, condition, lookup, pk_columns,
                             updated_at
                         ) VALUES (
                             :config_name, :table_name, :json_data,
                             :datasource_source_id, :datasource_target_id,
-                            :config_type, :script, :generate_sql, :condition, :lookup,
+                            :config_type, :script, :generate_sql, :condition, :lookup, :pk_columns,
                             CURRENT_TIMESTAMP
                         )
                     """),
@@ -145,6 +147,7 @@ def get_all_list() -> list[dict]:
                     c.generate_sql,
                     c.condition,
                     c.lookup,
+                    c.pk_columns,
                     c.created_at,
                     c.created_by,
                     c.updated_at,
@@ -200,6 +203,7 @@ def get_content(config_name: str) -> dict | None:
         merged["config_type"] = data.get("config_type") or parsed.get("config_type", "std")
         merged["script"] = data.get("script") or parsed.get("script", "")
         merged["generate_sql"] = data.get("generate_sql") or parsed.get("generate_sql", "")
+        merged["pk_columns"] = data.get("pk_columns") or parsed.get("pk_columns") or None
         ds_src_id = data.get("datasource_source_id")
         merged["_datasource_source_id"] = str(ds_src_id) if ds_src_id else None
         ds_tgt_id = data.get("datasource_target_id")
@@ -214,7 +218,7 @@ def get_by_id_raw(config_id: str) -> dict | None:
             text("""
                 SELECT id::text AS id, config_name, table_name, json_data,
                        datasource_source_id::text, datasource_target_id::text,
-                       config_type, script, generate_sql, condition, lookup,
+                       config_type, script, generate_sql, condition, lookup, pk_columns,
                        created_at, created_by, updated_at, updated_by,
                        is_deleted, deleted_at, deleted_by, deleted_reason
                 FROM configs WHERE id = :id

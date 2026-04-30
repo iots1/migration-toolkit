@@ -85,3 +85,4 @@ htmlcov/
 *.temp
 .tmp/
 .aider*
+.gitnexus

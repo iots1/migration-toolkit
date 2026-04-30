@@ -202,6 +202,16 @@ class PipelineExecutor:
         self._batch_buffer_lock = threading.Lock()
         self._batch_buffer_limit = 5
 
+    @property
+    def _job_uuid(self) -> uuid.UUID | None:
+        """Parse self._job_id to UUID once, cached per call site."""
+        if not self._job_id:
+            return None
+        try:
+            return uuid.UUID(self._job_id)
+        except ValueError:
+            return None
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -228,40 +238,22 @@ class PipelineExecutor:
             use_edges = isinstance(item, dict)
             config_name = item["config_name"] if use_edges else item.config_name
 
-            if use_edges:
-                if steps_state.get(config_name, {}).get("status") == "completed":
-                    results[config_name] = StepResult(
-                        status="success",
-                        config_name=config_name,
-                        rows_processed=steps_state[config_name].get(
-                            "rows_processed", 0
-                        ),
-                    )
-                    self._log(
-                        f"[{config_name}] Skipped — already completed in previous run",
-                        "✅",
-                    )
-                    continue
-            else:
+            if not use_edges:
                 step = item
                 if not step.enabled:
                     results[step.config_name] = StepResult(
                         status="skipped", config_name=step.config_name
                     )
                     continue
-                if steps_state.get(step.config_name, {}).get("status") == "completed":
-                    results[step.config_name] = StepResult(
-                        status="success",
-                        config_name=step.config_name,
-                        rows_processed=steps_state[step.config_name].get(
-                            "rows_processed", 0
-                        ),
-                    )
-                    self._log(
-                        f"[{step.config_name}] Skipped — already completed in previous run",
-                        "✅",
-                    )
-                    continue
+
+            if steps_state.get(config_name, {}).get("status") == "completed":
+                results[config_name] = StepResult(
+                    status="success",
+                    config_name=config_name,
+                    rows_processed=steps_state[config_name].get("rows_processed", 0),
+                )
+                self._log(f"[{config_name}] Skipped — already completed in previous run", "✅")
+                continue
 
             should_skip, reason = self._should_skip(config_name, results)
             if should_skip:
@@ -658,6 +650,38 @@ class PipelineExecutor:
     # Private — Kahn's topological sort
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Private — Graph helpers (shared by sort and level methods)
+    # ------------------------------------------------------------------
+
+    def _build_edge_graph(self) -> tuple[dict[str, dict], dict[str, int], dict[str, list[str]]]:
+        """Build adjacency graph from pipeline edges + nodes.
+
+        Returns (nodes_by_name, in_degree, adjacency).
+        """
+        nodes_by_name: dict[str, dict] = {
+            n["config_name"]: n for n in self._pipeline.nodes
+        }
+        in_degree: dict[str, int] = {name: 0 for name in nodes_by_name}
+        adjacency: dict[str, list[str]] = {name: [] for name in nodes_by_name}
+
+        for edge in self._pipeline.edges:
+            src = edge.get("source_config_name", "")
+            tgt = edge.get("target_config_name", "")
+            if src in nodes_by_name and tgt in nodes_by_name:
+                adjacency[src].append(tgt)
+                in_degree[tgt] += 1
+
+        return nodes_by_name, in_degree, adjacency
+
+    def _check_circular(self, visited_count: int, total: int, in_degree: dict, label: str = "Nodes") -> None:
+        if visited_count != total:
+            involved = [n for n, d in in_degree.items() if d > 0]
+            raise ValueError(
+                f"Circular dependency detected in pipeline '{self._pipeline.name}'. "
+                f"{label} involved: {involved}"
+            )
+
     def _resolve_execution_levels(self) -> list[list]:
         """Return steps grouped by dependency level for parallel execution.
 
@@ -669,25 +693,13 @@ class PipelineExecutor:
         if self._pipeline.nodes:
             return [sorted(self._pipeline.nodes, key=lambda n: n.get("order_sort", 0))]
         if self._pipeline.steps:
-            levels = self._resolve_levels_from_steps()
+            levels = self._resolve_order_from_steps()
             return [[s] for s in levels]
         return []
 
     def _resolve_levels_from_edges(self) -> list[list[dict]]:
         """Level-aware topological sort from pipeline_edges + pipeline_nodes."""
-        nodes_by_name: dict[str, dict] = {
-            n["config_name"]: n for n in self._pipeline.nodes
-        }
-
-        in_degree: dict[str, int] = {name: 0 for name in nodes_by_name}
-        adjacency: dict[str, list[str]] = {name: [] for name in nodes_by_name}
-
-        for edge in self._pipeline.edges:
-            src = edge.get("source_config_name", "")
-            tgt = edge.get("target_config_name", "")
-            if src in nodes_by_name and tgt in nodes_by_name:
-                adjacency[src].append(tgt)
-                in_degree[tgt] += 1
+        nodes_by_name, in_degree, adjacency = self._build_edge_graph()
 
         current_level = sorted(
             (name for name, deg in in_degree.items() if deg == 0),
@@ -707,13 +719,9 @@ class PipelineExecutor:
                         next_level.append(neighbor)
             current_level = sorted(next_level, key=lambda n: nodes_by_name[n].get("order_sort", 0))
 
-        if sum(len(lvl) for lvl in levels) != len(nodes_by_name):
-            involved = [n for n, d in in_degree.items() if d > 0]
-            raise ValueError(
-                f"Circular dependency detected in pipeline '{self._pipeline.name}'. "
-                f"Nodes involved: {involved}"
-            )
-
+        self._check_circular(
+            sum(len(lvl) for lvl in levels), len(nodes_by_name), in_degree
+        )
         return levels
 
     def _resolve_levels_from_steps(self) -> list[PipelineStep]:
@@ -740,19 +748,7 @@ class PipelineExecutor:
 
     def _resolve_order_from_edges(self) -> list[dict]:
         """Topological sort from pipeline_edges + pipeline_nodes."""
-        nodes_by_name: dict[str, dict] = {
-            n["config_name"]: n for n in self._pipeline.nodes
-        }
-
-        in_degree: dict[str, int] = {name: 0 for name in nodes_by_name}
-        adjacency: dict[str, list[str]] = {name: [] for name in nodes_by_name}
-
-        for edge in self._pipeline.edges:
-            src = edge.get("source_config_name", "")
-            tgt = edge.get("target_config_name", "")
-            if src in nodes_by_name and tgt in nodes_by_name:
-                adjacency[src].append(tgt)
-                in_degree[tgt] += 1
+        nodes_by_name, in_degree, adjacency = self._build_edge_graph()
 
         queue: deque[str] = deque(
             sorted(
@@ -772,13 +768,7 @@ class PipelineExecutor:
                 if in_degree[neighbor] == 0:
                     queue.append(neighbor)
 
-        if len(ordered) != len(nodes_by_name):
-            involved = [n for n, d in in_degree.items() if d > 0]
-            raise ValueError(
-                f"Circular dependency detected in pipeline '{self._pipeline.name}'. "
-                f"Nodes involved: {involved}"
-            )
-
+        self._check_circular(len(ordered), len(nodes_by_name), in_degree)
         return ordered
 
     def _resolve_order_from_steps(self) -> list[PipelineStep]:
@@ -989,10 +979,7 @@ class PipelineExecutor:
         transformation_warnings: str | None = None,
     ) -> None:
         try:
-            job_id = None
-            if hasattr(self._run_repo, "_job_id"):
-                job_id = self._run_repo._job_id
-
+            job_id = self._job_uuid
             pipeline_id = uuid.UUID(self._pipeline.id)
 
             record = PipelineRunRecord(
@@ -1114,7 +1101,7 @@ class PipelineExecutor:
         try:
             record = PipelineRunRecord(
                 pipeline_id=uuid.UUID(self._pipeline.id),
-                job_id=uuid.UUID(self._job_id) if self._job_id else None,
+                job_id=self._job_uuid,
                 config_name=config_name,
                 batch_round=-1,
                 status=step_status,
@@ -1130,7 +1117,7 @@ class PipelineExecutor:
                 from models.job import JobUpdateRecord as _JobUpdate
 
                 _jr.update(
-                    uuid.UUID(self._job_id),
+                    self._job_uuid,
                     _JobUpdate(
                         status="running",
                         error_message=error_message[:300] if error_message else None,

@@ -424,9 +424,17 @@ def batch_insert(
                 except Exception:
                     pass
     else:
+        schema = None
+        table_name = target_table
+        if "." in target_table:
+            parts = target_table.split(".", 1)
+            schema = parts[0]
+            table_name = parts[1]
+
         with engine.begin() as conn:
             df.to_sql(
-                name=target_table, con=conn, if_exists="append",
+                name=table_name, con=conn, schema=schema,
+                if_exists="append",
                 index=False, method="multi", dtype=dtype_map or None,
             )
 

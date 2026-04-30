@@ -460,6 +460,10 @@ def _set_keepalive(engine) -> None:
     if "postgresql" not in str(engine.url):
         return
 
+    ka_attr = "_his_keepalive_registered"
+    if getattr(engine, ka_attr, False):
+        return
+
     @event.listens_for(engine, "connect")
     def _apply_keepalive(dbapi_conn, connection_record):
         try:
@@ -469,6 +473,8 @@ def _set_keepalive(engine) -> None:
             dbapi_conn.set_keepalives_count(5)
         except Exception:
             pass
+
+    setattr(engine, ka_attr, True)
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +487,10 @@ def _tune_pg_migration_session(engine) -> None:
     if "postgresql" not in str(engine.url):
         return
 
+    tuned_attr = "_his_tune_registered"
+    if getattr(engine, tuned_attr, False):
+        return
+
     @event.listens_for(engine, "connect")
     def _apply_migration_tuning(dbapi_conn, connection_record):
         cursor = dbapi_conn.cursor()
@@ -490,6 +500,8 @@ def _tune_pg_migration_session(engine) -> None:
         cursor.execute("SET maintenance_work_mem = '512MB'")
         cursor.execute("SET effective_cache_size = '4GB'")
         cursor.close()
+
+    setattr(engine, tuned_attr, True)
 
 
 def _quote_identifier(name: str) -> str:
@@ -657,9 +669,13 @@ def _prepare_select_query(
     return build_select_query(config, source_table, src_db_type), config
 
 
+_COUNT_TIMEOUT_SECONDS = 10
+
+
 def _count_source_rows(engine, select_query: str, source_table: str) -> int:
     try:
         with engine.connect() as conn:
+            conn.execute(text(f"SET statement_timeout = {_COUNT_TIMEOUT_SECONDS * 1000}"))
             count_sql = f"SELECT COUNT(*) FROM ({select_query}) AS _src_count"
             result = conn.execute(text(count_sql))
             return result.scalar() or 0
@@ -811,6 +827,18 @@ def _process_batches(
                 src_engine, query, params, batch_num + 1, log
             )
         except Exception as e:
+            _safe_notify_callback(
+                batch_insert_callback,
+                config_name=config_name,
+                batch_round=batch_num,
+                rows_in_batch=0,
+                rows_cumulative=total_rows,
+                batch_size=adaptive_batch_size,
+                total_records_in_config=total_source_rows,
+                status="failed",
+                error_message=f"Source read error: {e}",
+                transformation_warnings=None,
+            )
             save_checkpoint(config_name, batch_num, total_rows, last_seen_pk=last_seen_pk)
             return total_rows, batch_num, f"Source read error: {e}"
 
@@ -857,11 +885,6 @@ def _process_batches(
             tgt_pk_columns=tgt_pk_columns,
             migration_logger=migration_logger,
         )
-
-        if outcome is None:
-            del df_batch
-            gc.collect()
-            continue
 
         total_rows = outcome.rows_cumulative
 
@@ -1011,6 +1034,12 @@ def _process_batches_offset(
             f"AND _surrogate_row_num <= :offset + :batch_size "
             f"ORDER BY _surrogate_row_num"
         )
+        log(
+            "WARNING: MSSQL OFFSET pagination uses non-deterministic ordering. "
+            "Rows may be duplicated or skipped on resume. "
+            "Specify 'pk_columns' in the config for reliable cursor-based pagination.",
+            "⚠️",
+        )
     else:
         raise ValueError(
             f"Cannot paginate table without PK or unique index on '{dialect}'. "
@@ -1043,6 +1072,18 @@ def _process_batches_offset(
                 log,
             )
         except Exception as e:
+            _safe_notify_callback(
+                batch_insert_callback,
+                config_name=config_name,
+                batch_round=batch_num,
+                rows_in_batch=0,
+                rows_cumulative=total_rows,
+                batch_size=batch_size,
+                total_records_in_config=total_source_rows,
+                status="failed",
+                error_message=f"Source read error: {e}",
+                transformation_warnings=None,
+            )
             save_checkpoint(config_name, batch_num, total_rows)
             return total_rows, batch_num, f"Source read error: {e}"
 
@@ -1075,12 +1116,6 @@ def _process_batches_offset(
             tgt_pk_columns=tgt_pk_columns,
             migration_logger=migration_logger,
         )
-
-        if outcome is None:
-            del df_batch
-            gc.collect()
-            offset += batch_size
-            continue
 
         total_rows = outcome.rows_cumulative
 
@@ -1171,7 +1206,12 @@ def _process_single_batch(
         df_batch, bit_columns, val_warnings = transform_batch(df_batch, config)
     except Exception as e:
         log(f"Transformation Error in Batch {batch_num}: {e}", "⚠️")
-        return None
+        return _BatchOutcome(
+            success=False,
+            rows_in_batch=rows_in_batch,
+            rows_cumulative=total_rows,
+            error_message=f"Transformation error: {e}",
+        )
 
     warnings_json = (
         _json.dumps(val_warnings, ensure_ascii=False) if val_warnings else None

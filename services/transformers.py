@@ -2,15 +2,13 @@ import pandas as pd
 import numpy as np
 import re
 import random
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 class DataTransformer:
-    """
-    Service for handling data transformations in the ETL pipeline.
-    Optimized for Pandas Series (Batch Processing) but supports single value transformation.
-    """
-    _hn_counter = 0  # Counter for sequential HN generation
+    _hn_counter = 0
+    _hn_lock = threading.Lock()
 
     @staticmethod
     def apply_transformers_to_batch(df: pd.DataFrame, config: Dict[str, Any]) -> pd.DataFrame:
@@ -129,10 +127,10 @@ class DataTransformer:
             return series.apply(fill_null)
 
         if transformer_name == "GENERATE_HN":
-            # Generate sequential HN numbers for the entire series
-            start_counter = DataTransformer._hn_counter
+            with DataTransformer._hn_lock:
+                start_counter = DataTransformer._hn_counter
+                DataTransformer._hn_counter += len(series)
             result = pd.Series([f"HN{str(i).zfill(9)}" for i in range(start_counter + 1, start_counter + len(series) + 1)], index=series.index)
-            DataTransformer._hn_counter += len(series)
             return result
 
         # --- 2. Complex/Custom Logic (Apply per row) ---
@@ -302,14 +300,14 @@ class DataTransformer:
 
     @staticmethod
     def _generate_sequential_hn() -> str:
-        """Generate sequential HN number (e.g., HN000000001, HN000000002, ...)"""
-        DataTransformer._hn_counter += 1
-        return f"HN{str(DataTransformer._hn_counter).zfill(9)}"
+        with DataTransformer._hn_lock:
+            DataTransformer._hn_counter += 1
+            return f"HN{str(DataTransformer._hn_counter).zfill(9)}"
     
     @staticmethod
     def reset_hn_counter(start_value: int = 0):
-        """Reset HN counter to specified value (useful for testing or new migrations)"""
-        DataTransformer._hn_counter = start_value
+        with DataTransformer._hn_lock:
+            DataTransformer._hn_counter = start_value
 
     @staticmethod
     def apply_value_map(df: pd.DataFrame, source_col: str, target_col: str, params: dict) -> pd.DataFrame:

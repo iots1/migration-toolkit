@@ -44,6 +44,25 @@ class PipelineRunsService(BaseService):
     def _list_all(self) -> list[dict]:
         return pipeline_run_repo.get_all(limit=10_000, offset=0)
 
+    def find_page(self, params: QueryParams) -> dict:
+        """DB-level paginated list — avoids loading all records into memory."""
+        limit = params.limit
+        offset = (params.page - 1) * limit
+        total_records = pipeline_run_repo.count_all()
+        rows = pipeline_run_repo.get_page(limit=limit, offset=offset)
+        sanitized = self._sanitize_list(rows)
+
+        import math
+        total_pages = max(1, math.ceil(total_records / limit))
+        return {
+            "data": sanitized,
+            "total": total_records,
+            "total_records": total_records,
+            "page": params.page,
+            "page_size": limit,
+            "total_pages": total_pages,
+        }
+
     def find_by_id(self, id: str) -> dict:
         """Get pipeline run by ID."""
         run_id = self._parse_uuid(id)

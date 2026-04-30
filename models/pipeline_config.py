@@ -53,6 +53,8 @@ class PipelineConfig:
     error_strategy: str = "fail_fast"  # fail_fast | continue_on_error | skip_dependents
     batch_size: int = 1000
     truncate_targets: bool = False
+    parallel_enabled: bool = False
+    max_parallel_steps: int = 4
     created_at: str = ""
     updated_at: str = ""
 
@@ -76,6 +78,8 @@ class PipelineConfig:
             error_strategy=d.get("error_strategy", "fail_fast"),
             batch_size=d.get("batch_size", 1000),
             truncate_targets=d.get("truncate_targets", False),
+            parallel_enabled=d.get("parallel_enabled", False),
+            max_parallel_steps=d.get("max_parallel_steps", 4),
             created_at=d.get("created_at", ""),
             updated_at=d.get("updated_at", ""),
         )
@@ -91,6 +95,8 @@ class PipelineConfig:
             "error_strategy": self.error_strategy,
             "batch_size": self.batch_size,
             "truncate_targets": self.truncate_targets,
+            "parallel_enabled": self.parallel_enabled,
+            "max_parallel_steps": self.max_parallel_steps,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }

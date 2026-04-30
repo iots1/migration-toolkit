@@ -140,11 +140,64 @@ def get_running_runs() -> list[dict]:
         return rows_to_dicts(result)
 
 
-def get_by_job(job_id: uuid.UUID) -> list[dict]:
-    """Get all batch records for a specific job, ordered by created_at."""
+def get_page(limit: int = 25, offset: int = 0, job_id: uuid.UUID | None = None) -> list[dict]:
+    """Get a page of batch records with optional job_id filter."""
+    if job_id:
+        with get_transaction() as conn:
+            result = conn.execute(
+                text(f"SELECT {_COLUMNS} FROM pipeline_runs WHERE job_id = :job_id ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
+                {"job_id": job_id, "limit": limit, "offset": offset},
+            )
+            return rows_to_dicts(result)
     with get_transaction() as conn:
         result = conn.execute(
-            text(f"SELECT {_COLUMNS} FROM pipeline_runs WHERE job_id = :job_id ORDER BY created_at ASC"),
-            {"job_id": job_id},
+            text(f"SELECT {_COLUMNS} FROM pipeline_runs ORDER BY created_at DESC LIMIT :limit OFFSET :offset"),
+            {"limit": limit, "offset": offset},
         )
         return rows_to_dicts(result)
+
+
+def count_by_job(job_id: uuid.UUID) -> int:
+    """Count pipeline_runs for a specific job."""
+    with get_transaction() as conn:
+        result = conn.execute(
+            text("SELECT COUNT(*) FROM pipeline_runs WHERE job_id = :job_id"),
+            {"job_id": job_id},
+        )
+        return result.scalar()
+
+
+def save_batch(records: list[PipelineRunRecord]) -> list[uuid.UUID]:
+    """Bulk insert multiple batch records in a single transaction."""
+    if not records:
+        return []
+    ids = []
+    with get_transaction() as conn:
+        for record in records:
+            result = conn.execute(
+                text("""
+                    INSERT INTO pipeline_runs
+                    (pipeline_id, job_id, config_name, batch_round,
+                     rows_in_batch, rows_cumulative, batch_size, total_records_in_config,
+                     status, error_message, transformation_warnings)
+                    VALUES (:pipeline_id, :job_id, :config_name, :batch_round,
+                            :rows_in_batch, :rows_cumulative, :batch_size, :total_records_in_config,
+                            :status, :error_message, :transformation_warnings)
+                    RETURNING id
+                """),
+                {
+                    "pipeline_id": record.pipeline_id,
+                    "job_id": record.job_id,
+                    "config_name": record.config_name,
+                    "batch_round": record.batch_round,
+                    "rows_in_batch": record.rows_in_batch,
+                    "rows_cumulative": record.rows_cumulative,
+                    "batch_size": record.batch_size,
+                    "total_records_in_config": record.total_records_in_config,
+                    "status": record.status,
+                    "error_message": record.error_message,
+                    "transformation_warnings": record.transformation_warnings,
+                },
+            )
+            ids.append(result.scalar())
+    return ids

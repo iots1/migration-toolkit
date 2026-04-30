@@ -45,7 +45,11 @@ def update(job_id: uuid.UUID, patch: JobUpdateRecord) -> None:
             text("""
                 UPDATE jobs
                 SET status = :status,
-                    error_message = COALESCE(:error_message, error_message),
+                    error_message = CASE
+                        WHEN :error_message IS NULL THEN error_message
+                        WHEN error_message IS NULL THEN :error_message
+                        ELSE LEFT(error_message || E'\n' || :error_message, 2000)
+                    END,
                     total_config = COALESCE(:total_config, total_config),
                     summary = COALESCE(CAST(:summary AS jsonb), summary),
                     last_heartbeat = COALESCE(CAST(:last_heartbeat AS timestamptz), last_heartbeat),

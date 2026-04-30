@@ -40,7 +40,7 @@ def save(record: ConfigRecord, config_id: str | None = None) -> tuple[bool, str]
                 )
             else:
                 result = conn.execute(
-                    text("SELECT id FROM configs WHERE config_name = :name"),
+                    text("SELECT id FROM configs WHERE config_name = :name AND is_deleted = false"),
                     {"name": record.config_name},
                 )
             existing = result.fetchone()
@@ -84,7 +84,7 @@ def save(record: ConfigRecord, config_id: str | None = None) -> tuple[bool, str]
                     col_params,
                 )
                 result = conn.execute(
-                    text("SELECT id FROM configs WHERE config_name = :name"),
+                    text("SELECT id FROM configs WHERE config_name = :name AND is_deleted = false"),
                     {"name": record.config_name},
                 )
                 config_id = result.scalar()

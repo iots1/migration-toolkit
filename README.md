@@ -46,7 +46,7 @@ A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migratin
 
 ## 📋 Table of Contents
 
-- [Architecture](#architecture)
+- [Architecture](#architecture) — [Detailed Architecture Doc](ARCHITECTURE.md)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -69,74 +69,99 @@ A comprehensive, enterprise-grade toolkit for analyzing, profiling, and migratin
 
 ## 🏗️ Architecture
 
+> For a detailed architecture diagram with inter-module dependencies and execution flow traces, see [ARCHITECTURE.md](ARCHITECTURE.md).
+
 The codebase follows Clean Architecture with a dual-interface pattern: Streamlit (MVC dashboard) and FastAPI (REST API).
 
 ```
 his-analyzer/
 ├── app.py                          # Streamlit routing + sidebar navigation
-├── config.py                       # Constants: TRANSFORMER_OPTIONS, VALIDATOR_OPTIONS, DB_TYPES
-├── database.py                     # Legacy facade (deprecated, being removed)
+├── config.py                       # DATABASE_URL, paths, registry accessors
+├── database.py                     # Re-export facade (transitions to direct repo usage)
 │
 ├── api/                            # FastAPI REST API + Socket.IO
 │   ├── main.py                     # App setup, CORS, router registration, /ws mount
 │   ├── socket_manager.py           # Async Socket.IO server + emit_from_thread()
 │   ├── base/                       # Shared API infrastructure
-│   │   ├── controller.py           # BaseController (generic CRUD)
-│   │   ├── service.py              # BaseService with pagination/sanitize
-│   │   ├── exceptions.py           # JSON API error handlers
-│   │   └── json_api.py             # JSON:API response builder
-│   ├── datasources/                # /api/v1/datasources
-│   ├── configs/                    # /api/v1/configs (+ /histories, /versions)
-│   ├── pipelines/                  # /api/v1/pipelines (with nodes/edges)
-│   ├── pipeline_runs/              # /api/v1/pipeline-runs
-│   └── jobs/                       # /api/v1/jobs (POST → trigger background pipeline)
+│   │   ├── auth.py                 #   API key verification
+│   │   ├── controller.py           #   BaseController (generic CRUD)
+│   │   ├── service.py              #   BaseService with pagination/sanitize
+│   │   ├── exceptions.py           #   JSON API error handlers
+│   │   └── json_api.py             #   JSON:API response builder
+│   ├── datasources/                # /datasources
+│   ├── configs/                    # /configs (+ /histories, /versions)
+│   ├── pipelines/                  # /pipelines (with nodes/edges)
+│   ├── pipeline_runs/              # /pipeline-runs
+│   ├── jobs/                       # /jobs (POST → trigger background pipeline)
+│   ├── data_explorers/             # /data-explorers
+│   ├── transformers/               # /transformers
+│   └── validators/                 # /validators
 │
 ├── models/                         # Data classes (pure Python, no I/O)
-│   ├── datasource.py               #   Datasource dataclass
+│   ├── datasource.py               #   DatasourceRecord
+│   ├── db_type.py                  #   DbType enum
 │   ├── migration_config.py         #   ConfigRecord, MigrationConfig, MappingItem
 │   ├── job.py                      #   JobRecord, JobUpdateRecord
-│   └── pipeline_config.py          #   PipelineConfig, PipelineStep, PipelineNodeRecord,
-│                                   #     PipelineEdgeRecord, PipelineRunRecord
+│   └── pipeline_config.py          #   PipelineRecord, PipelineStep, PipelineNodeRecord,
+│                                   #     PipelineEdgeRecord, PipelineRunRecord, PipelineRunUpdateRecord
 │
 ├── protocols/                      # Protocol interfaces (DIP)
-│   └── repository.py               #   Repository protocol interfaces
+│   ├── repository.py               #   Repository protocol interfaces
+│   ├── transformer.py              #   Transformer protocol
+│   ├── database_dialect.py         #   Database dialect protocol
+│   └── validator.py                #   Validator protocol
 │
 ├── repositories/                   # Data access layer (PostgreSQL)
-│   ├── connection.py               #   SQLAlchemy engine singleton
-│   ├── base.py                     #   DDL + init_db()
+│   ├── connection.py               #   SQLAlchemy engine + transaction management
+│   ├── base.py                     #   DDL + init_db() + BaseRepo
 │   ├── datasource_repo.py          #   Datasource CRUD
-│   ├── config_repo.py              #   Config CRUD + versioning
+│   ├── config_repo.py              #   Config CRUD + versioning + diff
 │   ├── pipeline_repo.py            #   Pipeline CRUD + get_by_id (JOIN nodes/edges/configs)
 │   ├── pipeline_node_repo.py       #   Pipeline node CRUD
 │   ├── pipeline_edge_repo.py       #   Pipeline edge CRUD
-│   ├── pipeline_run_repo.py        #   Pipeline Run CRUD
-│   └── job_repo.py                 #   Job CRUD
+│   ├── pipeline_run_repo.py        #   Pipeline run tracking CRUD
+│   ├── job_repo.py                 #   Job CRUD
+│   └── utils.py                    #   row_to_dict and shared helpers
 │
 ├── services/                       # Business logic (no Streamlit imports)
-│   ├── datasource_repository.py    #   DatasourceRepository facade
+│   ├── datasource_repository.py    #   DatasourceRepository service-layer adapter
 │   ├── db_connector.py             #   SQLAlchemy engine factory (MySQL, PG, MSSQL)
+│   ├── connection_pool.py          #   Singleton connection pool for reuse
+│   ├── connection_tester.py        #   Validates database connectivity
+│   ├── query_executor.py           #   Executes SQL against source/target databases
+│   ├── query_builder.py            #   SELECT builder, batch transform, bulk insert
+│   ├── schema_inspector.py         #   Reads table/column metadata from source DBs
+│   ├── sql_validator.py            #   Validates SQL before execution
 │   ├── ml_mapper.py                #   SmartMapper: HIS dictionary + semantic matching
 │   ├── transformers.py             #   DataTransformer: vectorised Pandas transformations
+│   ├── migration_executor.py       #   Single-table ETL engine (generate_sql priority)
 │   ├── checkpoint_manager.py       #   Checkpoint save/load/clear for resumable migrations
 │   ├── migration_logger.py         #   Per-run ETL log files
 │   ├── encoding_helper.py          #   clean_dataframe for Thai legacy data
-│   ├── migration_executor.py       #   Single-table ETL engine (generate_sql priority)
-│   ├── pipeline_service.py         #   Pipeline orchestration + per-step datasource resolution
-│   └── query_builder.py            #   SELECT builder, batch transform, bulk insert
+│   └── pipeline_service.py         #   Pipeline orchestration + per-step datasource resolution
 │
 ├── dialects/                       # Database dialects (OCP)
+│   ├── base.py                     #   Base dialect protocol
 │   ├── mysql.py, postgresql.py, mssql.py
-│   └── registry.py                 #   Dialect registry
+│   └── registry.py                 #   Dialect registry (available_types, get)
 │
 ├── data_transformers/              # Data transformations (OCP)
-│   ├── text.py, dates.py, healthcare.py, names.py, data_type.py, lookup.py
+│   ├── base.py                     #   Base transformer protocol
+│   ├── text.py                     #   TRIM, UPPER_TRIM, LOWER_TRIM, CLEAN_SPACES
+│   ├── dates.py                    #   BUDDHIST_TO_ISO, ENG_DATE_TO_ISO
+│   ├── healthcare.py               #   GENERATE_HN, LOOKUP_VISIT/PATIENT/DOCTOR_ID
+│   ├── names.py                    #   SPLIT_THAI_NAME, SPLIT_ENG_NAME
+│   ├── data_type.py                #   FLOAT_TO_INT, BIT_CAST, TO_NUMBER
+│   ├── lookup.py                   #   VALUE_MAP, REPLACE_EMPTY_WITH_NULL
 │   └── registry.py                 #   @register_transformer decorator
 │
 ├── validators/                     # Data validators (OCP)
-│   ├── not_null.py, unique.py, range_check.py
+│   ├── common.py                   #   VALID_DATE, POSITIVE_NUMBER, IS_EMAIL, IS_PHONE, etc.
+│   ├── required.py                 #   REQUIRED, NOT_EMPTY
+│   ├── thai_id.py                  #   THAI_ID (13-digit checksum validation)
 │   └── registry.py                 #   @register_validator decorator
 │
-├── controllers/                    # MVC Controllers (6/6)
+├── controllers/                    # MVC Controllers
 │   ├── settings_controller.py
 │   ├── pipeline_controller.py
 │   ├── file_explorer_controller.py
@@ -145,17 +170,30 @@ his-analyzer/
 │   └── migration_engine_controller.py
 │
 ├── views/                          # MVC Views (pure rendering)
+│   ├── settings.py, settings_view.py
+│   ├── schema_mapper.py, schema_mapper_view.py
+│   ├── pipeline_view.py
+│   ├── migration_engine.py, migration_engine_view.py
+│   ├── er_diagram.py, er_diagram_view.py
+│   ├── file_explorer.py, file_explorer_view.py
 │   └── components/                 # Reusable UI components
-│       ├── schema_mapper/          # Source selector, mapping editor, config actions
-│       ├── migration/              # Step config, connections, execution
-│       └── shared/                 # Dialogs, styles
+│       ├── schema_mapper/          #   mapping_editor, config_actions, source_selector,
+│       │                           #   metadata_editor, history_viewer
+│       ├── migration/              #   step_config, step_review, step_connections,
+│       │                           #   step_execution
+│       └── shared/                 #   dialogs, styles
+│
+├── utils/                          # Stateless helpers
+│   ├── helpers.py                  #   Pure utility functions
+│   ├── state_manager.py            #   Streamlit session_state abstraction (PageState)
+│   ├── ui_components.py            #   Shared UI rendering helpers
+│   └── validators.py               #   UI-side validation utilities
 │
 ├── scripts/                        # Utility scripts
-│   ├── migrate_sqlite_to_pg.py     # One-time SQLite → PostgreSQL migration
-│   └── migrate_add_jobs_table.py   # Create jobs table + job_id FK
-│
 ├── tests/                          # pytest test suite
 ├── analysis_report/                # Database Analysis Engine (Shell)
+├── migration_checkpoints/          # Checkpoint state persistence
+├── logs/                           # ETL log files
 └── mini_his/                       # Mock HIS data
 ```
 
@@ -329,7 +367,13 @@ streamlit run app.py
 
 ### 1. Initialize Project Database
 
-On first run, the application automatically creates `migration_tool.db` SQLite database:
+Set the `DATABASE_URL` environment variable in your `.env` file:
+
+```bash
+DATABASE_URL=postgresql://user:password@localhost:5432/his_analyzer
+```
+
+On first run, the application automatically creates all required tables:
 
 ```bash
 # Using Makefile (recommended)
@@ -339,10 +383,13 @@ make run
 python3.11 -m streamlit run app.py --server.runOnSave true
 ```
 
-**The database is created automatically** with the following tables:
+**Tables are created automatically** via `repositories/base.py::init_db()`:
 
-- `datasources` - Stores database connection profiles
-- `configs` - Stores schema mapping configurations
+- `datasources` - Database connection profiles
+- `configs` - Schema mapping configurations
+- `pipelines`, `pipeline_nodes`, `pipeline_edges` - Pipeline workflow
+- `pipeline_runs` - Execution tracking
+- `jobs` - Background job management
 
 **No manual setup required!** The database initialization happens on application startup.
 
@@ -361,7 +408,7 @@ Navigate to **Settings** page in the Streamlit interface to manage datasources:
 5. Test connection
 6. Save datasource
 
-**Datasources are stored in SQLite** and reused across:
+**Datasources are stored in PostgreSQL** and reused across:
 
 - Schema Mapper (source & target selection)
 - Migration Engine (connection profiles)
@@ -596,7 +643,7 @@ The dashboard provides several interfaces:
    - Datasource: Select datasource → Choose table (auto-loads schema)
 2. **Target Configuration**: Select target datasource and table
 3. **Field Mapping**: Map source columns to target with suggestions
-4. **Save Configuration**: Store in SQLite for reuse
+4. **Save Configuration**: Store in PostgreSQL for reuse
 5. **Export**: Download as JSON for migration tools
 
 #### ⚙️ **Settings** (v8.0 New)
@@ -606,7 +653,7 @@ The dashboard provides several interfaces:
 - Add/Edit/Delete datasource profiles
 - Test database connections
 - View all configured datasources
-- Secure credential storage in SQLite
+- Secure credential storage in PostgreSQL
 
 **Saved Configs Tab:**
 
@@ -748,43 +795,30 @@ close_connection(db_type, host, port, db_name, user)
 close_all_connections()
 ```
 
-### Project Database (v8.0)
+### Project Database (PostgreSQL)
 
-**SQLite Storage:** `migration_tool.db`
+**Storage:** PostgreSQL (configured via `DATABASE_URL` environment variable)
 
-**Tables:**
+**Schema managed by** `repositories/base.py` — automatically created on startup via `init_db()`.
 
-1. **datasources** - Database connection profiles
+**Core Tables:**
 
-   ```sql
-   CREATE TABLE datasources (
-       id INTEGER PRIMARY KEY AUTOINCREMENT,
-       name TEXT UNIQUE,
-       db_type TEXT,
-       host TEXT,
-       port TEXT,
-       dbname TEXT,
-       username TEXT,
-       password TEXT
-   )
-   ```
+| Table | Purpose |
+|---|---|
+| `datasources` | Database connection profiles (host, port, credentials) |
+| `configs` | Schema mapping configurations with JSON data |
+| `config_histories` | Version history for configs (version, diff tracking) |
+| `pipelines` | Pipeline definitions with JSON workflow data |
+| `pipeline_nodes` | Pipeline graph nodes (step definitions) |
+| `pipeline_edges` | Pipeline graph edges (step dependencies) |
+| `pipeline_runs` | Pipeline execution tracking (status, steps JSON) |
+| `jobs` | Background job management |
 
-2. **configs** - Schema mapping configurations
-   ```sql
-   CREATE TABLE configs (
-       id INTEGER PRIMARY KEY AUTOINCREMENT,
-       config_name TEXT UNIQUE,
-       table_name TEXT,
-       json_data TEXT,
-       updated_at TIMESTAMP
-   )
-   ```
+**Connection Layer:**
 
-**Automatic Initialization:**
-
-- Database created on first application run
-- No manual SQL scripts required
-- Handles migrations automatically
+- `repositories/connection.py` — SQLAlchemy engine singleton + transaction management
+- `config.py::get_database_url()` — Reads `DATABASE_URL` from environment
+- All repository operations go through `get_transaction()` → `get_engine()`
 
 ### Schema Mapper Dual Mode (v8.0)
 
@@ -907,20 +941,27 @@ Every time you save a configuration, the system automatically:
 ```sql
 -- Main configuration table
 CREATE TABLE configs (
-    id TEXT PRIMARY KEY,              -- UUID for relationships
-    config_name TEXT UNIQUE,          -- User-facing name
-    table_name TEXT,                  -- Source table
-    json_data TEXT,                   -- Current config JSON
-    updated_at TIMESTAMP              -- Last modification
+    id UUID PRIMARY KEY,                -- UUID for relationships
+    config_name TEXT UNIQUE,            -- User-facing name
+    table_name TEXT,                    -- Source table
+    json_data TEXT,                     -- Current config JSON
+    datasource_source_id UUID,          -- FK to datasources
+    datasource_target_id UUID,          -- FK to datasources
+    config_type TEXT DEFAULT 'std',
+    script TEXT,
+    generate_sql TEXT,
+    condition TEXT,
+    lookup TEXT,
+    updated_at TIMESTAMP                -- Last modification
 );
 
 -- Version history table
 CREATE TABLE config_histories (
-    id TEXT PRIMARY KEY,              -- Unique history entry ID
-    config_id TEXT,                   -- Links to parent config
-    version INTEGER,                  -- Sequential version number
-    json_data TEXT,                   -- Config snapshot at this version
-    created_at TIMESTAMP,             -- When this version was created
+    id UUID PRIMARY KEY,                -- Unique history entry ID
+    config_id UUID,                     -- Links to parent config
+    version INTEGER,                    -- Sequential version number
+    json_data TEXT,                     -- Config snapshot at this version
+    created_at TIMESTAMP,               -- When this version was created
     FOREIGN KEY(config_id) REFERENCES configs(id) ON DELETE CASCADE
 );
 ```

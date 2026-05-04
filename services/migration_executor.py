@@ -656,13 +656,11 @@ def _prepare_select_query(
     if generate_sql:
         log("generate_sql found — using custom SQL (JOIN/WHERE included)", "📋")
         generate_sql = _qualify_sql_tables(generate_sql.rstrip(";"), src_db_type)
-        remapped = [
-            {**m, "source": m["target"]}
-            for m in config.get("mappings", [])
+        active_count = sum(
+            1 for m in config.get("mappings", [])
             if not m.get("ignore", False) and m.get("target")
-        ]
-        config = {**config, "mappings": remapped}
-        log(f"Remapped {len(remapped)} active mappings (source → target name)", "🔁")
+        )
+        log(f"Using {active_count} active source→target mappings for column rename", "🔁")
         return generate_sql, config
 
     log("generate_sql not set — using dynamic SELECT from mappings", "🔧")

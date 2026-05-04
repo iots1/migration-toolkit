@@ -236,6 +236,16 @@ def transform_batch(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, list[
     df.columns = df.columns.str.lower()
     df = df.loc[:, ~df.columns.duplicated(keep="first")]
 
+    active_targets = {
+        m["target"].lower()
+        for m in config.get("mappings", [])
+        if not m.get("ignore", False) and m.get("target")
+    }
+    if active_targets:
+        extra_cols = [c for c in df.columns if c not in active_targets]
+        if extra_cols:
+            df = df.drop(columns=extra_cols, errors="ignore")
+
     bit_columns = [
         m.get("target", "").lower()
         for m in config.get("mappings", [])

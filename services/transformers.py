@@ -48,8 +48,15 @@ class DataTransformer:
                 continue
 
             # Skip if source column doesn't exist
+            # When generate_sql aliases columns to target names, source_col
+            # won't be found but target_col may already be present.
             if source_col not in available_cols:
-                continue
+                if target_col in available_cols and not transformers:
+                    continue
+                elif target_col in available_cols:
+                    source_col = target_col
+                else:
+                    continue
 
             # Apply each transformer in sequence
             if transformers:

@@ -227,11 +227,24 @@ def transform_batch(df: pd.DataFrame, config: dict) -> tuple[pd.DataFrame, list[
 
     if transformer_created:
         df = df.drop(columns=transformer_created, errors="ignore")
+    ignored_sources = [
+        m["source"] for m in config.get("mappings", [])
+        if m.get("ignore", False) and m.get("source") in df.columns and m["source"] != m.get("target")
+    ]
+    df = df.drop(columns=ignored_sources, errors="ignore")
+
     if rename_map:
         df.rename(columns=rename_map, inplace=True)
 
-    ignored = [m["target"] for m in config.get("mappings", []) if m.get("ignore", False)]
-    df = df.drop(columns=[c for c in ignored if c in df.columns], errors="ignore")
+    active_in_df = {
+        m["target"] for m in config.get("mappings", [])
+        if not m.get("ignore", False) and m.get("target") and m["target"] in df.columns
+    }
+    ignored_targets = [
+        m["target"] for m in config.get("mappings", [])
+        if m.get("ignore", False) and m.get("target") in df.columns and m["target"] not in active_in_df
+    ]
+    df = df.drop(columns=ignored_targets, errors="ignore")
 
     df.columns = df.columns.str.lower()
     df = df.loc[:, ~df.columns.duplicated(keep="first")]

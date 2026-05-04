@@ -673,7 +673,9 @@ _COUNT_TIMEOUT_SECONDS = 10
 def _count_source_rows(engine, select_query: str, source_table: str) -> int:
     try:
         with engine.connect() as conn:
-            conn.execute(text(f"SET statement_timeout = {_COUNT_TIMEOUT_SECONDS * 1000}"))
+            dialect = engine.dialect.name if hasattr(engine, "dialect") else ""
+            if dialect == "postgresql":
+                conn.execute(text(f"SET statement_timeout = {_COUNT_TIMEOUT_SECONDS * 1000}"))
             count_sql = f"SELECT COUNT(*) FROM ({select_query}) AS _src_count"
             result = conn.execute(text(count_sql))
             return result.scalar() or 0

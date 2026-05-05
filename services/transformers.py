@@ -178,7 +178,10 @@ class DataTransformer:
                 return transformer_params['DEFAULT_VALUE'].get('value', None)
             return None
         
-        value_str = str(value)
+        if hasattr(value, 'strftime'):
+            value_str = value.strftime('%Y-%m-%d')
+        else:
+            value_str = str(value)
 
         # Basic text ops
         if transformer_name == "TRIM": return value_str.strip()
@@ -227,14 +230,14 @@ class DataTransformer:
             return get_default()
 
         try:
-            # Handle various separators
-            parts = re.split(r'[-/]', date_str.strip())
+            date_part = date_str.strip().split(' ')[0].split('T')[0]
+            parts = re.split(r'[-/]', date_part)
             if len(parts) == 3:
-                d, m, y = parts
-                # Logic to detect if year is BE (Thailand usually > 2400)
+                if len(parts[0]) == 4:
+                    y, m, d = parts
+                else:
+                    d, m, y = parts
                 year_val = int(y)
-                # BE years in Thailand are ~2500+; threshold >2400 avoids
-                # misidentifying Gregorian years (2001-2399) as Buddhist Era.
                 iso_year = year_val - 543 if year_val > 2400 else year_val
 
                 return f"{iso_year}-{m.zfill(2)}-{d.zfill(2)}"

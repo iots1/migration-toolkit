@@ -243,3 +243,120 @@ def test_replace_empty_with_null_transformer():
     assert pd.isna(result["val"].iloc[1])
     assert pd.isna(result["val"].iloc[2])
     assert result["val"].iloc[3] == "world"
+
+
+# ---------------------------------------------------------------------------
+# BUDDHIST_TO_ISO — datetime / time-component handling
+# ---------------------------------------------------------------------------
+
+
+def test_buddhist_to_iso_datetime_string_with_time():
+    """BUDDHIST_TO_ISO should handle datetime strings with time component.
+
+    Regression: str(datetime) produces "2024-01-15 00:00:00" which previously
+    caused int("15 00:00:00") → ValueError → None.
+    """
+    config = {
+        "mappings": [
+            {"source": "FirstVisit", "target": "registration_date", "transformers": ["BUDDHIST_TO_ISO"], "ignore": False},
+        ]
+    }
+    df = pd.DataFrame({"registration_date": ["2024-01-15 00:00:00", "2023-06-20 00:00:00"]})
+    result = DataTransformer.apply_transformers_to_batch(df.copy(), config)
+
+    assert result["registration_date"].iloc[0] == "2024-01-15"
+    assert result["registration_date"].iloc[1] == "2023-06-20"
+
+
+def test_buddhist_to_iso_pd_timestamp():
+    """BUDDHIST_TO_ISO should handle pd.Timestamp objects directly."""
+    config = {
+        "mappings": [
+            {"source": "FirstVisit", "target": "registration_date", "transformers": ["BUDDHIST_TO_ISO"], "ignore": False},
+        ]
+    }
+    df = pd.DataFrame({
+        "registration_date": pd.to_datetime(["2024-01-15", "2023-06-20"])
+    })
+    result = DataTransformer.apply_transformers_to_batch(df.copy(), config)
+
+    assert result["registration_date"].iloc[0] == "2024-01-15"
+    assert result["registration_date"].iloc[1] == "2023-06-20"
+
+
+def test_buddhist_to_iso_buddhist_date_with_time():
+    """BUDDHIST_TO_ISO should handle Buddhist dates with time component."""
+    config = {
+        "mappings": [
+            {"source": "BirthDate", "target": "birth_date", "transformers": ["BUDDHIST_TO_ISO"], "ignore": False},
+        ]
+    }
+    df = pd.DataFrame({"birth_date": ["15/01/2567 00:00:00", "20/06/2566 12:30:00"]})
+    result = DataTransformer.apply_transformers_to_batch(df.copy(), config)
+
+    assert result["birth_date"].iloc[0] == "2024-01-15"
+    assert result["birth_date"].iloc[1] == "2023-06-20"
+
+
+def test_buddhist_to_iso_standard_buddhist_date():
+    """BUDDHIST_TO_ISO should still handle standard dd/mm/yyyy Buddhist dates."""
+    config = {
+        "mappings": [
+            {"source": "BirthDate", "target": "birth_date", "transformers": ["BUDDHIST_TO_ISO"], "ignore": False},
+        ]
+    }
+    df = pd.DataFrame({"BirthDate": ["15/01/2567", "20/06/2566"]})
+    result = DataTransformer.apply_transformers_to_batch(df.copy(), config)
+
+    assert result["birth_date"].iloc[0] == "2024-01-15"
+    assert result["birth_date"].iloc[1] == "2023-06-20"
+
+
+def test_buddhist_to_iso_iso_format_date():
+    """BUDDHIST_TO_ISO should pass through ISO format (yyyy-mm-dd) dates unchanged."""
+    config = {
+        "mappings": [
+            {"source": "FirstVisit", "target": "registration_date", "transformers": ["BUDDHIST_TO_ISO"], "ignore": False},
+        ]
+    }
+    df = pd.DataFrame({"registration_date": ["2024-01-15", "2023-06-20"]})
+    result = DataTransformer.apply_transformers_to_batch(df.copy(), config)
+
+    assert result["registration_date"].iloc[0] == "2024-01-15"
+    assert result["registration_date"].iloc[1] == "2023-06-20"
+
+
+def test_buddhist_to_iso_nat_returns_none():
+    """BUDDHIST_TO_ISO should return None for NaT values."""
+    config = {
+        "mappings": [
+            {"source": "FirstVisit", "target": "registration_date", "transformers": ["BUDDHIST_TO_ISO"], "ignore": False},
+        ]
+    }
+    df = pd.DataFrame({"registration_date": [pd.NaT]})
+    result = DataTransformer.apply_transformers_to_batch(df.copy(), config)
+
+    assert pd.isna(result["registration_date"].iloc[0])
+
+
+def test_buddhist_to_iso_mixed_datetime_and_string():
+    """BUDDHIST_TO_ISO should handle a mix of Timestamp objects and string dates."""
+    config = {
+        "mappings": [
+            {"source": "FirstVisit", "target": "registration_date", "transformers": ["BUDDHIST_TO_ISO"], "ignore": False},
+        ]
+    }
+    df = pd.DataFrame({
+        "registration_date": [
+            pd.Timestamp("2024-01-15"),
+            "15/01/2567",
+            "2023-06-20 00:00:00",
+            None,
+        ]
+    })
+    result = DataTransformer.apply_transformers_to_batch(df.copy(), config)
+
+    assert result["registration_date"].iloc[0] == "2024-01-15"
+    assert result["registration_date"].iloc[1] == "2024-01-15"
+    assert result["registration_date"].iloc[2] == "2023-06-20"
+    assert pd.isna(result["registration_date"].iloc[3])

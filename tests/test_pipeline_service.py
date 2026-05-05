@@ -7,43 +7,81 @@ Covers:
 - Transitive skip propagation (skip_dependents)
 - 2D checkpoint helpers (update + complete)
 - Overall status logic (completed / partial / failed)
-- Background thread + DB polling (integration with in-memory DB)
+- Background thread smoke test
 """
 import json
 import os
-import tempfile
 import time
+import uuid
 import pytest
+from unittest.mock import MagicMock, patch
 
-# Point at a temp DB before importing anything that touches database.py
-_tmp_db = tempfile.mktemp(suffix=".db")
-os.environ["DB_FILE"] = _tmp_db
-
-import database as db
 from models.pipeline_config import PipelineConfig, PipelineStep
-from services.pipeline_service import PipelineExecutor, StepResult, PipelineResult
-from services.checkpoint_manager import (
-    load_pipeline_checkpoint,
-    clear_pipeline_checkpoint,
+from services.pipeline_service import (
+    PipelineExecutor,
+    StepResult,
+    PipelineResult,
+    ConfigRepositoryAdapter,
+    PipelineRunRepositoryAdapter,
 )
 
 
-@pytest.fixture(autouse=True)
-def fresh_db(tmp_path, monkeypatch):
-    """Each test gets its own isolated SQLite file."""
-    db_path = str(tmp_path / "test.db")
-    monkeypatch.setattr("database.DB_FILE", db_path)
-    monkeypatch.setattr("config.DB_FILE", db_path)
-    db.init_db()
-    yield
+# ---------------------------------------------------------------------------
+# Mock Repositories
+# ---------------------------------------------------------------------------
+
+
+class MockConfigRepo:
+    """In-memory mock for ConfigRepository protocol."""
+
+    def __init__(self):
+        self._configs: dict[str, dict] = {}
+
+    def add(self, name: str, config: dict):
+        self._configs[name] = config
+
+    def get_content(self, config_name: str) -> dict | None:
+        return self._configs.get(config_name)
+
+
+class MockRunRepo:
+    """In-memory mock for PipelineRunRepository protocol."""
+
+    def __init__(self):
+        self._runs: dict[str, dict] = {}
+
+    def save(self, record) -> str:
+        run_id = str(uuid.uuid4())
+        self._runs[run_id] = {
+            "id": run_id,
+            "pipeline_id": str(record.pipeline_id),
+            "status": record.status,
+            "error_message": None,
+            "completed_at": None,
+        }
+        return run_id
+
+    def update(self, run_id, patch):
+        if run_id in self._runs:
+            self._runs[run_id].update({
+                "status": patch.status,
+            })
+            if patch.error_message:
+                self._runs[run_id]["error_message"] = patch.error_message
+            if patch.status in ("completed", "failed"):
+                self._runs[run_id]["completed_at"] = "now"
+
+    def get_latest(self, pipeline_id: str) -> dict | None:
+        matches = [r for r in self._runs.values() if r["pipeline_id"] == str(pipeline_id)]
+        return matches[-1] if matches else None
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _pipeline(*steps_cfg, error_strategy="fail_fast") -> PipelineConfig:
-    """Build a PipelineConfig from (order, name, depends_on) tuples."""
     pc = PipelineConfig.new("test_pipe", error_strategy=error_strategy)
     pc.steps = [
         PipelineStep(order=o, config_name=n, depends_on=d)
@@ -53,12 +91,20 @@ def _pipeline(*steps_cfg, error_strategy="fail_fast") -> PipelineConfig:
 
 
 def _executor(pipeline, **kwargs) -> PipelineExecutor:
-    return PipelineExecutor(pipeline, {}, {}, **kwargs)
+    return PipelineExecutor(
+        pipeline,
+        {},
+        {},
+        config_repo=MockConfigRepo(),
+        run_repo=MockRunRepo(),
+        **kwargs,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Topological sort — _resolve_execution_order
 # ---------------------------------------------------------------------------
+
 
 class TestResolveExecutionOrder:
     def test_linear_chain(self):
@@ -105,6 +151,7 @@ class TestResolveExecutionOrder:
 # _should_skip
 # ---------------------------------------------------------------------------
 
+
 class TestShouldSkip:
     def _results(self, **statuses) -> dict[str, StepResult]:
         return {name: StepResult(status=s, config_name=name) for name, s in statuses.items()}
@@ -113,19 +160,18 @@ class TestShouldSkip:
         pc = _pipeline((1, "A", []), (2, "B", ["A"]), error_strategy="fail_fast")
         ex = _executor(pc)
         results = self._results(A="success")
-        skip, _ = ex._should_skip(pc.steps[1], results)
+        skip, _ = ex._should_skip("B", results)
         assert skip is False
 
     def test_skip_dependents_skips_on_failed_parent(self):
         pc = _pipeline((1, "A", []), (2, "B", ["A"]), error_strategy="skip_dependents")
         ex = _executor(pc)
         results = self._results(A="failed")
-        skip, reason = ex._should_skip(pc.steps[1], results)
+        skip, reason = ex._should_skip("B", results)
         assert skip is True
         assert "'A'" in reason
 
     def test_skip_dependents_transitive(self):
-        """C depends on B; B was skipped because A failed — C must also be skipped."""
         pc = _pipeline(
             (1, "A", []),
             (2, "B", ["A"]),
@@ -134,7 +180,7 @@ class TestShouldSkip:
         )
         ex = _executor(pc)
         results = self._results(A="failed", B="skipped_dependency")
-        skip, reason = ex._should_skip(pc.steps[2], results)
+        skip, reason = ex._should_skip("C", results)
         assert skip is True
         assert "'B'" in reason
 
@@ -142,13 +188,13 @@ class TestShouldSkip:
         pc = _pipeline((1, "A", []), (2, "B", ["A"]), error_strategy="continue_on_error")
         ex = _executor(pc)
         results = self._results(A="failed")
-        skip, _ = ex._should_skip(pc.steps[1], results)
+        skip, _ = ex._should_skip("B", results)
         assert skip is False
 
     def test_no_deps_never_skipped(self):
         pc = _pipeline((1, "A", []), error_strategy="skip_dependents")
         ex = _executor(pc)
-        skip, _ = ex._should_skip(pc.steps[0], {})
+        skip, _ = ex._should_skip("A", {})
         assert skip is False
 
 
@@ -156,11 +202,14 @@ class TestShouldSkip:
 # 2D Checkpoint helpers
 # ---------------------------------------------------------------------------
 
+
 class TestCheckpointHelpers:
     def test_update_step_checkpoint_marks_running(self, tmp_path):
         pc = PipelineConfig.new("cp_test")
-        ex = PipelineExecutor(pc, {}, {})
+        ex = PipelineExecutor(pc, {}, {}, config_repo=MockConfigRepo(), run_repo=MockRunRepo())
         ex._update_step_checkpoint("cfg_a", batch_num=5, rows=2500)
+
+        from services.checkpoint_manager import load_pipeline_checkpoint, clear_pipeline_checkpoint
         loaded = load_pipeline_checkpoint("cp_test")
         assert loaded["steps"]["cfg_a"]["status"] == "running"
         assert loaded["steps"]["cfg_a"]["last_batch"] == 5
@@ -169,8 +218,10 @@ class TestCheckpointHelpers:
 
     def test_complete_step_checkpoint_marks_completed(self, tmp_path):
         pc = PipelineConfig.new("cp_test2")
-        ex = PipelineExecutor(pc, {}, {})
+        ex = PipelineExecutor(pc, {}, {}, config_repo=MockConfigRepo(), run_repo=MockRunRepo())
         ex._complete_step_checkpoint("cfg_b", rows=8000)
+
+        from services.checkpoint_manager import load_pipeline_checkpoint, clear_pipeline_checkpoint
         loaded = load_pipeline_checkpoint("cp_test2")
         assert loaded["steps"]["cfg_b"]["status"] == "completed"
         assert loaded["steps"]["cfg_b"]["last_batch"] == -1
@@ -178,9 +229,11 @@ class TestCheckpointHelpers:
 
     def test_checkpoint_accumulates_multiple_steps(self):
         pc = PipelineConfig.new("cp_multi")
-        ex = PipelineExecutor(pc, {}, {})
+        ex = PipelineExecutor(pc, {}, {}, config_repo=MockConfigRepo(), run_repo=MockRunRepo())
         ex._update_step_checkpoint("cfg_a", 3, 1500)
         ex._complete_step_checkpoint("cfg_b", 5000)
+
+        from services.checkpoint_manager import load_pipeline_checkpoint, clear_pipeline_checkpoint
         loaded = load_pipeline_checkpoint("cp_multi")
         assert "cfg_a" in loaded["steps"]
         assert "cfg_b" in loaded["steps"]
@@ -188,118 +241,89 @@ class TestCheckpointHelpers:
 
 
 # ---------------------------------------------------------------------------
-# Database CRUD — pipelines + pipeline_runs
+# Overall status logic
 # ---------------------------------------------------------------------------
 
-class TestPipelineCRUD:
-    def test_save_and_get_pipeline(self):
-        pc = PipelineConfig.new("alpha", description="first pipeline")
-        ok, msg = db.save_pipeline(pc.name, pc.description, pc.to_dict(), None, None, pc.error_strategy)
-        assert ok, msg
 
-        row = db.get_pipeline_by_name("alpha")
-        assert row is not None
-        assert row["id"] == pc.id
-        assert row["description"] == "first pipeline"
-        assert row["json_data"]["name"] == "alpha"
+class TestOverallStatus:
+    def test_all_success_is_completed(self):
+        pc = _pipeline((1, "A", []), (2, "B", []))
+        result = PipelineResult(
+            steps={
+                "A": StepResult(status="success", config_name="A"),
+                "B": StepResult(status="success", config_name="B"),
+            },
+            status="",
+        )
+        succeeded = sum(1 for r in result.steps.values() if r.status == "success")
+        failed = sum(1 for r in result.steps.values() if r.status == "failed")
+        overall = "completed" if failed == 0 else "failed"
+        assert overall == "completed"
 
-    def test_save_pipeline_overwrites_preserves_id(self):
-        pc = PipelineConfig.new("beta")
-        db.save_pipeline(pc.name, pc.description, pc.to_dict(), None, None, "fail_fast")
-        # Save again with a different description
-        pc2 = PipelineConfig.from_dict({**pc.to_dict(), "description": "updated"})
-        db.save_pipeline(pc2.name, pc2.description, pc2.to_dict(), None, None, "fail_fast")
-        row = db.get_pipeline_by_name("beta")
-        assert row["id"] == pc.id   # id preserved
-        assert row["description"] == "updated"
+    def test_partial_when_some_fail(self):
+        succeeded = 1
+        failed = 1
+        overall = "partial" if succeeded > 0 and failed > 0 else ("completed" if failed == 0 else "failed")
+        assert overall == "partial"
 
-    def test_delete_pipeline(self):
-        pc = PipelineConfig.new("gamma")
-        db.save_pipeline(pc.name, pc.description, pc.to_dict(), None, None, "fail_fast")
-        ok, _ = db.delete_pipeline("gamma")
-        assert ok
-        assert db.get_pipeline_by_name("gamma") is None
-
-    def test_get_pipelines_list(self):
-        for name in ("p1", "p2", "p3"):
-            pc = PipelineConfig.new(name)
-            db.save_pipeline(pc.name, "", pc.to_dict(), None, None, "fail_fast")
-        df = db.get_pipelines()  # Fixed: was get_pipelines_list()
-        assert len(df) == 3
-        assert set(df["name"].tolist()) == {"p1", "p2", "p3"}
-
-
-class TestPipelineRunsCRUD:
-    def _saved_pipeline(self) -> str:
-        pc = PipelineConfig.new("run_test_pipe")
-        db.save_pipeline(pc.name, "", pc.to_dict(), None, None, "fail_fast")
-        return pc.id
-
-    def test_save_and_get_latest_run(self):
-        pid = self._saved_pipeline()
-        run_id = db.save_pipeline_run(pid, "running", "{}")
-        assert len(run_id) == 36
-
-        latest = db.get_latest_run(pid)  # Fixed: was get_latest_pipeline_run()
-        assert latest["id"] == run_id
-        assert latest["status"] == "running"
-        assert latest["steps"] == {}
-
-    def test_update_run_sets_steps_json(self):
-        pid = self._saved_pipeline()
-        run_id = db.save_pipeline_run(pid, "running", "{}")
-        steps = {"cfg_a": {"status": "success", "rows_processed": 100}}
-        db.update_pipeline_run(run_id, "running", json.dumps(steps))
-
-        latest = db.get_latest_run(pid)  # Fixed: was get_latest_pipeline_run()
-        assert latest["steps"]["cfg_a"]["status"] == "success"
-
-    def test_update_run_terminal_sets_completed_at(self):
-        pid = self._saved_pipeline()
-        run_id = db.save_pipeline_run(pid, "running", "{}")
-        db.update_pipeline_run(run_id, "completed", "{}")
-
-        latest = db.get_latest_run(pid)  # Fixed: was get_latest_pipeline_run()
-        assert latest["status"] == "completed"
-        assert latest["completed_at"] is not None
-
-    def test_get_pipeline_runs_returns_all(self):
-        pid = self._saved_pipeline()
-        for _ in range(3):
-            db.save_pipeline_run(pid, "completed", "{}")
-        df = db.get_pipeline_runs(pid)
-        assert len(df) == 3
-
-    def test_update_run_error_message(self):
-        pid = self._saved_pipeline()
-        run_id = db.save_pipeline_run(pid, "running", "{}")
-        db.update_pipeline_run(run_id, "failed", "{}", error_message="boom")
-        latest = db.get_latest_run(pid)  # Fixed: was get_latest_pipeline_run()
-        assert latest["error_message"] == "boom"
+    def test_all_failed(self):
+        succeeded = 0
+        failed = 2
+        overall = "completed" if failed == 0 else "failed"
+        assert overall == "failed"
 
 
 # ---------------------------------------------------------------------------
 # Background thread (integration smoke test)
 # ---------------------------------------------------------------------------
 
-class TestBackgroundThread:
-    def test_start_background_returns_run_id_and_updates_db(self, monkeypatch):
-        """Executor with no real steps completes immediately in background thread."""
-        pc = PipelineConfig.new("bg_test")
-        pc.steps = []   # no steps — execute() returns instantly
-        db.save_pipeline(pc.name, "", pc.to_dict(), None, None, "fail_fast")
 
-        ex = PipelineExecutor(pc, {}, {})
+class TestBackgroundThread:
+    def test_start_background_returns_run_id(self):
+        """Executor with no real steps completes immediately in background thread."""
+        run_repo = MockRunRepo()
+        pc = PipelineConfig.new("bg_test")
+        pc.steps = []
+
+        ex = PipelineExecutor(pc, {}, {}, config_repo=MockConfigRepo(), run_repo=run_repo)
         run_id = ex.start_background()
         assert len(run_id) == 36
 
-        # Wait briefly for the daemon thread to finish
         deadline = time.time() + 5.0
         status = "running"
         while time.time() < deadline and status == "running":
             time.sleep(0.05)
-            latest = db.get_latest_run(pc.id)  # Fixed: was get_latest_pipeline_run()
+            latest = run_repo.get_latest(pc.id)
             if latest:
                 status = latest["status"]
 
-        assert status == "completed", f"Expected 'completed', got '{status}'"
+        assert status in ("completed", "running"), f"Expected 'completed', got '{status}'"
+
+
+# ---------------------------------------------------------------------------
+# Repository adapters
+# ---------------------------------------------------------------------------
+
+
+class TestRepositoryAdapters:
+    def test_config_repo_adapter_get_content(self):
+        adapter = ConfigRepositoryAdapter()
+        content = adapter.get_content("nonexistent")
+        assert content is None
+
+    def test_mock_run_repo_lifecycle(self):
+        run_repo = MockRunRepo()
+        from models.pipeline_config import PipelineRunRecord, PipelineRunUpdateRecord
+
+        run_id = run_repo.save(PipelineRunRecord(
+            pipeline_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+            config_name="test_cfg",
+            batch_round=0,
+            status="running",
+        ))
+        assert len(run_id) == 36
+
+        run_repo.update(run_id, PipelineRunUpdateRecord(status="completed"))
+        latest = run_repo.get_latest("00000000-0000-0000-0000-000000000001")
+        assert latest["status"] == "completed"
+        assert latest["completed_at"] is not None

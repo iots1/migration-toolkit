@@ -49,10 +49,12 @@ bash unified_db_analyzer.sh
 ### Tests
 
 ```bash
-python3.11 -m pytest tests/ -v
+./venv/bin/python -m pytest tests/ -v
 python test_analysis_simple.py   # AI pattern detection tests
 python test_column_analysis.py   # Column analysis tests
 ```
+
+**IMPORTANT**: Every code change MUST pass `make test` before committing. If tests fail, fix them before asking the user to review.
 
 ### Migration (SQLite → PostgreSQL)
 
@@ -200,7 +202,18 @@ Dual-interface HIS (Hospital Information System) database migration toolkit with
 │   └── migrate_add_jobs_table.py   # Create jobs table + add job_id to pipeline_runs
 │
 └── tests/                          # Test suite
-    └── test_pipeline_service.py
+    ├── conftest.py
+    ├── test_checkpoint_manager.py
+    ├── test_encoding_helper.py
+    ├── test_helpers.py
+    ├── test_migration_executor.py
+    ├── test_migration_logger.py
+    ├── test_models.py
+    ├── test_pipeline_config.py
+    ├── test_pipeline_service.py
+    ├── test_query_builder.py
+    ├── test_transform_batch.py
+    └── test_transformers.py
 ```
 
 ### Key Files & Their Status

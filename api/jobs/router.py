@@ -50,6 +50,11 @@ class JobsController(BaseController):
 
         self.router.get("/{job_id}/pipeline-runs")(list_pipeline_runs)
 
+        def cancel_job(job_id: str):
+            return svc.cancel(job_id)
+
+        self.router.post("/{job_id}/cancel", summary="Cancel a running job")(cancel_job)
+
 
 def get_jobs_router():
     service = JobsService(emit_fn=emit_from_thread)

@@ -11,6 +11,7 @@ from __future__ import annotations  # Enable modern type hints
 
 import os
 import json
+import re
 import pandas as pd
 import streamlit as st
 
@@ -433,7 +434,11 @@ def build_preview_sql(config_data: dict, limit: int = 1000, db_type: str = "") -
         sql += f"\n{lookup}"
 
     if condition:
-        sql += f"\nWHERE {condition}"
+        already_has_where = bool(lookup and re.search(r"\bWHERE\b", lookup, re.IGNORECASE))
+        if already_has_where:
+            sql += f"\nAND {condition}"
+        else:
+            sql += f"\nWHERE {condition}"
 
     if not is_mssql:
         sql += f"\nLIMIT {limit};"

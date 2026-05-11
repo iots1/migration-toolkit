@@ -171,6 +171,7 @@ def run_single_migration(
                 tgt_engine=tgt_engine,
                 start_time=start_time,
                 log=log,
+                job_id=job_id,
             )
         finally:
             tgt_engine.dispose()
@@ -590,6 +591,7 @@ def _run_custom_script(
     tgt_engine,
     start_time: float,
     log: LogCallback,
+    job_id: str | None = None,
 ) -> MigrationResult:
     config_name = config.get("config_name", "custom")
     script: str = (config.get("script") or "").strip()
@@ -608,26 +610,48 @@ def _run_custom_script(
     statements = _split_sql_statements(script)
     log(f"[{config_name}] Running custom script ({len(statements)} statement(s))", "📝")
 
+    if job_id:
+        _write_heartbeat(job_id, config_name, 0)
+
+    _hb_stop = threading.Event()
+
+    def _hb_keeper():
+        while not _hb_stop.wait(60):
+            if job_id:
+                _write_heartbeat(job_id, config_name, 0)
+
+    hb_thread = None
+    if job_id:
+        hb_thread = threading.Thread(target=_hb_keeper, daemon=True, name="custom-hb")
+        hb_thread.start()
+
     rows_affected = 0
-    with tgt_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        conn.execute(text("SET statement_timeout = 0"))
-        for idx, stmt in enumerate(statements, start=1):
-            try:
-                result = conn.execute(text(stmt))
-                affected = result.rowcount if result.rowcount != -1 else 0
-                rows_affected += max(affected, 0)
-                log(f"  Statement {idx}/{len(statements)}: OK (rows affected: {affected})", "✅")
-            except Exception as e:
-                short_err = str(e).split("[SQL:")[0].strip()[:300]
-                msg = f"Statement {idx} failed: {short_err}"
-                log(f"[{config_name}] {msg}", "❌")
-                return MigrationResult(
-                    status="failed",
-                    rows_processed=rows_affected,
-                    batch_count=idx,
-                    duration_seconds=time.time() - start_time,
-                    error_message=msg,
-                )
+    try:
+        with tgt_engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("SET statement_timeout = 0"))
+            for idx, stmt in enumerate(statements, start=1):
+                try:
+                    result = conn.execute(text(stmt))
+                    affected = result.rowcount if result.rowcount != -1 else 0
+                    rows_affected += max(affected, 0)
+                    log(f"  Statement {idx}/{len(statements)}: OK (rows affected: {affected})", "✅")
+                    if job_id:
+                        _write_heartbeat(job_id, config_name, idx)
+                except Exception as e:
+                    short_err = str(e).split("[SQL:")[0].strip()[:300]
+                    msg = f"Statement {idx} failed: {short_err}"
+                    log(f"[{config_name}] {msg}", "❌")
+                    return MigrationResult(
+                        status="failed",
+                        rows_processed=rows_affected,
+                        batch_count=idx,
+                        duration_seconds=time.time() - start_time,
+                        error_message=msg,
+                    )
+    finally:
+        _hb_stop.set()
+        if hb_thread:
+            hb_thread.join(timeout=5)
 
     duration = time.time() - start_time
     log(

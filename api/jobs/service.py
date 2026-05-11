@@ -34,6 +34,8 @@ class JobsService(BaseService):
         "created_at",
     ]
 
+    _shutdown_events: dict[str, threading.Event] = {}
+
     def __init__(self, emit_fn=None):
         self._emit_fn = emit_fn
 
@@ -200,6 +202,7 @@ class JobsService(BaseService):
         config_repo = ConfigRepositoryAdapter()
         run_repo = PipelineRunRepositoryAdapter(job_id=job_id)
         shutdown_event = threading.Event()
+        JobsService._shutdown_events[job_id_str] = shutdown_event
 
         def run_event_callback(event_name: str, data: dict) -> None:
             emit(event_name, data)
@@ -224,6 +227,27 @@ class JobsService(BaseService):
             "pipeline_id": pipeline_id_str,
             "status": "running",
         }
+
+
+    def cancel(self, job_id: str) -> dict:
+        parsed_id = self._parse_uuid(job_id)
+        job = self.execute_db_operation(lambda: job_repo.get_by_id(parsed_id))
+        self._assert_found(job, job_id)
+        if job["status"] != "running":
+            raise HTTPException(status_code=409, detail=f"Job is '{job['status']}', not running")
+        event = JobsService._shutdown_events.get(job_id)
+        if event:
+            event.set()
+        self.execute_db_operation(
+            lambda: job_repo.update(
+                parsed_id,
+                JobUpdateRecord(
+                    status="interrupted",
+                    error_message="Cancelled by user",
+                ),
+            )
+        )
+        return {"job_id": job_id, "status": "interrupted"}
 
 
 def _noop_emit(event: str, data: dict) -> None:
